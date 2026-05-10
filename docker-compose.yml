@@ -1,0 +1,36 @@
+# /seasons_erp/docker-compose.yml
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: seasons_db
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      # This creates the visible folder for your backups!
+      - ./db_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    container_name: seasons_backend
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      - db
+    # We don't expose ports here because Nginx handles all outside traffic
+
+  frontend:
+    build: ./frontend
+    container_name: seasons_frontend
+    restart: always
+    ports:
+      - "80:80" # This opens your app to the world on standard HTTP
+    depends_on:
+      - backend
