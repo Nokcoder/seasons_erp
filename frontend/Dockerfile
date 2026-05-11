@@ -1,7 +1,7 @@
 # /seasons_erp/frontend/Dockerfile
 
 # Stage 1: Build the React/Vite app
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
