@@ -147,7 +147,7 @@ export default function PurchaseOrders() {
 
   const updateStatus = async (poId: number, newStatus: string) => {
     try {
-      await fetch(`http://127.0.0.1:8000/api/procurement/orders/${poId}/status`, {
+      await fetch(`import.meta.env.VITE_API_URL/api/procurement/orders/${poId}/status`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
       });

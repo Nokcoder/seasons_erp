@@ -1,6 +1,6 @@
 // frontend/src/services/api.ts
 
-const API_BASE_URL = 'http://127.0.0.1:8000/api';
+const API_BASE_URL = 'import.meta.env.VITE_API_URL/api';
 
 // ==========================================
 // 1. NESTED BLUEPRINTS (Must come first!)
@@ -514,7 +514,7 @@ export const createPurchaseOrder = async (data: any): Promise<PurchaseOrder> => 
 // --- SALES & POS API ---
 export const createSale = async (payload: any) => {
   try {
-    const response = await fetch(`http://127.0.0.1:8000/api/sales`, {
+    const response = await fetch(`import.meta.env.VITE_API_URL/api/sales`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -547,7 +547,7 @@ export const fetchSalesDashboard = async (params: { start_date?: string, end_dat
   if (params.end_date) query.append('end_date', params.end_date);
   if (params.search) query.append('search', params.search);
 
-  const response = await fetch(`http://127.0.0.1:8000/api/sales?${query.toString()}`);
+  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales?${query.toString()}`);
   if (!response.ok) throw new Error("Failed to fetch sales data");
   return await response.json();
 };
@@ -559,11 +559,11 @@ export const exportSalesToExcel = async (params: { start_date?: string, end_date
   if (params.search) query.append('search', params.search);
 
   // Use window.open to let the browser natively handle the file download trigger
-  window.open(`http://127.0.0.1:8000/api/sales/export?${query.toString()}`, '_blank');
+  window.open(`import.meta.env.VITE_API_URL/api/sales/export?${query.toString()}`, '_blank');
 };
 
 export const fetchPosSettings = async () => {
-  const response = await fetch(`http://127.0.0.1:8000/api/sales/settings`);
+  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales/settings`);
   if (!response.ok) {
     // If the settings don't exist yet, return a safe default
     return { is_vat_enabled: false, vat_rate: 0.12 };
@@ -572,7 +572,7 @@ export const fetchPosSettings = async () => {
 };
 
 export const fetchSaleDetails = async (sales_id: number) => {
-  const response = await fetch(`http://127.0.0.1:8000/api/sales/detail/${sales_id}`);
+  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales/detail/${sales_id}`);
   if (!response.ok) throw new Error("Failed to fetch sale details");
   return await response.json();
 };

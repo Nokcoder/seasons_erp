@@ -48,7 +48,7 @@ export default function BulkImportModal({ isOpen, onClose, onImportComplete }: {
                 setParsedRows(formattedRows);
 
                 // Send to Preview Endpoint
-                const response = await fetch('http://127.0.0.1:8000/api/inventory/products/import-preview', {
+                const response = await fetch('import.meta.env.VITE_API_URL/api/inventory/products/import-preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(formattedRows)
@@ -73,7 +73,7 @@ export default function BulkImportModal({ isOpen, onClose, onImportComplete }: {
     const handleConfirm = async () => {
         setIsProcessing(true);
         try {
-            const response = await fetch('http://127.0.0.1:8000/api/inventory/products/import-confirm', {
+            const response = await fetch('import.meta.env.VITE_API_URL/api/inventory/products/import-confirm', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(parsedRows)

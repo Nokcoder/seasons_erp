@@ -49,12 +49,12 @@ export default function GoodsReceipts() {
 
   const loadData = () => {
     setLoading(true);
-    fetch('http://127.0.0.1:8000/api/procurement/receipts')
+    fetch('import.meta.env.VITE_API_URL/api/procurement/receipts')
       .then(res => res.json())
       .then(data => setReceipts(data))
       .catch(console.error);
 
-    fetch('http://127.0.0.1:8000/api/auth/users') 
+    fetch('import.meta.env.VITE_API_URL/api/auth/users') 
       .then(res => res.ok ? res.json() : [])
       .then(data => setUsers(data))
       .catch(console.error);
@@ -266,10 +266,10 @@ export default function GoodsReceipts() {
     };
     try {
       const method = editingId ? 'PUT' : 'POST';
-      const url = editingId ? `http://127.0.0.1:8000/api/procurement/receipts/${editingId}` : `http://127.0.0.1:8000/api/procurement/receipts`;
+      const url = editingId ? `import.meta.env.VITE_API_URL/api/procurement/receipts/${editingId}` : `import.meta.env.VITE_API_URL/api/procurement/receipts`;
       const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json();
-      if (isDirectConfirm && data.grn_id) await fetch(`http://127.0.0.1:8000/api/procurement/receipts/${data.grn_id}/confirm`, { method: 'PUT' });
+      if (isDirectConfirm && data.grn_id) await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${data.grn_id}/confirm`, { method: 'PUT' });
       setIsFormModalOpen(false); resetForm(); loadData();
     } catch (err) { alert("Failed to save draft."); } finally { setSaving(false); }
   };
@@ -277,7 +277,7 @@ export default function GoodsReceipts() {
   const handleConfirmGRN = async (grnId: number) => {
     if (!window.confirm("Are you sure? This will officially add stock to the warehouse.")) return;
     try {
-      await fetch(`http://127.0.0.1:8000/api/procurement/receipts/${grnId}/confirm`, { method: 'PUT' });
+      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}/confirm`, { method: 'PUT' });
       setViewGRN(null); loadData(); alert("Stock successfully added!");
     } catch (err) { alert("Failed to confirm stock."); }
   };
@@ -285,7 +285,7 @@ export default function GoodsReceipts() {
   const handleDeleteDraft = async (grnId: number) => {
     if (!window.confirm("Are you sure you want to completely delete this Draft?")) return;
     try {
-      await fetch(`http://127.0.0.1:8000/api/procurement/receipts/${grnId}`, { method: 'DELETE' });
+      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}`, { method: 'DELETE' });
       setViewGRN(null); loadData();
     } catch (err) { alert("Failed to delete draft."); }
   };
@@ -293,7 +293,7 @@ export default function GoodsReceipts() {
   const handleVoidGRN = async (grnId: number) => {
     if (!window.confirm("WARNING: This will officially reverse the inventory stock and mark this GRN as VOID. This action is permanent. Continue?")) return;
     try {
-      await fetch(`http://127.0.0.1:8000/api/procurement/receipts/${grnId}/void`, { method: 'PUT' });
+      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}/void`, { method: 'PUT' });
       setViewGRN(null); loadData(); alert("GRN voided and stock correctly reversed.");
     } catch (err) { alert("Failed to void GRN."); }
   };
