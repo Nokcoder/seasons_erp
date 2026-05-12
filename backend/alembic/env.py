@@ -31,7 +31,7 @@ db_name = os.getenv("DB_NAME")
 safe_password = quote_plus(db_password)
 
 # 4. Stitch the URL together and inject it into Alembic's config
-database_url = f"postgresql+psycopg2://{db_user}:{safe_password}@{db_host}:{db_port}/{db_name}"
+database_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 config.set_main_option("sqlalchemy.url", database_url)
 
 
