@@ -1,6 +1,6 @@
 // frontend/src/services/api.ts
 
-const API_BASE_URL = 'import.meta.env.VITE_API_URL/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL + '/api';
 
 // ==========================================
 // 1. NESTED BLUEPRINTS (Must come first!)

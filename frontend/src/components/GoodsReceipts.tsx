@@ -49,12 +49,12 @@ export default function GoodsReceipts() {
 
   const loadData = () => {
     setLoading(true);
-    fetch('import.meta.env.VITE_API_URL/api/procurement/receipts')
+    fetch(import.meta.env.VITE_API_URL + '/api/procurement/receipts')
       .then(res => res.json())
       .then(data => setReceipts(data))
       .catch(console.error);
 
-    fetch('import.meta.env.VITE_API_URL/api/auth/users') 
+    fetch(import.meta.env.VITE_API_URL + '/api/auth/users') 
       .then(res => res.ok ? res.json() : [])
       .then(data => setUsers(data))
       .catch(console.error);
