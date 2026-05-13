@@ -1,7 +1,17 @@
-# /seasons_erp/docker-compose.yml
 version: '3.8'
 
 services:
+  nginx:
+    image: nginx:alpine
+    container_name: erp_nginx
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - backend
+
   db:
     image: postgres:15-alpine
     container_name: seasons_db
@@ -13,7 +23,6 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     volumes:
-      # This creates the visible folder for your backups!
       - ./db_data:/var/lib/postgresql/data
 
   backend:
@@ -24,16 +33,12 @@ services:
       - .env
     depends_on:
       - db
-    ports:
-      - "8000:8000"
-    # We don't expose ports here because Nginx handles all outside traffic
+    # REMOVED PORTS: Only Nginx can talk to the backend now
 
   frontend:
     build: ./frontend
     container_name: seasons_frontend
+    environment:
+      - VITE_API_URL=/api
     restart: always
-    ports:
-      - "80:80" # This opens your app to the world on standard HTTP
-
-    depends_on:
-      - backend
+    # REMOVED PORTS: Only Nginx can talk to the frontend now

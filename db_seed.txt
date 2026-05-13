@@ -1,0 +1,7 @@
+INSERT INTO auth.users (username, hashed_password, role, is_active) VALUES
+    ('admin', crypt('Omni4GangSockets', gen_salt('bf')), 'admin', true);
+
+INSERT INTO inventory.locations (name, description) VALUES
+    ('Bredco Warehouse', 'Default main storage facility'),
+    ('Atrium', 'Store'),
+    ('LopezJaena', 'Store');

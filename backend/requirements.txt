@@ -2,7 +2,7 @@ alembic
 annotated-doc
 annotated-types
 anyio
-bcrypt
+bcrypt==3.2.2
 cffi
 click
 colorama
