@@ -24,6 +24,8 @@ services:
       - .env
     depends_on:
       - db
+    ports:
+      - "8000:8000"
     # We don't expose ports here because Nginx handles all outside traffic
 
   frontend:
@@ -32,5 +34,6 @@ services:
     restart: always
     ports:
       - "80:80" # This opens your app to the world on standard HTTP
+
     depends_on:
       - backend
