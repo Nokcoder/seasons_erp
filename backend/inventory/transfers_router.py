@@ -9,7 +9,7 @@ from inventory import models, schemas
 
 from auth.dependencies import require_permission
 
-router = APIRouter(prefix="/api/transfers", tags=["Stock Transfers"])
+router = APIRouter(prefix="/transfers", tags=["Stock Transfers"])
 
 
 # ==========================================

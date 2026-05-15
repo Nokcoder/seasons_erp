@@ -10,7 +10,7 @@ from core.database import get_db
 from inventory import models, schemas
 import math
 
-router = APIRouter(prefix="/api/products", tags=["Products"])
+router = APIRouter(prefix="/products", tags=["Products"])
 
 # 1. READ ALL (For the Dashboard)
 @router.get("/", response_model=List[schemas.ProductSchema])

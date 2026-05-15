@@ -16,13 +16,13 @@ from sales import schemas as sales_schemas
 from inventory import models as inventory_models
 from auth import models as auth_models
 
-router = APIRouter()
+router = APIRouter(prefix="/sales", tags=["sales"])
 
 
 # ---------------------------------------------------------
 # 1. CREATE SALE (POST) - Used by the POS
 # ---------------------------------------------------------
-@router.post("/api/sales", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 def create_sale(payload: sales_schemas.SaleCreatePayload, db: Session = Depends(get_db)):
     try:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -112,7 +112,7 @@ def create_sale(payload: sales_schemas.SaleCreatePayload, db: Session = Depends(
 # ---------------------------------------------------------
 # 2. GET DASHBOARD DATA (GET) - Used by SalesLedger.tsx
 # ---------------------------------------------------------
-@router.get("/api/sales", response_model=sales_schemas.SalesDashboardResponse)
+@router.get("", response_model=sales_schemas.SalesDashboardResponse)
 def get_sales_dashboard(
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -206,7 +206,7 @@ def get_sales_dashboard(
 # ---------------------------------------------------------
 # 3. EXPORT EXCEL (GET) - Used by the Export Button
 # ---------------------------------------------------------
-@router.get("/api/sales/export")
+@router.get("/export")
 def export_sales_excel(
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -294,7 +294,7 @@ def export_sales_excel(
         ws2.write(row_num, 4, p.name, border)
         ws2.write_number(row_num, 5, i.qty, border)
         ws2.write_number(row_num, 6, float(i.price), money)
-        ws2.write_number(row_num, 7, float(i.discount), money)
+        ws2.write_number(row_num, 7, total_item_discount, money)
         ws2.write_number(row_num, 8, float(i.net_cost) if i.net_cost else 0, money)
         ws2.write_number(row_num, 9, ext_price, money)
         ws2.write_number(row_num, 10, margin, money)
@@ -309,7 +309,7 @@ def export_sales_excel(
     )
 
 # GET POS Settings
-@router.get("/api/sales/settings")
+@router.get("/settings")
 def get_pos_settings(db: Session = Depends(get_db)):
     settings = db.query(sales_models.PosSettings).first()
     if not settings:
@@ -319,7 +319,7 @@ def get_pos_settings(db: Session = Depends(get_db)):
 
 # Add this route to backend/sales/router.py
 
-@router.get("/api/sales/detail/{sales_id}", response_model=sales_schemas.SaleDeepDetailResponse)
+@router.get("/detail/{sales_id}", response_model=sales_schemas.SaleDeepDetailResponse)
 def get_sale_details(sales_id: int, db: Session = Depends(get_db)):
     # 1. Fetch the Master Header
     sale = db.query(sales_models.SalesHeader).filter(

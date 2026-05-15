@@ -49,12 +49,14 @@ export default function GoodsReceipts() {
 
   const loadData = () => {
     setLoading(true);
-    fetch(import.meta.env.VITE_API_URL + '/api/procurement/receipts')
+    // FIX: Removed hardcoded /api
+    fetch(import.meta.env.VITE_API_URL + '/procurement/receipts')
       .then(res => res.json())
       .then(data => setReceipts(data))
       .catch(console.error);
 
-    fetch(import.meta.env.VITE_API_URL + '/api/auth/users') 
+    // FIX: Removed hardcoded /api
+    fetch(import.meta.env.VITE_API_URL + '/auth/users') 
       .then(res => res.ok ? res.json() : [])
       .then(data => setUsers(data))
       .catch(console.error);
@@ -182,6 +184,22 @@ export default function GoodsReceipts() {
     setSearchQuery('');
   };
 
+  const handleDownloadTemplate = () => {
+    // Create some dummy data to show the user how it works
+    const templateData = [
+      { PID: 'PRD-0001', QTY: 50, Notes: 'Replace with your actual PID and Quantity.' },
+      { PID: 'PRD-0002', QTY: 120, Notes: 'Rows with 0 QTY or an empty PID will be ignored.' }
+    ];
+    
+    // Create the worksheet and workbook
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "GRN_Template");
+    
+    // Trigger the browser download
+    XLSX.writeFile(workbook, "GRN_Import_Template.xlsx");
+  };
+
   // --- EXCEL & LINE ITEM LOGIC ---
   const handleExcelImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -266,10 +284,12 @@ export default function GoodsReceipts() {
     };
     try {
       const method = editingId ? 'PUT' : 'POST';
-      const url = editingId ? `import.meta.env.VITE_API_URL/api/procurement/receipts/${editingId}` : `import.meta.env.VITE_API_URL/api/procurement/receipts`;
+      // FIX: Removed hardcoded /api
+      const url = editingId ? `${import.meta.env.VITE_API_URL}/procurement/receipts/${editingId}` : `${import.meta.env.VITE_API_URL}/procurement/receipts`;
       const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json();
-      if (isDirectConfirm && data.grn_id) await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${data.grn_id}/confirm`, { method: 'PUT' });
+      // FIX: Removed hardcoded /api
+      if (isDirectConfirm && data.grn_id) await fetch(`${import.meta.env.VITE_API_URL}/procurement/receipts/${data.grn_id}/confirm`, { method: 'PUT' });
       setIsFormModalOpen(false); resetForm(); loadData();
     } catch (err) { alert("Failed to save draft."); } finally { setSaving(false); }
   };
@@ -277,7 +297,8 @@ export default function GoodsReceipts() {
   const handleConfirmGRN = async (grnId: number) => {
     if (!window.confirm("Are you sure? This will officially add stock to the warehouse.")) return;
     try {
-      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}/confirm`, { method: 'PUT' });
+      // FIX: Removed hardcoded /api
+      await fetch(`${import.meta.env.VITE_API_URL}/procurement/receipts/${grnId}/confirm`, { method: 'PUT' });
       setViewGRN(null); loadData(); alert("Stock successfully added!");
     } catch (err) { alert("Failed to confirm stock."); }
   };
@@ -285,7 +306,8 @@ export default function GoodsReceipts() {
   const handleDeleteDraft = async (grnId: number) => {
     if (!window.confirm("Are you sure you want to completely delete this Draft?")) return;
     try {
-      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}`, { method: 'DELETE' });
+      // FIX: Removed hardcoded /api
+      await fetch(`${import.meta.env.VITE_API_URL}/procurement/receipts/${grnId}`, { method: 'DELETE' });
       setViewGRN(null); loadData();
     } catch (err) { alert("Failed to delete draft."); }
   };
@@ -293,7 +315,8 @@ export default function GoodsReceipts() {
   const handleVoidGRN = async (grnId: number) => {
     if (!window.confirm("WARNING: This will officially reverse the inventory stock and mark this GRN as VOID. This action is permanent. Continue?")) return;
     try {
-      await fetch(`import.meta.env.VITE_API_URL/api/procurement/receipts/${grnId}/void`, { method: 'PUT' });
+      // FIX: Removed hardcoded /api
+      await fetch(`${import.meta.env.VITE_API_URL}/procurement/receipts/${grnId}/void`, { method: 'PUT' });
       setViewGRN(null); loadData(); alert("GRN voided and stock correctly reversed.");
     } catch (err) { alert("Failed to void GRN."); }
   };
@@ -574,10 +597,19 @@ export default function GoodsReceipts() {
                         </div>
                       )}
                     </div>
-                    <div className="border-l pl-4">
-                      <label className="block text-sm font-bold text-gray-800 mb-2">Bulk Import:</label>
-                      <input type="file" accept=".xlsx, .csv" onChange={handleExcelImport} className="text-sm file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:bg-gray-100 transition cursor-pointer" />
-                    </div>
+<div className="border-l pl-4 flex flex-col justify-between">
+  <div className="flex items-center justify-between mb-2 gap-4">
+    <label className="block text-sm font-bold text-gray-800">Bulk Import:</label>
+    <button 
+      type="button" 
+      onClick={handleDownloadTemplate} 
+      className="text-xs text-blue-600 hover:text-blue-800 underline font-medium transition"
+    >
+      Download Template
+    </button>
+  </div>
+  <input type="file" accept=".xlsx, .csv" onChange={handleExcelImport} className="text-sm file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:bg-gray-100 transition cursor-pointer" />
+</div>
                   </div>
 
                   <div className="border rounded-lg overflow-x-auto">

@@ -1,6 +1,4 @@
-// frontend/src/services/api.ts
-
-const API_BASE_URL = import.meta.env.VITE_API_URL + '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 // ==========================================
 // 1. NESTED BLUEPRINTS (Must come first!)
@@ -27,7 +25,6 @@ export interface CostLayer {
   received_at: string;
 }
 
-// THIS WAS MISSING: The PriceHistory blueprint!
 export interface PriceHistory {
   history_id: number;
   old_tag_price: number | null;
@@ -64,8 +61,8 @@ export interface Product {
   categories: Category[]; 
   current_stock: CurrentStock[];
   vendors: any[]; 
-  price_history: PriceHistory[]; // This works now!
-  cost_layers: CostLayer[];      // This works now!
+  price_history: PriceHistory[]; 
+  cost_layers: CostLayer[];      
   units_per_bundle: number;
 }
 
@@ -159,11 +156,9 @@ export interface StockTransferItem {
   item_id: number;
   product_id: number;
   bundling: string | null;
-  // THE NEW THREE TRUTHS
   requested_qty: number;
   released_qty: number | null;
   received_qty: number | null;
-  
   product?: Product;
 }
 
@@ -182,7 +177,8 @@ export interface StockTransfer {
 
 export const fetchTransfers = async (): Promise<StockTransfer[]> => {
   try {
-    const response = await fetch(`${API_BASE_URL}/transfers`);
+    // FIX: Added trailing slash based on 307 logs
+    const response = await fetch(`${API_BASE_URL}/transfers/`);
     if (!response.ok) throw new Error('Failed to fetch transfers');
     return await response.json();
   } catch (error) {
@@ -190,8 +186,6 @@ export const fetchTransfers = async (): Promise<StockTransfer[]> => {
     return [];
   }
 };
-
-// Add these to the bottom of frontend/src/services/api.ts
 
 export const fetchUsers = async (): Promise<User[]> => {
   const response = await fetch(`${API_BASE_URL}/transfers/users/all`);
@@ -206,6 +200,7 @@ export const fetchLocations = async (): Promise<TransferLocation[]> => {
 };
 
 export const createTransfer = async (payload: any) => {
+  // FIX: Added trailing slash for consistency
   const response = await fetch(`${API_BASE_URL}/transfers/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -213,7 +208,6 @@ export const createTransfer = async (payload: any) => {
   });
 
   if (!response.ok) {
-    // THIS GRABS THE SECRET ERROR MESSAGE FROM PYTHON
     const errorData = await response.json(); 
     console.error("🚨 FASTAPI REJECTION DETAILS:", JSON.stringify(errorData, null, 2));
     throw new Error('Failed to create transfer');
@@ -222,18 +216,12 @@ export const createTransfer = async (payload: any) => {
   return await response.json();
 };
 
-
 export const fetchTransfer = async (id: string | number): Promise<StockTransfer> => {
   const response = await fetch(`${API_BASE_URL}/transfers/${id}`);
   if (!response.ok) throw new Error('Failed to fetch transfer details');
   return await response.json();
 };
 
-
-
-
-
-// For Origin Warehouse putting boxes on the truck
 export const releaseTransfer = async (id: number, items: Record<number, number>) => {
   const response = await fetch(`${API_BASE_URL}/transfers/${id}/release`, {
     method: 'PUT',
@@ -244,7 +232,6 @@ export const releaseTransfer = async (id: number, items: Record<number, number>)
   return await response.json();
 };
 
-// For Destination Warehouse signing for boxes (and adding unexpected ones)
 export const receiveTransfer = async (
   id: number, 
   items: Record<number, number>, 
@@ -265,7 +252,6 @@ export const fetchItemLedger = async (productId: number, locationId: number) => 
   return response.json();
 };
 
-
 export const createLocation = async (payload: { name: string; parent_location_id?: number | null; type: string }) => {
   const response = await fetch(`${API_BASE_URL}/transfers/locations`, {
     method: 'POST',
@@ -276,7 +262,6 @@ export const createLocation = async (payload: { name: string; parent_location_id
   return response.json();
 };
 
-
 export const updateLocation = async (id: number, name: string) => {
   const response = await fetch(`${API_BASE_URL}/transfers/locations/${id}`, {
     method: 'PUT',
@@ -286,8 +271,6 @@ export const updateLocation = async (id: number, name: string) => {
   if (!response.ok) throw new Error("Failed to update location");
   return response.json();
 };
-
-
 
 // --- AUTHENTICATION API ---
 
@@ -311,7 +294,6 @@ export const registerUser = async (userData: any) => {
   return response.json();
 };
 
-
 export const updateTransferHeader = async (id: number, data: { document_id?: string, released_by_id?: number, received_by_id?: number }) => {
   const response = await fetch(`${API_BASE_URL}/transfers/${id}/header`, {
     method: 'PUT',
@@ -321,7 +303,6 @@ export const updateTransferHeader = async (id: number, data: { document_id?: str
   if (!response.ok) throw new Error("Failed to update transfer header");
   return response.json();
 };
-
 
 // --- PROCUREMENT: SUPPLIERS ---
 
@@ -340,13 +321,15 @@ export interface Supplier {
 }
 
 export const fetchSuppliers = async (): Promise<Supplier[]> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/suppliers/`);
+  // FIX: Removed trailing slash based on 307 logs
+  const response = await fetch(`${API_BASE_URL}/procurement/suppliers`);
   if (!response.ok) throw new Error('Failed to fetch suppliers');
   return response.json();
 };
 
 export const createSupplier = async (data: Partial<Supplier>): Promise<Supplier> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/suppliers/`, {
+  // FIX: Removed trailing slash
+  const response = await fetch(`${API_BASE_URL}/procurement/suppliers`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -365,7 +348,6 @@ export const updateSupplier = async (id: number, data: Partial<Supplier>): Promi
   return response.json();
 };
 
-
 // --- PROCUREMENT: SHIPMENTS ---
 
 export interface InboundShipment {
@@ -377,22 +359,18 @@ export interface InboundShipment {
   date_sealed: string | null;
   date_arrived: string | null;
   collected_by_id: number | null;
-  status: string; // IN_TRANSIT, ARRIVED, PROCESSING, CLOSED
-  
-  // Relationships
+  status: string; 
   collected_by?: User;
-  goods_receipts?: any[]; // We'll type this strictly when we build Tier 3
+  goods_receipts?: any[]; 
 }
 
 export const fetchShipments = async (): Promise<InboundShipment[]> => {
-  // FIX: Removed trailing slash
   const response = await fetch(`${API_BASE_URL}/procurement/shipments`); 
   if (!response.ok) throw new Error('Failed to fetch shipments');
   return response.json();
 };
 
 export const createShipment = async (data: Partial<InboundShipment>): Promise<InboundShipment> => {
-  // FIX: Removed trailing slash
   const response = await fetch(`${API_BASE_URL}/procurement/shipments`, { 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -403,7 +381,6 @@ export const createShipment = async (data: Partial<InboundShipment>): Promise<In
 };
 
 export const updateShipmentStatus = async (id: number, status: string): Promise<InboundShipment> => {
-  // FIX: Removed trailing slash
   const response = await fetch(`${API_BASE_URL}/procurement/shipments/${id}/status`, { 
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -436,7 +413,6 @@ export interface GoodsReceipt {
   checked_by_id: number | null;
   status: string;
   has_discrepancy: boolean;
-  
   supplier?: Supplier;
   shipment?: InboundShipment;
   checked_by?: User;
@@ -474,21 +450,21 @@ export const updateGRNStatus = async (id: number, status: string): Promise<Goods
 export interface POItem {
   po_item_id?: number;
   product_id: number;
-  requested_qty: number; // Changed
+  requested_qty: number; 
   unit_gross_cost: number;
-  discount: number;      // Added
-  net_cost?: number;     // Changed
+  discount: number;      
+  net_cost?: number;     
   product?: Product;
 }
 
 export interface PurchaseOrder {
   po_id: number;
-  document_id: string | null; // Changed
+  document_id: string | null; 
   supplier_id: number;
   status: string;
-  date_drafted: string;       // Changed
-  payment_terms: string | null; // Added
-  total_value: number;        // Added
+  date_drafted: string;       
+  payment_terms: string | null; 
+  total_value: number;        
   
   supplier?: Supplier;
   items?: POItem[];
@@ -514,7 +490,8 @@ export const createPurchaseOrder = async (data: any): Promise<PurchaseOrder> => 
 // --- SALES & POS API ---
 export const createSale = async (payload: any) => {
   try {
-    const response = await fetch(`import.meta.env.VITE_API_URL/api/sales`, {
+    // FIX: Replaced literal string with correct variable template
+    const response = await fetch(`${API_BASE_URL}/sales`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -522,8 +499,6 @@ export const createSale = async (payload: any) => {
 
     if (!response.ok) {
       const errorData = await response.json();
-      
-      // THE FIX: Translate FastAPI's 422 validation array into readable text
       if (Array.isArray(errorData.detail)) {
         const messages = errorData.detail.map((e: any) => `${e.loc.join(' -> ')}: ${e.msg}`);
         throw new Error(`Validation Error:\n${messages.join('\n')}`);
@@ -538,16 +513,14 @@ export const createSale = async (payload: any) => {
   }
 };
 
-
-// --- ADD TO frontend/src/services/api.ts ---
-
 export const fetchSalesDashboard = async (params: { start_date?: string, end_date?: string, search?: string }) => {
   const query = new URLSearchParams();
   if (params.start_date) query.append('start_date', params.start_date);
   if (params.end_date) query.append('end_date', params.end_date);
   if (params.search) query.append('search', params.search);
 
-  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales?${query.toString()}`);
+  // FIX: Replaced literal string with correct variable template
+  const response = await fetch(`${API_BASE_URL}/sales?${query.toString()}`);
   if (!response.ok) throw new Error("Failed to fetch sales data");
   return await response.json();
 };
@@ -558,21 +531,22 @@ export const exportSalesToExcel = async (params: { start_date?: string, end_date
   if (params.end_date) query.append('end_date', params.end_date);
   if (params.search) query.append('search', params.search);
 
-  // Use window.open to let the browser natively handle the file download trigger
-  window.open(`import.meta.env.VITE_API_URL/api/sales/export?${query.toString()}`, '_blank');
+  // FIX: Replaced literal string with correct variable template
+  window.open(`${API_BASE_URL}/sales/export?${query.toString()}`, '_blank');
 };
 
 export const fetchPosSettings = async () => {
-  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales/settings`);
+  // FIX: Replaced literal string with correct variable template
+  const response = await fetch(`${API_BASE_URL}/sales/settings`);
   if (!response.ok) {
-    // If the settings don't exist yet, return a safe default
     return { is_vat_enabled: false, vat_rate: 0.12 };
   }
   return await response.json();
 };
 
 export const fetchSaleDetails = async (sales_id: number) => {
-  const response = await fetch(`import.meta.env.VITE_API_URL/api/sales/detail/${sales_id}`);
+  // FIX: Replaced literal string with correct variable template
+  const response = await fetch(`${API_BASE_URL}/sales/detail/${sales_id}`);
   if (!response.ok) throw new Error("Failed to fetch sale details");
   return await response.json();
 };

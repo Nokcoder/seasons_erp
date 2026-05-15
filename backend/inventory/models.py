@@ -64,7 +64,7 @@ class Product(Base):
 
     product_id = Column(Integer, primary_key=True)
     pid = Column(String(50), unique=True)
-    sku = Column(String(50), unique=True)
+    sku = Column(String(50))
     name = Column(String(100), nullable=False)
     brand = Column(String(50))
     description = Column(Text)

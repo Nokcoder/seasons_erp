@@ -10,7 +10,7 @@ from inventory import models as inv_models
 from procurement.models import PurchaseOrder, PurchaseOrderItem, InboundShipment, GoodsReceipt, GoodsReceiptItem
 from inventory.models import Product, CurrentStock, InventoryLedger, LedgerReason
 
-router = APIRouter(prefix="/api/procurement", tags=["Procurement"])
+router = APIRouter(prefix="/procurement", tags=["Procurement"])
 
 
 # --- UNIFIED SCHEMAS ---

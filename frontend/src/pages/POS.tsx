@@ -20,7 +20,6 @@ export default function POS() {
   const { user } = useAuth();
 
   // --- ROBUST AUTH CHECK ---
-  // Unlocks Date, Register, and BATCH mode for 'admin' username or specific roles
   const isBackdateAllowed = useMemo(() => {
     if (!user) return false;
     const role = String(user.role || user.user_type || '').toUpperCase();
@@ -36,7 +35,6 @@ export default function POS() {
   // --- UI MODE STATE ---
   const [mode, setMode] = useState<'LIVE' | 'BATCH'>('LIVE');
 
-  // Auto-switch to BATCH if authorized
   useEffect(() => {
     if (isBackdateAllowed) {
       setMode('BATCH');
@@ -58,8 +56,11 @@ export default function POS() {
   const [payments, setPayments] = useState([{ method: 'Cash', amount: 0 }]);
   const [receiptDiscount, setReceiptDiscount] = useState<number>(0);
   
+  // FIX 1: Use en-CA to safely grab the local timezone YYYY-MM-DD (prevents UTC shift bugs)
+  const localToday = new Date().toLocaleDateString('en-CA');
+
   const [header, setHeader] = useState({
-    date: new Date().toISOString().split('T')[0],
+    date: localToday,
     shift: '1', 
     sales_invoice_id: '',
     delivery_receipt_id: '',
@@ -71,6 +72,16 @@ export default function POS() {
   const [parkedSales, setParkedSales] = useState<any[]>([]);
   const [showParkedModal, setShowParkedModal] = useState(false);
   const [processing, setProcessing] = useState(false);
+
+  // --- DRAG TO COPY STATE ---
+  const [dragSourceIdx, setDragSourceIdx] = useState<number | null>(null);
+
+  // Global mouse up to stop dragging if they let go of the mouse outside the table
+  useEffect(() => {
+    const handleGlobalMouseUp = () => setDragSourceIdx(null);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+  }, []);
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -95,7 +106,6 @@ export default function POS() {
   }, [isBackdateAllowed]);
 
   // --- FINANCIAL MATH ---
-  // 1. Raw sum of items (MDAS: Apply % first, then flat discount)
   const rawCartTotal = cart.reduce((sum, item) => {
     const pctAmt = item.price * ((item.discount_pct || 0) / 100);
     const totalItemDisc = pctAmt + (item.discount_flat || 0);
@@ -175,11 +185,32 @@ export default function POS() {
 
   const removeCartItem = (index: number) => setCart(cart.filter((_, i) => i !== index));
 
-  const copyDiscountToNext = (startIndex: number) => {
+  // --- ADVANCED DISCOUNT SPREADING LOGIC ---
+  const copyDiscountDownOne = (startIndex: number) => {
     if (startIndex >= cart.length - 1) return;
     const newCart = [...cart];
     newCart[startIndex + 1].discount_pct = newCart[startIndex].discount_pct;
     newCart[startIndex + 1].discount_flat = newCart[startIndex].discount_flat;
+    setCart(newCart);
+  };
+
+  const copyDiscountToAllBelow = (startIndex: number) => {
+    if (startIndex >= cart.length - 1) return;
+    const newCart = [...cart];
+    const sourcePct = newCart[startIndex].discount_pct;
+    const sourceFlat = newCart[startIndex].discount_flat;
+    for (let i = startIndex + 1; i < newCart.length; i++) {
+      newCart[i].discount_pct = sourcePct;
+      newCart[i].discount_flat = sourceFlat;
+    }
+    setCart(newCart);
+  };
+
+  const handleDragEnterRow = (targetIndex: number) => {
+    if (dragSourceIdx === null || dragSourceIdx === targetIndex) return;
+    const newCart = [...cart];
+    newCart[targetIndex].discount_pct = newCart[dragSourceIdx].discount_pct;
+    newCart[targetIndex].discount_flat = newCart[dragSourceIdx].discount_flat;
     setCart(newCart);
   };
 
@@ -240,6 +271,7 @@ export default function POS() {
       setCart([]);
       setReceiptDiscount(0);
       setPayments([{ method: 'Cash', amount: 0 }]);
+      // Note: We deliberately leave date and location intact here so it stays sticky!
       setHeader(prev => ({ ...prev, sales_invoice_id: '', delivery_receipt_id: '', customer_name: '' }));
       
       if (mode === 'BATCH') {
@@ -286,7 +318,7 @@ export default function POS() {
       <div className="flex flex-col lg:flex-row gap-4 h-full">
         <div className={`w-full ${mode === 'LIVE' ? 'lg:w-2/3' : 'lg:w-3/4'} flex flex-col gap-4`}>
           
-          {/* HEADER METADATA - UNLOCKED FOR ADMIN */}
+          {/* HEADER METADATA */}
           <div className={`bg-white p-4 rounded-lg shadow-sm grid grid-cols-2 md:grid-cols-5 gap-4 border-l-4 ${mode === 'BATCH' ? 'border-purple-500 bg-purple-50/10' : 'border-blue-500'}`}>
             <div className="md:col-span-2">
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Location *</label>
@@ -296,8 +328,17 @@ export default function POS() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Date</label>
-              <input type="date" value={header.date} onChange={e => handleHeaderChange('date', e.target.value)} disabled={!isBackdateAllowed || mode === 'LIVE'} className="w-full p-2 border rounded text-sm disabled:bg-gray-100 focus:ring-blue-500"/>
+              {/* FIX 2: Unlocked the date input for Admins regardless of LIVE/BATCH mode */}
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
+                Date {isBackdateAllowed ? '(Override)' : ''}
+              </label>
+              <input 
+                type="date" 
+                value={header.date} 
+                onChange={e => handleHeaderChange('date', e.target.value)} 
+                disabled={!isBackdateAllowed} 
+                className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}
+              />
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Shift</label>
@@ -305,7 +346,7 @@ export default function POS() {
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Register ID</label>
-              <input type="text" value={header.register_id} onChange={e => handleHeaderChange('register_id', e.target.value)} disabled={!isBackdateAllowed} className="w-full p-2 border rounded text-sm disabled:bg-gray-100 focus:ring-blue-500"/>
+              <input type="text" value={header.register_id} onChange={e => handleHeaderChange('register_id', e.target.value)} disabled={!isBackdateAllowed} className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}/>
             </div>
             <div className="md:col-span-2">
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Customer Name</label>
@@ -353,9 +394,13 @@ export default function POS() {
                     <th className="px-3 py-3 text-right font-bold w-32">Subtotal</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className={`divide-y divide-gray-100 ${dragSourceIdx !== null ? 'cursor-grabbing' : ''}`}>
                   {cart.map((item, idx) => (
-                    <tr key={`${item.product_id}-${idx}`} className="hover:bg-gray-50 group">
+                    <tr 
+                      key={`${item.product_id}-${idx}`} 
+                      className={`hover:bg-gray-50 group ${dragSourceIdx === idx ? 'bg-blue-50' : ''}`}
+                      onMouseEnter={() => handleDragEnterRow(idx)}
+                    >
                       <td className="px-3 py-3 text-center"><button onClick={() => removeCartItem(idx)} className="text-gray-300 hover:text-red-500 font-bold">✖</button></td>
                       <td className="px-3 py-3">
                         <div className="font-bold text-gray-900">{item.name}</div>
@@ -369,7 +414,22 @@ export default function POS() {
                         <div className="flex items-center justify-end gap-1">
                           <input type="number" min="0" max="100" value={item.discount_pct || ''} onChange={e => {const newCart = [...cart]; newCart[idx].discount_pct = Number(e.target.value); setCart(newCart);}} className="w-16 p-1.5 border border-gray-300 rounded text-right font-medium text-orange-600 focus:ring-blue-500" placeholder="%"/>
                           <input type="number" min="0" step="0.01" value={item.discount_flat || ''} onChange={e => {const newCart = [...cart]; newCart[idx].discount_flat = Number(e.target.value); setCart(newCart);}} className="w-20 p-1.5 border border-gray-300 rounded text-right font-medium text-red-600 focus:ring-blue-500" placeholder="Flat"/>
-                          {idx < cart.length - 1 && <button onClick={() => copyDiscountToNext(idx)} title="Copy down 1 item" className="p-1.5 text-gray-400 hover:bg-gray-200 rounded opacity-0 group-hover:opacity-100">⬇️</button>}
+                          
+                          {/* THE UPGRADED DRAG/CLICK HANDLE */}
+                          {idx < cart.length - 1 && (
+                            <button 
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                setDragSourceIdx(idx);
+                              }}
+                              onClick={() => copyDiscountDownOne(idx)}
+                              onDoubleClick={() => copyDiscountToAllBelow(idx)}
+                              title="Drag down | Click: 1 row | Dbl-Click: All rows" 
+                              className="p-1.5 text-blue-500 hover:bg-blue-100 hover:text-blue-700 rounded opacity-0 group-hover:opacity-100 transition-all font-bold cursor-grab active:cursor-grabbing select-none"
+                            >
+                              ⏬
+                            </button>
+                          )}
                         </div>
                       </td>
                       <td className="px-3 py-3 text-right font-black text-gray-800 text-base tabular-nums">

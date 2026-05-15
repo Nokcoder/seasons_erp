@@ -22,3 +22,9 @@ env/
 node_modules/
 dist/
 .DS_Store
+
+
+# Database Seed Files & Data
+db_seed.txt
+*.sql
+*.csv
