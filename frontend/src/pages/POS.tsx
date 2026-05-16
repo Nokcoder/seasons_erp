@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { fetchProducts, fetchLocations, createSale, fetchPosSettings } from '../services/api';
+import { v4 as uuidv4 } from 'uuid';
 
 interface CartItem {
   product_id: number;
@@ -247,7 +248,7 @@ export default function POS() {
           customer_id: null,
           customer_name: header.customer_name || null,
           register_id: header.register_id,
-          idempotency_key: crypto.randomUUID()
+          idempotency_key: uuidv4()
         }, 
         items: cart.map(item => ({
           product_id: Number(item.product_id),

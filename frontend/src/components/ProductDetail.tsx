@@ -16,7 +16,6 @@ export default function ProductDetail() {
   const [activeTab, setActiveTab] = useState('price');
   const [fullProduct, setFullProduct] = useState<Product | null>(null);
 
-  // Added specific strings for markup and margin to allow free bidirectional typing
   const [formData, setFormData] = useState({
     pid: '', name: '', sku: '', brand: '', variant: '', description: '', categories: '',
     units_per_bundle: 1, is_active: true,
@@ -45,13 +44,17 @@ export default function ProductDetail() {
       fetchProduct(Number(id)).then(data => {
         setFullProduct(data);
         
-        // Initialize the pricing engine from DB values
         const grossCost = data.gross_cost || 0;
-        const costDiscPct = (data.cost_discount || 0) * 100; // Convert DB fraction (0.15) to UI % (15)
+        const costDiscPct = (data.cost_discount || 0) * 100; 
         const liveNetCost = grossCost * (1 - (costDiscPct / 100));
 
-        const tagPrice = data.tag_price || 0;
-        const netPrice = data.net_price || tagPrice;
+        // TypeScript Safe String Conversion
+        const initTag = data.tag_price !== null && data.tag_price !== undefined ? String(data.tag_price) : '';
+        const initNet = data.net_price !== null && data.net_price !== undefined ? String(data.net_price) : '';
+        const initGross = data.gross_cost !== null && data.gross_cost !== undefined ? String(data.gross_cost) : '';
+
+        const numTag = parseFloat(initTag) || 0;
+        const numNet = parseFloat(initNet) || 0;
 
         setFormData({
           pid: data.pid,
@@ -60,20 +63,22 @@ export default function ProductDetail() {
           brand: data.brand || '',
           variant: data.variant || '',
           description: data.description || '',
-          categories: data.categories || '',
+          categories: Array.isArray(data.categories) 
+              ? data.categories.map((c: any) => c.category_name).join(', ') 
+              : '',
           units_per_bundle: data.units_per_bundle || 1,
           is_active: data.is_active !== false,
           
-          gross_cost: grossCost ? grossCost.toString() : '',
+          gross_cost: initGross,
           cost_discount: costDiscPct ? costDiscPct.toString() : '0',
           
-          tag_price: tagPrice ? tagPrice.toString() : '',
-          tag_markup: liveNetCost > 0 && tagPrice > 0 ? (((tagPrice - liveNetCost) / liveNetCost) * 100).toFixed(2) : '',
-          tag_margin: tagPrice > 0 ? (((tagPrice - liveNetCost) / tagPrice) * 100).toFixed(2) : '',
+          tag_price: initTag,
+          tag_markup: liveNetCost > 0 && numTag > 0 ? (((numTag - liveNetCost) / liveNetCost) * 100).toFixed(2) : '',
+          tag_margin: numTag > 0 ? (((numTag - liveNetCost) / numTag) * 100).toFixed(2) : '',
           
-          net_price: netPrice ? netPrice.toString() : '',
-          net_markup: liveNetCost > 0 && netPrice > 0 ? (((netPrice - liveNetCost) / liveNetCost) * 100).toFixed(2) : '',
-          net_margin: netPrice > 0 ? (((netPrice - liveNetCost) / netPrice) * 100).toFixed(2) : '',
+          net_price: initNet,
+          net_markup: liveNetCost > 0 && numNet > 0 ? (((numNet - liveNetCost) / liveNetCost) * 100).toFixed(2) : '',
+          net_margin: numNet > 0 ? (((numNet - liveNetCost) / numNet) * 100).toFixed(2) : '',
         });
         setLoading(false);
       }).catch(err => {
@@ -95,36 +100,30 @@ export default function ProductDetail() {
     const parse = (v: string) => parseFloat(v) || 0;
     const format = (n: number) => Number.isFinite(n) ? parseFloat(n.toFixed(2)).toString() : '';
 
-    // 1. Establish the baseline net cost
     const gross = parse(next.gross_cost);
     const costDiscPct = parse(next.cost_discount); 
     const netCost = Math.max(0, gross * (1 - (costDiscPct / 100)));
 
-    // 2. Synchronize a pricing row
     const syncRow = (prefix: 'tag' | 'net') => {
       const priceKey = `${prefix}_price` as keyof typeof next;
       const markupKey = `${prefix}_markup` as keyof typeof next;
       const marginKey = `${prefix}_margin` as keyof typeof next;
 
       if (field === priceKey) {
-        // User typed Price -> Update Markup & Margin
         const price = parse(next[priceKey] as string);
         next[markupKey] = netCost > 0 && price > 0 ? format(((price - netCost) / netCost) * 100) : '';
         next[marginKey] = price > 0 ? format(((price - netCost) / price) * 100) : '';
       } else if (field === markupKey) {
-        // User typed Markup -> Update Price & Margin
         const markup = parse(next[markupKey] as string);
         const price = netCost * (1 + (markup / 100));
         next[priceKey] = price > 0 ? format(price) : '';
         next[marginKey] = price > 0 ? format(((price - netCost) / price) * 100) : '';
       } else if (field === marginKey) {
-        // User typed Margin -> Update Price & Markup
         const margin = parse(next[marginKey] as string);
         const price = margin < 100 ? netCost / (1 - (margin / 100)) : 0;
         next[priceKey] = price > 0 ? format(price) : '';
         next[markupKey] = netCost > 0 && price > 0 ? format(((price - netCost) / netCost) * 100) : '';
       } else {
-        // User typed Cost -> Update Markup & Margin based on existing price
         const price = parse(next[priceKey] as string);
         if (price > 0) {
           next[markupKey] = netCost > 0 ? format(((price - netCost) / netCost) * 100) : '';
@@ -133,10 +132,8 @@ export default function ProductDetail() {
       }
     };
 
-    // Apply the sync to both rows
     syncRow('tag');
     syncRow('net');
-
     setFormData(next);
   };
 
@@ -147,38 +144,44 @@ export default function ProductDetail() {
     e.preventDefault();
     setSaving(true);
     try {
-      const parsedTag = parseFloat(formData.tag_price) || 0;
-      const parsedNet = parseFloat(formData.net_price) || parsedTag;
+      const parsedTag = formData.tag_price !== '' ? parseFloat(formData.tag_price) : null;
+      const parsedNet = formData.net_price !== '' ? parseFloat(formData.net_price) : null;
       
-      // DB FIX: Calculate the discount as a percentage fraction (e.g. 0.15) for the DB schema
-      const priceDiscountFraction = parsedTag > 0 ? ((parsedTag - parsedNet) / parsedTag) : 0;
+      // TypeScript Math Fix: Ensure no math is done on a null value
+      const safeTag = parsedTag || 0;
+      const safeNet = parsedNet !== null ? parsedNet : safeTag;
+      const priceDiscountFraction = safeTag > 0 ? ((safeTag - safeNet) / safeTag) : 0;
       const costDiscountFraction = (parseFloat(formData.cost_discount) || 0) / 100;
 
       const submitData = {
         pid: formData.pid,
         name: formData.name,
-        brand: formData.brand || undefined,
-        variant: formData.variant || undefined,
-        description: formData.description || undefined,
-        categories: formData.categories || undefined,
+        brand: formData.brand || null,
+        variant: formData.variant || null,
+        description: formData.description || null,
+        
+        category_text: typeof formData.categories === 'string' && formData.categories.trim() !== '' ? formData.categories : null,
+        
+        tag_price: parsedTag,
+        net_price: parsedNet,
+        price_discount: parseFloat(priceDiscountFraction.toFixed(4)),
+        
+        gross_cost: formData.gross_cost !== '' ? parseFloat(formData.gross_cost) : null,
+        cost_discount: parseFloat(costDiscountFraction.toFixed(4)),
         units_per_bundle: formData.units_per_bundle ? Number(formData.units_per_bundle) : 1, 
-        
-        tag_price: parsedTag || undefined,
-        price_discount: parseFloat(priceDiscountFraction.toFixed(4)), 
-        
-        gross_cost: parseFloat(formData.gross_cost) || undefined,
-        cost_discount: parseFloat(costDiscountFraction.toFixed(4)), 
       };
 
       if (isNew) {
-        await createProduct({ ...submitData, sku: formData.sku || undefined });
+        await createProduct({ ...submitData, sku: formData.sku || null });
       } else {
-        await updateProduct(Number(id), { ...submitData, sku: formData.sku || undefined });
+        await updateProduct(Number(id), { ...submitData, sku: formData.sku || null });
       }
+      
       navigate('/products');
-    } catch (error) {
-      console.error(error);
-      alert("Failed to save. Check console.");
+      
+    } catch (error: any) {
+      console.error("Save Error Details:", error.response?.data || error.message || error);
+      alert("Failed to save product. Check the developer console (F12) for exact details.");
     } finally {
       setSaving(false);
     }
@@ -222,7 +225,6 @@ export default function ProductDetail() {
 
           const existingProduct = allProducts.find(p => p.pid.toLowerCase() === rawPid.toLowerCase());
 
-          // DB Math Fix for Excel
           const rowTagPrice = Number(row['Tag Price'] || 0);
           const rowNetPrice = Number(row['Promo Price'] || row['Net Price'] || rowTagPrice);
           const rowDiscountFraction = rowTagPrice > 0 ? ((rowTagPrice - rowNetPrice) / rowTagPrice) : 0;
@@ -235,9 +237,9 @@ export default function ProductDetail() {
               variant: String(row.Variant || ''),
               sku: String(row.SKU || ''),
               tag_price: rowTagPrice,
-              price_discount: parseFloat(rowDiscountFraction.toFixed(4)), // Fraction fix applied here
+              price_discount: parseFloat(rowDiscountFraction.toFixed(4)), 
               gross_cost: Number(row['Gross Cost'] || 0),
-              categories: String(row.Categories || ''),
+              category_text: String(row.Categories || ''), // <-- FIXED payload field
               units_per_bundle: Number(row['Bundle Count'] || 1),
               _ui_net_price: rowNetPrice 
             });
@@ -253,15 +255,23 @@ export default function ProductDetail() {
               if (strVal === '-') {
                 if (existingProduct[fieldKey]) {
                   changes[fieldKey] = { old: existingProduct[fieldKey], new: 'Cleared' };
-                  payload[fieldKey] = isNumeric ? 0 : ''; 
+                  const payloadKey = fieldKey === 'categories' ? 'category_text' : fieldKey;
+                  payload[payloadKey] = isNumeric ? null : ''; 
                 }
                 return;
               }
 
               const newVal = isNumeric ? Number(rawVal) : strVal;
-              if (newVal !== existingProduct[fieldKey]) {
-                changes[fieldKey] = { old: existingProduct[fieldKey] || 'None', new: newVal };
-                payload[fieldKey] = newVal;
+              // Compare visually. The DB sends back categories as an array, so we must be careful.
+              const oldVal = fieldKey === 'categories' && Array.isArray(existingProduct.categories) 
+                    ? existingProduct.categories.map((c: any) => c.category_name).join(', ')
+                    : existingProduct[fieldKey];
+
+              if (newVal !== oldVal) {
+                changes[fieldKey] = { old: oldVal || 'None', new: newVal };
+                // Send category_text to FastAPI!
+                const payloadKey = fieldKey === 'categories' ? 'category_text' : fieldKey;
+                payload[payloadKey] = newVal;
               }
             };
 
@@ -269,17 +279,17 @@ export default function ProductDetail() {
             checkField('brand', 'Brand');
             checkField('variant', 'Variant');
             checkField('sku', 'SKU');
-            checkField('categories', 'Categories');
+            checkField('categories', 'Categories'); // Safely translates to category_text above
             checkField('tag_price', 'Tag Price', true);
             checkField('gross_cost', 'Gross Cost', true); 
             checkField('units_per_bundle', 'Bundle Count', true);
 
-            // Special math logic for Promo Price update
             const excelNetKey = row['Promo Price'] !== undefined ? 'Promo Price' : 'Net Price';
             if (row[excelNetKey] !== undefined && row[excelNetKey] !== '') {
                const newNet = Number(row[excelNetKey]);
                if (newNet !== existingProduct.net_price) {
                  changes['net_price'] = { old: existingProduct.net_price, new: newNet };
+                 payload['net_price'] = newNet;
                  const tagToUse = payload['tag_price'] || existingProduct.tag_price || 0;
                  const newDiscountFrac = tagToUse > 0 ? ((tagToUse - newNet) / tagToUse) : 0;
                  payload['price_discount'] = parseFloat(newDiscountFrac.toFixed(4));
@@ -320,8 +330,8 @@ export default function ProductDetail() {
 
       alert(`Success! Created ${previewData.new_items.length} new items and updated ${previewData.updates.length} items.`);
       navigate('/products');
-    } catch (error) {
-      console.error("Save error:", error);
+    } catch (error: any) {
+      console.error("Save error:", error.response?.data || error.message || error);
       alert("An error occurred during saving. Check console for details.");
     } finally {
       setIsProcessing(false);

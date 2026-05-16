@@ -16,6 +16,7 @@ class ProductCreate(BaseModel):
     brand: Optional[str] = None
     variant: Optional[str] = None
     description: Optional[str] = None
+    category_text: Optional[str] = None
 
     tag_price: Optional[Decimal] = None
     net_price: Optional[Decimal] = None
@@ -23,6 +24,7 @@ class ProductCreate(BaseModel):
     gross_cost: Optional[Decimal] = None
     cost_discount: Optional[Decimal] = Decimal('0.0000')
     units_per_bundle: int = 1
+    categories: Optional[str] = None
 
 
 class ProductUpdate(BaseModel):
@@ -34,11 +36,14 @@ class ProductUpdate(BaseModel):
 
     tag_price: Optional[Decimal] = None
     net_price: Optional[Decimal] = None
+    category_text: Optional[str] = None
+
     price_discount: Optional[Decimal] = None
     gross_cost: Optional[Decimal] = None
     cost_discount: Optional[Decimal] = None
     is_active: Optional[bool] = None
     units_per_bundle: int = 1
+    categories: Optional[str] = None
 
 
 # --- 2. OUTPUT SCHEMAS (The Blueprints for GET requests to React) ---

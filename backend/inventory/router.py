@@ -38,24 +38,45 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
 
 # 3. CREATE
 
-@router.post("/", response_model=schemas.ProductSchema) # <--- FIXED PREFIX
+# 3. CREATE
+# 3. CREATE
+@router.post("/", response_model=schemas.ProductSchema)
 def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
-    # 1. Create the base product
-    db_product = models.Product(**product.dict())
-    db.add(db_product)
-    db.flush()  # Flush to instantly get the new product_id from the database
+    product_data = product.model_dump()
 
-    # 2. Create the Genesis Price History record if prices were provided
-    if product.tag_price is not None or product.net_price is not None:
+    # 1. Intercept the string (e.g., "Hardware, Tools")
+    categories_str = product_data.pop('categories', None)
+
+    # 2. Save the flat data
+    db_product = models.Product(**product_data)
+
+    # 3. The Auto-Tagger: Parse the string into real Database Categories
+    if categories_str:
+        category_names = [c.strip() for c in categories_str.split(',') if c.strip()]
+        category_objects = []
+        for name in category_names:
+            # Check if category already exists (case-insensitive)
+            cat = db.query(models.Category).filter(models.Category.category_name.ilike(name)).first()
+            if not cat:
+                # Auto-create it if it's a brand new category!
+                cat = models.Category(category_name=name)
+                db.add(cat)
+            category_objects.append(cat)
+        db_product.categories = category_objects
+
+    db.add(db_product)
+    db.flush()
+
+    # 4. Create the Genesis Price History record
+    if db_product.tag_price is not None or db_product.net_price is not None:
         initial_history = models.PriceHistory(
             product_id=db_product.product_id,
-            new_tag_price=product.tag_price,
-            new_net_price=product.net_price,
+            new_tag_price=db_product.tag_price,
+            new_net_price=db_product.net_price,
             changed_at=datetime.utcnow()
         )
         db.add(initial_history)
 
-    # 3. Commit everything together
     db.commit()
     db.refresh(db_product)
     return db_product
@@ -69,6 +90,25 @@ def update_product(product_id: int, product_update: schemas.ProductUpdate, db: S
         raise HTTPException(status_code=404, detail="Product not found")
 
     update_data = product_update.model_dump(exclude_unset=True)
+
+    # 1. The Auto-Tagger for Updates
+    if 'category_text' in update_data:
+        categories_str = update_data.pop('category_text')
+
+        if categories_str:
+            category_names = [c.strip() for c in categories_str.split(',') if c.strip()]
+            category_objects = []
+            for name in category_names:
+                cat = db.query(models.ProductCategory).filter(models.ProductCategory.category_name.ilike(name)).first()
+                if not cat:
+                    cat = models.ProductCategory(category_name=name)
+                    db.add(cat)
+                category_objects.append(cat)
+            db_product.categories = category_objects
+        else:
+            db_product.categories = []  # Clear if empty
+
+    # 2. Apply updates
     for key, value in update_data.items():
         setattr(db_product, key, value)
 
@@ -77,7 +117,7 @@ def update_product(product_id: int, product_update: schemas.ProductUpdate, db: S
         return get_product(product_id, db)
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Database error (likely a duplicate SKU).")
+        raise HTTPException(status_code=400, detail="Database error.")
 
 
 @router.get("/{product_id}/ledger/{location_id}")  # <--- FIXED PREFIX AND INDENTATION
