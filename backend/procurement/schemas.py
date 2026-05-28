@@ -77,6 +77,8 @@ class ReceivingDetailCreate(BaseModel):
     variant_id: int
     location_id: int
     po_item_id: Optional[int] = None
+    received_at: Optional[datetime] = None
+    inspected_at: Optional[datetime] = None
     quantity_ordered: Decimal = Decimal('0')
     quantity_declared: Decimal = Decimal('0')
     quantity_actual: Decimal
@@ -89,6 +91,8 @@ class ReceivingDetailOut(BaseModel):
     variant_id: int
     location_id: int
     po_item_id: Optional[int] = None
+    received_at: Optional[datetime] = None
+    inspected_at: Optional[datetime] = None
     quantity_ordered: Decimal
     quantity_declared: Decimal
     quantity_actual: Decimal
@@ -127,3 +131,4 @@ class ConfirmResult(BaseModel):
     ledger_entries_written: int
     cost_layers_created: int
     po_status_updated: Optional[str] = None   # new PO status if changed
+    invoice_id: Optional[int] = None          # auto-created invoice

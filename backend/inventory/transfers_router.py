@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.database import get_db
 from inventory import models, schemas
@@ -40,20 +41,21 @@ def _upsert_stock(
     location_id: int,
     delta: Decimal,
 ):
-    """Add delta to current_stocks row, creating it if necessary."""
-    stock = (
-        db.query(models.CurrentStock)
-        .filter_by(variant_id=variant_id, location_id=location_id)
-        .first()
+    """Atomically add delta to current_stocks, creating the row if it doesn't exist.
+
+    Uses PostgreSQL INSERT ... ON CONFLICT DO UPDATE so that multiple calls
+    within the same transaction (autoflush=False) are safe and correct.
+    """
+    tbl  = models.CurrentStock.__table__
+    stmt = (
+        pg_insert(tbl)
+        .values(variant_id=variant_id, location_id=location_id, quantity=delta)
+        .on_conflict_do_update(
+            constraint="uq_current_stocks_variant_location",
+            set_={"quantity": tbl.c.quantity + delta},
+        )
     )
-    if stock:
-        stock.quantity += delta
-    else:
-        db.add(models.CurrentStock(
-            variant_id=variant_id,
-            location_id=location_id,
-            quantity=delta,
-        ))
+    db.execute(stmt)
 
 
 def _write_ledger(
@@ -354,6 +356,16 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
             quantity_received=item_in.quantity_received,
         ))
 
+        # ── Non-Inventory / Service variants generate no ledger entries ────────
+        variant_obj = (
+            db.query(models.Variant)
+            .options(selectinload(models.Variant.product))
+            .filter_by(variant_id=item_in.variant_id)
+            .first()
+        )
+        if not variant_obj or variant_obj.product.product_type in ("Non-Inventory", "Service"):
+            continue
+
         # ── move stock: bundle explosion or direct variant ──────────────────
         components = _get_bundle_components(db, item_in.variant_id)
         if components:
@@ -362,6 +374,14 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
             # for the document trail; all actual stock / ledger / FIFO movements
             # happen at the component level.
             for comp in components:
+                comp_variant = (
+                    db.query(models.Variant)
+                    .options(selectinload(models.Variant.product))
+                    .filter_by(variant_id=comp.component_variant_id)
+                    .first()
+                )
+                if not comp_variant or comp_variant.product.product_type in ("Non-Inventory", "Service"):
+                    continue
                 comp_out = actual_out * comp.quantity
                 comp_in  = actual_in  * comp.quantity
                 _move_variant(db, comp.component_variant_id,

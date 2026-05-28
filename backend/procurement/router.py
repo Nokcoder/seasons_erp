@@ -2,14 +2,16 @@
 from __future__ import annotations
 from typing import List, Optional
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.database import get_db
 from procurement import models as proc_models, schemas
 from inventory import models as inv_models
+from ap import models as ap_models
 
 router = APIRouter(prefix="/procurement", tags=["Procurement"])
 
@@ -49,19 +51,17 @@ def _load_shipment(shipment_id: int, db: Session) -> proc_models.InventoryShipme
 
 
 def _upsert_stock(db: Session, variant_id: int, location_id: int, delta: Decimal):
-    stock = (
-        db.query(inv_models.CurrentStock)
-        .filter_by(variant_id=variant_id, location_id=location_id)
-        .first()
+    """Atomically add delta to current_stocks, creating the row if it doesn't exist."""
+    tbl  = inv_models.CurrentStock.__table__
+    stmt = (
+        pg_insert(tbl)
+        .values(variant_id=variant_id, location_id=location_id, quantity=delta)
+        .on_conflict_do_update(
+            constraint="uq_current_stocks_variant_location",
+            set_={"quantity": tbl.c.quantity + delta},
+        )
     )
-    if stock:
-        stock.quantity += delta
-    else:
-        db.add(inv_models.CurrentStock(
-            variant_id=variant_id,
-            location_id=location_id,
-            quantity=delta,
-        ))
+    db.execute(stmt)
 
 
 def _resolve_cost(
@@ -297,6 +297,8 @@ def add_receiving_details(
             variant_id=d.variant_id,
             location_id=d.location_id,
             po_item_id=d.po_item_id,
+            received_at=d.received_at,
+            inspected_at=d.inspected_at,
             quantity_ordered=d.quantity_ordered,
             quantity_declared=d.quantity_declared,
             quantity_actual=d.quantity_actual,
@@ -313,18 +315,33 @@ def add_receiving_details(
 @router.post("/shipments/{shipment_id}/confirm", response_model=schemas.ConfirmResult)
 def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
     """
-    Confirm a shipment. For every non-deleted detail with QC status
-    Passed or Partially_Passed this endpoint atomically:
+    Confirm a shipment. For every non-deleted Inventory-type detail with QC
+    status Passed or Partially_Passed this endpoint atomically:
 
-      1. Writes an InventoryLedger entry  (reason = RECEIVE)
-      2. Upserts CurrentStock
-      3. Creates a CostLayer              (FIFO bucket)
-      4. Updates PurchaseOrderItem.received_quantity  (if linked)
-      5. Auto-advances the parent PO status
+      1. Skips Non-Inventory / Service variants (no ledger entries)
+      2. Writes InventoryLedger RECEIVE at destination for accepted qty
+         (quantity_actual - quantity_rejected)
+      3. Routes quantity_rejected to the Quarantine virtual location
+      4. Upserts CurrentStock at both locations
+      5. Creates CostLayer(s) (FIFO buckets) at both locations
+      6. Updates PurchaseOrderItem.received_quantity (accepted qty only)
+      7. Auto-advances the parent PO status
+      8. Creates a SupplierInvoice (total_amount = sum of quantity_declared
+         × net_unit_cost) and writes an INVOICE entry to ap_ledger
 
     All writes happen in a single transaction.
     """
     shipment = _load_shipment(shipment_id, db)
+
+    # ── resolve Quarantine location ───────────────────────────────────────────
+    quarantine = (
+        db.query(inv_models.Location)
+        .filter_by(location_name="Quarantine", is_system=True)
+        .first()
+    )
+    if not quarantine:
+        raise HTTPException(status_code=500,
+                            detail="System location 'Quarantine' not found — re-run startup seed")
 
     passing_statuses = {"Passed", "Partially_Passed"}
     eligible = [
@@ -340,6 +357,7 @@ def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
 
     ledger_count     = 0
     cost_layer_count = 0
+    invoice_total    = Decimal("0")
     po_status_new: str | None = None
     po: proc_models.PurchaseOrder | None = None
 
@@ -347,9 +365,18 @@ def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
         po = db.query(proc_models.PurchaseOrder).filter_by(po_id=shipment.po_id).first()
 
     for detail in eligible:
-        qty = detail.quantity_actual
 
-        # ── 1. resolve cost ───────────────────────────────────────────────────
+        # ── 1. Non-Inventory / Service guard ─────────────────────────────────
+        variant_obj = (
+            db.query(inv_models.Variant)
+            .options(selectinload(inv_models.Variant.product))
+            .filter_by(variant_id=detail.variant_id)
+            .first()
+        )
+        if not variant_obj or variant_obj.product.product_type in ("Non-Inventory", "Service"):
+            continue
+
+        # ── 2. resolve cost ───────────────────────────────────────────────────
         po_item: proc_models.PurchaseOrderItem | None = None
         if detail.po_item_id:
             po_item = (
@@ -362,43 +389,101 @@ def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
             db, detail.variant_id, po_item
         )
 
-        # ── 2. inventory ledger ───────────────────────────────────────────────
-        db.add(inv_models.InventoryLedger(
-            variant_id=detail.variant_id,
-            location_id=detail.location_id,
-            qty_change=qty,
-            reason=inv_models.LedgerReason.RECEIVE,
-            reference_type="inventory_shipments",
-            reference_id=str(shipment_id),
-        ))
-        ledger_count += 1
+        # ── 3. split accepted vs rejected ─────────────────────────────────────
+        qty_rejected = detail.quantity_rejected or Decimal("0")
+        qty_accepted = detail.quantity_actual - qty_rejected
 
-        # ── 3. current stock ──────────────────────────────────────────────────
-        _upsert_stock(db, detail.variant_id, detail.location_id, qty)
+        # ── 4. accepted stock → destination location ──────────────────────────
+        if qty_accepted > 0:
+            db.add(inv_models.InventoryLedger(
+                variant_id=detail.variant_id,
+                location_id=detail.location_id,
+                qty_change=qty_accepted,
+                reason=inv_models.LedgerReason.RECEIVE,
+                reference_type="inventory_shipments",
+                reference_id=str(shipment_id),
+            ))
+            ledger_count += 1
+            _upsert_stock(db, detail.variant_id, detail.location_id, qty_accepted)
+            db.add(inv_models.CostLayer(
+                variant_id=detail.variant_id,
+                location_id=detail.location_id,
+                shipment_id=shipment_id,
+                original_quantity=qty_accepted,
+                quantity_remaining=qty_accepted,
+                gross_cost=gross_cost,
+                supplier_discount=supplier_discount,
+                net_unit_cost=net_unit_cost,
+            ))
+            cost_layer_count += 1
 
-        # ── 4. cost layer (FIFO bucket) ───────────────────────────────────────
-        db.add(inv_models.CostLayer(
-            variant_id=detail.variant_id,
-            location_id=detail.location_id,
-            shipment_id=shipment_id,
-            original_quantity=qty,
-            quantity_remaining=qty,
-            gross_cost=gross_cost,
-            supplier_discount=supplier_discount,
-            net_unit_cost=net_unit_cost,
-        ))
-        cost_layer_count += 1
+        # ── 5. rejected stock → Quarantine ────────────────────────────────────
+        if qty_rejected > 0:
+            db.add(inv_models.InventoryLedger(
+                variant_id=detail.variant_id,
+                location_id=quarantine.location_id,
+                qty_change=qty_rejected,
+                reason=inv_models.LedgerReason.RECEIVE,
+                reference_type="inventory_shipments",
+                reference_id=str(shipment_id),
+            ))
+            ledger_count += 1
+            _upsert_stock(db, detail.variant_id, quarantine.location_id, qty_rejected)
+            db.add(inv_models.CostLayer(
+                variant_id=detail.variant_id,
+                location_id=quarantine.location_id,
+                shipment_id=shipment_id,
+                original_quantity=qty_rejected,
+                quantity_remaining=qty_rejected,
+                gross_cost=gross_cost,
+                supplier_discount=supplier_discount,
+                net_unit_cost=net_unit_cost,
+            ))
+            cost_layer_count += 1
 
-        # ── 5. update PO item received qty ────────────────────────────────────
-        if po_item:
-            po_item.received_quantity = (po_item.received_quantity or Decimal('0')) + qty
+        # ── 6. update PO item received qty (accepted only) ────────────────────
+        if po_item and qty_accepted > 0:
+            po_item.received_quantity = (
+                po_item.received_quantity or Decimal("0")
+            ) + qty_accepted
 
-    # ── 6. auto-advance PO status ─────────────────────────────────────────────
+        # ── 7. accumulate invoice total (quantity_declared × net cost) ────────
+        invoice_total += (detail.quantity_declared or Decimal("0")) * net_unit_cost
+
+    # ── 8. auto-advance PO status ─────────────────────────────────────────────
     if po:
         new_status = _recalculate_po_status(db, po)
         if new_status and new_status != po.status:
             po.status = new_status
             po_status_new = new_status
+
+    # ── 9. auto-create supplier invoice ──────────────────────────────────────
+    supplier = (
+        db.query(inv_models.Supplier)
+        .filter_by(supplier_id=shipment.supplier_id)
+        .first()
+    )
+    today    = date.today()
+    due_date = today + timedelta(days=supplier.terms if supplier and supplier.terms else 0)
+
+    invoice = ap_models.SupplierInvoice(
+        supplier_id=shipment.supplier_id,
+        shipment_id=shipment_id,
+        invoice_date=today,
+        due_date=due_date,
+        total_amount=invoice_total,
+        status="Unpaid",
+    )
+    db.add(invoice)
+    db.flush()  # get invoice_id before writing ap_ledger
+
+    db.add(ap_models.ApLedger(
+        supplier_id=shipment.supplier_id,
+        amount_change=invoice_total,
+        reason="INVOICE",
+        reference_type="supplier_invoices",
+        reference_id=str(invoice.invoice_id),
+    ))
 
     db.commit()
 
@@ -408,4 +493,5 @@ def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
         ledger_entries_written=ledger_count,
         cost_layers_created=cost_layer_count,
         po_status_updated=po_status_new,
+        invoice_id=invoice.invoice_id,
     )
