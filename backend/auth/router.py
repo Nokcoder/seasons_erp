@@ -1,64 +1,144 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+# auth/router.py
+import os
+from typing import List
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session, joinedload
 from passlib.context import CryptContext
 import jwt
-from datetime import datetime, timedelta
 
 from core.database import get_db
 from auth import models, schemas
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-SECRET_KEY = "super-secret-key-change-this-in-production"
-ALGORITHM = "HS256"
+SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key-change-this-in-production")
+ALGORITHM  = "HS256"
+TOKEN_TTL_HOURS = 12
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-@router.post("/register")
-def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    if db.query(models.User).filter(models.User.username == user.username).first():
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _load_user(db: Session, username: str) -> models.User | None:
+    return (
+        db.query(models.User)
+        .options(
+            joinedload(models.User.employee),
+            joinedload(models.User.roles),
+        )
+        .filter(models.User.username == username)
+        .first()
+    )
+
+
+def _make_token(user: models.User) -> str:
+    payload = {
+        "sub":   user.username,
+        "id":    user.user_id,
+        "roles": [r.role_name for r in user.roles],
+        "exp":   datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS),
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _log_attempt(db: Session, username: str, success: bool,
+                 user_id: int | None = None, request: Request | None = None):
+    ip = request.client.host if request and request.client else None
+    ua = request.headers.get("user-agent") if request else None
+    db.add(models.LoginAttempt(
+        user_id=user_id,
+        username=username,
+        success=success,
+        ip_address=ip,
+        user_agent=ua,
+    ))
+
+
+# ── POST /auth/register ───────────────────────────────────────────────────────
+
+@router.post("/register", response_model=schemas.UserResponse, status_code=201)
+def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
+    if db.query(models.User).filter(models.User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
 
-    hashed_pw = pwd_context.hash(user.password)
-    new_user = models.User(username=user.username, hashed_password=hashed_pw, role=user.role)
-    db.add(new_user)
+    # 1. create employee
+    employee = models.Employee(
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+    )
+    db.add(employee)
+    db.flush()   # get employee_id before creating user
+
+    # 2. create user
+    user = models.User(
+        employee_id=employee.employee_id,
+        username=payload.username,
+        password_hash=pwd_context.hash(payload.password),
+    )
+    db.add(user)
+    db.flush()   # get user_id before assigning roles
+
+    # 3. assign roles (create Role rows on the fly if they don't exist)
+    for role_name in payload.role_names:
+        role = db.query(models.Role).filter(models.Role.role_name == role_name).first()
+        if not role:
+            role = models.Role(role_name=role_name)
+            db.add(role)
+            db.flush()
+        user.roles.append(role)
+
     db.commit()
-    return {"message": "User created successfully"}
+    db.refresh(user)
+    return user
 
-@router.post("/login")
-def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
-    # --- SPY LOGS START ---
-    print(f"🕵️ FRONTEND SENT Username: '{user.username}'")
-    print(f"🕵️ FRONTEND SENT Password: '{user.password}'")
-    
-    db_user = db.query(models.User).filter(models.User.username == user.username).first()
-    print(f"🕵️ DB QUERY SUCCESSFUL? {db_user is not None}")
-    
-    if db_user:
-        print(f"🕵️ HASH IN DB: '{db_user.hashed_password}'")
-        is_valid = pwd_context.verify(user.password, db_user.hashed_password)
-        print(f"🕵️ BCRYPT VERIFICATION RESULT: {is_valid}")
-    # --- SPY LOGS END ---
 
-    if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
+# ── POST /auth/login ──────────────────────────────────────────────────────────
+
+@router.post("/login", response_model=schemas.LoginResponse)
+def login(payload: schemas.UserLogin, request: Request, db: Session = Depends(get_db)):
+    user = _load_user(db, payload.username)
+
+    if not user or not pwd_context.verify(payload.password, user.password_hash):
+        # log the failed attempt (user_id may be None if username not found)
+        _log_attempt(db, payload.username, success=False,
+                     user_id=user.user_id if user else None,
+                     request=request)
+        db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Generate the access token
-    token_data = {
-        "sub": db_user.username, 
-        "id": db_user.user_id, 
-        "role": db_user.role,
-        "exp": datetime.utcnow() + timedelta(hours=12)
-    }
-    token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
+    if not user.is_active:
+        _log_attempt(db, payload.username, success=False,
+                     user_id=user.user_id, request=request)
+        db.commit()
+        raise HTTPException(status_code=403, detail="Account is deactivated")
 
-    return {
-        "access_token": token, 
-        "token_type": "bearer",
-        "user": {"id": db_user.user_id, "username": db_user.username, "role": db_user.role}
-    }
+    # update last login timestamp
+    user.last_login_at = datetime.now(timezone.utc)
+    _log_attempt(db, payload.username, success=True,
+                 user_id=user.user_id, request=request)
+    db.commit()
+    db.refresh(user)
 
-@router.get("/users")
+    return schemas.LoginResponse(
+        access_token=_make_token(user),
+        token_type="bearer",
+        user=user,
+    )
+
+
+# ── GET /auth/users/all ───────────────────────────────────────────────────────
+
+@router.get("/users/all", response_model=List[schemas.UserResponse])
 def get_all_active_users(db: Session = Depends(get_db)):
-    # Grab all active users so we can populate the dropdown
-    users = db.query(models.User).filter(models.User.is_active == True).all()
-    return users
+    return (
+        db.query(models.User)
+        .options(
+            joinedload(models.User.employee),
+            joinedload(models.User.roles),
+        )
+        .filter(models.User.is_active == True)
+        .all()
+    )

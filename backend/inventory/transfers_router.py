@@ -1,291 +1,408 @@
+# inventory/transfers_router.py
+from typing import List
+from datetime import datetime, timezone
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
-from typing import List, Dict, Optional
-from pydantic import BaseModel
-from decimal import Decimal
-from datetime import datetime
+
 from core.database import get_db
 from inventory import models, schemas
-
 from auth.dependencies import require_permission
 
-router = APIRouter(prefix="/transfers", tags=["Stock Transfers"])
+router = APIRouter(prefix="/transfers", tags=["Transfers"])
 
 
-# ==========================================
-# PAYLOAD BLUEPRINTS (Pydantic Schemas)
-# ==========================================
-class TransferActionPayload(BaseModel):
-    items: Dict[int, Decimal]  # { item_id: qty } -> Used for Releasing
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-class UnexpectedItemPayload(BaseModel):
-    product_id: int
-    received_qty: Decimal
-    bundling: Optional[str] = None
-
-class TransferReceivePayload(BaseModel):
-    items: Dict[int, Decimal]  # { item_id: qty } -> Expected items
-    unexpected_items: List[UnexpectedItemPayload] = []  # Brand new rows
-
-class TransferHeaderUpdate(BaseModel):
-    document_id: Optional[str] = None
-    released_by_id: Optional[int] = None
-    received_by_id: Optional[int] = None
-
-
-# ==========================================
-# GET ROUTES (Reading Data)
-# ==========================================
-@router.get("/users/all", response_model=List[schemas.UserSchema])
-def get_all_users(db: Session = Depends(get_db)):
-    return db.query(models.User).filter(models.User.is_active == True).all()
-
-@router.get("/locations/all", response_model=List[schemas.TransferLocationSchema])
-def get_all_locations(db: Session = Depends(get_db)):
-    return db.query(models.Location).all()
-
-# Add this schema near your other Pydantic schemas at the top
-class LocationCreate(BaseModel):
-    name: str
-    parent_location_id: Optional[int] = None
-    type: Optional[str] = "BIN"
-
-# Add this route beneath your get("/locations/all") route
-@router.post("/locations", response_model=schemas.TransferLocationSchema)
-def create_location(payload: LocationCreate, db: Session = Depends(get_db)):
-    new_loc = models.Location(
-        name=payload.name,
-        parent_location_id=payload.parent_location_id,
-        type=payload.type,
-        is_active=True
+def _load_transfer(transfer_id: int, db: Session) -> models.InventoryTransfer:
+    transfer = (
+        db.query(models.InventoryTransfer)
+        .options(
+            selectinload(models.InventoryTransfer.from_location),
+            selectinload(models.InventoryTransfer.to_location),
+            selectinload(models.InventoryTransfer.released_by),
+            selectinload(models.InventoryTransfer.received_by),
+            selectinload(models.InventoryTransfer.requested_by),
+            selectinload(models.InventoryTransfer.items),
+        )
+        .filter(models.InventoryTransfer.transfer_id == transfer_id)
+        .first()
     )
-    db.add(new_loc)
-    db.commit()
-    db.refresh(new_loc)
-    return new_loc
-
-
-# The payload schema for an update
-class LocationUpdate(BaseModel):
-    name: str
-
-
-# The update route
-@router.put("/locations/{location_id}", response_model=schemas.TransferLocationSchema)
-def update_location(location_id: int, payload: LocationUpdate, db: Session = Depends(get_db)):
-    db_loc = db.query(models.Location).filter(models.Location.location_id == location_id).first()
-
-    if not db_loc:
-        raise HTTPException(status_code=404, detail="Location not found")
-
-    db_loc.name = payload.name
-    db.commit()
-    db.refresh(db_loc)
-    return db_loc
-
-
-
-
-@router.get("/", response_model=List[schemas.StockTransferSchema])
-def get_transfers(db: Session = Depends(get_db)):
-    return db.query(models.StockTransfer).options(
-        selectinload(models.StockTransfer.from_location),
-        selectinload(models.StockTransfer.to_location),
-        selectinload(models.StockTransfer.released_by),
-        selectinload(models.StockTransfer.received_by)
-    ).order_by(models.StockTransfer.transfer_date.desc()).all()
-
-@router.get("/{transfer_id}", response_model=schemas.StockTransferSchema)
-def get_transfer(transfer_id: int, db: Session = Depends(get_db)):
-    transfer = db.query(models.StockTransfer).filter(models.StockTransfer.transfer_id == transfer_id).options(
-        selectinload(models.StockTransfer.from_location),
-        selectinload(models.StockTransfer.to_location),
-        selectinload(models.StockTransfer.released_by),
-        selectinload(models.StockTransfer.received_by),
-        selectinload(models.StockTransfer.items).selectinload(models.StockTransferItem.product)
-    ).first()
-
     if not transfer:
-        raise HTTPException(status_code=404, detail="Transfer Document not found")
+        raise HTTPException(status_code=404, detail="Transfer not found")
     return transfer
 
 
-# ==========================================
-# POST/PUT ROUTES (Actioning Data)
-# ==========================================
-
-# 1. CREATE TRANSFER (And auto-process if admin)
-@router.post("/", response_model=schemas.StockTransferSchema)
-def create_transfer(payload: schemas.StockTransferCreate, db: Session = Depends(get_db)):
-    new_transfer = models.StockTransfer(
-        document_id=payload.document_id,
-        transfer_date=datetime.utcnow(),
-        from_location_id=payload.from_location_id,
-        to_location_id=payload.to_location_id,
-        released_by_id=payload.released_by_id,
-        received_by_id=payload.received_by_id,
-        bundle_count=payload.bundle_count,
-        status="COMPLETED" if payload.is_direct else "REQUESTED",
-        has_discrepancy=False
+def _upsert_stock(
+    db: Session,
+    variant_id: int,
+    location_id: int,
+    delta: Decimal,
+):
+    """Add delta to current_stocks row, creating it if necessary."""
+    stock = (
+        db.query(models.CurrentStock)
+        .filter_by(variant_id=variant_id, location_id=location_id)
+        .first()
     )
-    db.add(new_transfer)
-    db.flush()
-
-    for item in payload.items:
-        db.add(models.StockTransferItem(
-            transfer_id=new_transfer.transfer_id,
-            product_id=item.product_id,
-            bundling=item.bundling,
-            requested_qty=item.requested_qty,
-            released_qty=item.requested_qty if payload.is_direct else None,
-            received_qty=item.requested_qty if payload.is_direct else None
+    if stock:
+        stock.quantity += delta
+    else:
+        db.add(models.CurrentStock(
+            variant_id=variant_id,
+            location_id=location_id,
+            quantity=delta,
         ))
 
-        if payload.is_direct:
-            from_stock = db.query(models.CurrentStock).filter_by(
-                product_id=item.product_id, location_id=payload.from_location_id
-            ).first()
-            if from_stock:
-                from_stock.quantity -= item.requested_qty
-            else:
-                db.add(models.CurrentStock(product_id=item.product_id, location_id=payload.from_location_id, quantity=-item.requested_qty))
 
-            to_stock = db.query(models.CurrentStock).filter_by(
-                product_id=item.product_id, location_id=payload.to_location_id
-            ).first()
-            if to_stock:
-                to_stock.quantity += item.requested_qty
-            else:
-                db.add(models.CurrentStock(product_id=item.product_id, location_id=payload.to_location_id, quantity=item.requested_qty))
-
-    db.commit()
-    return get_transfer(new_transfer.transfer_id, db)
-
-
-# 2. RELEASE TRANSFER (Warehouse puts it on the truck)
-@router.put("/{transfer_id}/release", response_model=schemas.StockTransferSchema)
-def release_transfer(transfer_id: int, payload: TransferActionPayload, db: Session = Depends(get_db)):
-    transfer = db.query(models.StockTransfer).filter(models.StockTransfer.transfer_id == transfer_id).first()
-    if not transfer:
-        raise HTTPException(status_code=404, detail="Transfer not found")
-
-    for item in transfer.items:
-        if item.item_id in payload.items:
-            item.released_qty = payload.items[item.item_id]
-
-            from_stock = db.query(models.CurrentStock).filter(
-                models.CurrentStock.product_id == item.product_id,
-                models.CurrentStock.location_id == transfer.from_location_id
-            ).first()
-
-            if from_stock:
-                from_stock.quantity -= item.released_qty
-            else:
-                db.add(models.CurrentStock(product_id=item.product_id, location_id=transfer.from_location_id, quantity=-item.released_qty))
-
-    transfer.status = "IN_TRANSIT"
-    db.commit()
-    return get_transfer(transfer_id, db)
-
-
-# 3. RECEIVE TRANSFER (Destination signs for it and checks discrepancies)
-@router.put("/{transfer_id}/receive", response_model=schemas.StockTransferSchema)
-def receive_transfer(transfer_id: int, payload: TransferReceivePayload, db: Session = Depends(get_db)):
-    transfer = db.query(models.StockTransfer).filter(models.StockTransfer.transfer_id == transfer_id).first()
-    discrepancy_found = False
-
-    for item in transfer.items:
-        if item.item_id in payload.items:
-            item.received_qty = payload.items[item.item_id]
-
-            if item.received_qty != item.released_qty:
-                discrepancy_found = True
-
-            to_stock = db.query(models.CurrentStock).filter(
-                models.CurrentStock.product_id == item.product_id,
-                models.CurrentStock.location_id == transfer.to_location_id
-            ).first()
-
-            if to_stock:
-                to_stock.quantity += item.received_qty
-            elif item.received_qty > 0:
-                new_stock = models.CurrentStock(product_id=item.product_id, location_id=transfer.to_location_id, quantity=item.received_qty)
-                db.add(new_stock)
-
-    for un_item in payload.unexpected_items:
-        discrepancy_found = True
-        new_row = models.StockTransferItem(
-            transfer_id=transfer.transfer_id,
-            product_id=un_item.product_id,
-            bundling=un_item.bundling,
-            requested_qty=0,
-            released_qty=0,
-            received_qty=un_item.received_qty
-        )
-        db.add(new_row)
-
-        to_stock = db.query(models.CurrentStock).filter(
-            models.CurrentStock.product_id == un_item.product_id,
-            models.CurrentStock.location_id == transfer.to_location_id
-        ).first()
-
-        if to_stock:
-            to_stock.quantity += un_item.received_qty
-        else:
-            db.add(models.CurrentStock(product_id=un_item.product_id, location_id=transfer.to_location_id, quantity=un_item.received_qty))
-
-    transfer.has_discrepancy = discrepancy_found
-    transfer.status = "COMPLETED"
-    db.commit()
-
-    return get_transfer(transfer_id, db)
-
-
-# --- UPDATE TRANSFER HEADER (Admin Only) ---
-class TransferHeaderUpdate(BaseModel):
-    document_id: Optional[str] = None
-    released_by_id: Optional[int] = None
-    received_by_id: Optional[int] = None
-
-
-@router.put("/{transfer_id}/header", response_model=schemas.StockTransferSchema)
-def update_transfer_header(transfer_id: int, payload: TransferHeaderUpdate, db: Session = Depends(get_db)):
-    transfer = db.query(models.StockTransfer).filter(models.StockTransfer.transfer_id == transfer_id).first()
-
-    if not transfer:
-        raise HTTPException(status_code=404, detail="Transfer not found")
-
-    # Only update what was provided
-    if payload.document_id is not None:
-        transfer.document_id = payload.document_id
-    if payload.released_by_id is not None:
-        transfer.released_by_id = payload.released_by_id
-    if payload.received_by_id is not None:
-        transfer.received_by_id = payload.received_by_id
-
-    db.commit()
-    # Return the full nested object using our existing GET function
-    return get_transfer(transfer_id, db)
-
-
-@router.put("/{transfer_id}/header", response_model=schemas.StockTransferSchema)
-def update_transfer_header(
-        transfer_id: int,
-        payload: TransferHeaderUpdate,
-        db: Session = Depends(get_db),
-        user: models.User = Depends(require_permission("edit_transfer_header"))  # BOUNCER ATTACHED!
+def _write_ledger(
+    db: Session,
+    variant_id: int,
+    location_id: int,
+    qty_change: Decimal,
+    reason: models.LedgerReason,
+    reference_type: str,
+    reference_id: str,
 ):
-    transfer = db.query(models.StockTransfer).filter(models.StockTransfer.transfer_id == transfer_id).first()
+    db.add(models.InventoryLedger(
+        variant_id=variant_id,
+        location_id=location_id,
+        qty_change=qty_change,
+        reason=reason,
+        reference_type=reference_type,
+        reference_id=reference_id,
+    ))
 
-    if not transfer:
-        raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if payload.document_id is not None:
-        transfer.document_id = payload.document_id
-    if payload.released_by_id is not None:
-        transfer.released_by_id = payload.released_by_id
-    if payload.received_by_id is not None:
-        transfer.received_by_id = payload.received_by_id
+def _consume_fifo(
+    db: Session,
+    variant_id: int,
+    location_id: int,
+    qty: Decimal,
+) -> list[tuple[Decimal, Decimal]]:
+    """
+    Deduct qty from cost layers FIFO oldest-first (row-locks layers for concurrency safety).
+    Returns [(units_taken, net_unit_cost), ...].
+    Raises 400 if available layers are insufficient to cover qty.
+    """
+    # Pre-flight: check current_stocks before touching cost layers.
+    # If current_stocks and layers have drifted out of sync (e.g. due to a
+    # failed partial transaction), this catches the discrepancy early and
+    # prevents stock from going negative.
+    stock = (
+        db.query(models.CurrentStock)
+        .filter_by(variant_id=variant_id, location_id=location_id)
+        .first()
+    )
+    available_stock = stock.quantity if stock else Decimal("0")
+    if available_stock < qty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient stock for variant {variant_id} at location {location_id}: "
+                f"need {qty}, stock balance is {available_stock}"
+            ),
+        )
+
+    layers = (
+        db.query(models.CostLayer)
+        .filter(
+            models.CostLayer.variant_id == variant_id,
+            models.CostLayer.location_id == location_id,
+            models.CostLayer.quantity_remaining > 0,
+        )
+        .order_by(models.CostLayer.created_at.asc())
+        .with_for_update()
+        .all()
+    )
+
+    available = sum(l.quantity_remaining for l in layers)
+    if available < qty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient cost layers for variant {variant_id} at location {location_id}: "
+                f"need {qty}, available {available}"
+            ),
+        )
+
+    consumed: list[tuple[Decimal, Decimal]] = []
+    remaining = qty
+    for layer in layers:
+        if remaining <= 0:
+            break
+        take = min(layer.quantity_remaining, remaining)
+        layer.quantity_remaining -= take
+        consumed.append((take, layer.net_unit_cost))
+        remaining -= take
+
+    return consumed
+
+
+def _create_transfer_layers(
+    db: Session,
+    variant_id: int,
+    location_id: int,
+    consumed: list[tuple[Decimal, Decimal]],
+    actual_in: Decimal,
+    actual_out: Decimal,
+) -> None:
+    """
+    Create FIFO cost layers at the transfer destination, carrying over net_unit_cost
+    from the consumed source layers unchanged.  If actual_in != actual_out, each slice
+    is scaled proportionally so that total destination qty == actual_in.
+    """
+    if not consumed or actual_in <= 0:
+        return
+
+    scale = (actual_in / actual_out) if actual_out > 0 else Decimal("1")
+    for qty_taken, net_unit_cost in consumed:
+        dest_qty = (qty_taken * scale).quantize(Decimal("0.0001"))
+        if dest_qty <= 0:
+            continue
+        db.add(models.CostLayer(
+            variant_id=variant_id,
+            location_id=location_id,
+            shipment_id=None,
+            original_quantity=dest_qty,
+            quantity_remaining=dest_qty,
+            gross_cost=net_unit_cost,
+            supplier_discount=Decimal("0"),
+            net_unit_cost=net_unit_cost,
+        ))
+
+
+def _get_bundle_components(
+    db: Session,
+    variant_id: int,
+) -> list[models.BundleComponent]:
+    """Returns the bundle components for a variant, or an empty list if it is not a bundle."""
+    return (
+        db.query(models.BundleComponent)
+        .filter(models.BundleComponent.bundle_variant_id == variant_id)
+        .all()
+    )
+
+
+def _move_variant(
+    db: Session,
+    variant_id: int,
+    from_location_id: int,
+    to_location_id: int,
+    actual_out: Decimal,
+    actual_in: Decimal,
+    ref_id: str,
+) -> None:
+    """
+    Write ledger entries, consume FIFO layers at source, create matching layers
+    at destination, and update current_stocks — all for a single (non-bundle) variant.
+    """
+    _write_ledger(db, variant_id, from_location_id, -actual_out,
+                  models.LedgerReason.TRANSFER_OUT, "inventory_transfer", ref_id)
+    _write_ledger(db, variant_id, to_location_id, actual_in,
+                  models.LedgerReason.TRANSFER_IN, "inventory_transfer", ref_id)
+
+    consumed = _consume_fifo(db, variant_id, from_location_id, actual_out)
+    _create_transfer_layers(db, variant_id, to_location_id, consumed, actual_in, actual_out)
+
+    _upsert_stock(db, variant_id, from_location_id, -actual_out)
+    _upsert_stock(db, variant_id, to_location_id,   actual_in)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOCATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/locations/all", response_model=List[schemas.LocationOut])
+def list_locations(db: Session = Depends(get_db)):
+    return (
+        db.query(models.Location)
+        .filter(models.Location.is_deleted == False)
+        .all()
+    )
+
+
+@router.post("/locations", response_model=schemas.LocationOut, status_code=201)
+def create_location(payload: schemas.LocationCreate, db: Session = Depends(get_db)):
+    loc = models.Location(
+        location_name=payload.location_name,
+        location_type=payload.location_type,
+        parent_location_id=payload.parent_location_id,
+        address=payload.address,
+    )
+    db.add(loc)
+    db.commit()
+    db.refresh(loc)
+    return loc
+
+
+@router.put("/locations/{location_id}", response_model=schemas.LocationOut)
+def update_location(
+    location_id: int,
+    payload: schemas.LocationUpdate,
+    db: Session = Depends(get_db),
+):
+    loc = (
+        db.query(models.Location)
+        .filter(models.Location.location_id == location_id, models.Location.is_deleted == False)
+        .first()
+    )
+    if not loc:
+        raise HTTPException(status_code=404, detail="Location not found")
+    if loc.is_system:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{loc.location_name}' is a system location and cannot be modified",
+        )
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(loc, key, value)
 
     db.commit()
-    return get_transfer(transfer_id, db)  # Re-fetch to return the full nested object
+    db.refresh(loc)
+    return loc
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRANSFERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/", response_model=List[schemas.TransferOut])
+def list_transfers(db: Session = Depends(get_db)):
+    return (
+        db.query(models.InventoryTransfer)
+        .options(
+            selectinload(models.InventoryTransfer.from_location),
+            selectinload(models.InventoryTransfer.to_location),
+            selectinload(models.InventoryTransfer.released_by),
+            selectinload(models.InventoryTransfer.received_by),
+            selectinload(models.InventoryTransfer.requested_by),
+            selectinload(models.InventoryTransfer.items),
+        )
+        .order_by(models.InventoryTransfer.occurred_at.desc())
+        .all()
+    )
+
+
+@router.get("/{transfer_id}", response_model=schemas.TransferOut)
+def get_transfer(transfer_id: int, db: Session = Depends(get_db)):
+    return _load_transfer(transfer_id, db)
+
+
+@router.post("/", response_model=schemas.TransferOut, status_code=201)
+def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_db)):
+    """
+    Record a completed stock transfer.
+
+    For each item the actual movement quantity is determined as:
+      quantity_received  (if provided)   — what arrived at destination
+      quantity_released  (if provided)   — what left the source
+      quantity_requested                 — fallback
+
+    Both inventory_ledger and current_stocks are written atomically.
+    """
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Transfer must have at least one item")
+
+    # validate both locations exist, are not deleted, and are active
+    for loc_id, label in [
+        (payload.from_location_id, "Source"),
+        (payload.to_location_id,   "Destination"),
+    ]:
+        loc = db.query(models.Location).filter(
+            models.Location.location_id == loc_id,
+            models.Location.is_deleted == False,
+        ).first()
+        if not loc:
+            raise HTTPException(status_code=404, detail=f"{label} location not found")
+        if loc.status == "Inactive":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} location '{loc.location_name}' is inactive",
+            )
+
+    transfer = models.InventoryTransfer(
+        transfer_pid=payload.transfer_pid,
+        from_location_id=payload.from_location_id,
+        to_location_id=payload.to_location_id,
+        released_by_user_id=payload.released_by_user_id,
+        received_by_user_id=payload.received_by_user_id,
+        requested_by_user_id=payload.requested_by_user_id,
+        total_bundle_count=payload.total_bundle_count,
+        occurred_at=datetime.now(timezone.utc),
+    )
+    db.add(transfer)
+    db.flush()  # get transfer_id for PID and ledger reference
+
+    # auto-generate PID if not supplied
+    if not transfer.transfer_pid:
+        transfer.transfer_pid = f"TRF-{transfer.transfer_id:06d}"
+
+    ref_id = str(transfer.transfer_id)
+
+    for item_in in payload.items:
+        # determine the quantity that actually moved
+        actual_out = item_in.quantity_released or item_in.quantity_requested
+        actual_in  = item_in.quantity_received or actual_out
+
+        db.add(models.InventoryTransferItem(
+            transfer_id=transfer.transfer_id,
+            variant_id=item_in.variant_id,
+            quantity_requested=item_in.quantity_requested,
+            quantity_released=item_in.quantity_released,
+            quantity_received=item_in.quantity_received,
+        ))
+
+        # ── move stock: bundle explosion or direct variant ──────────────────
+        components = _get_bundle_components(db, item_in.variant_id)
+        if components:
+            # Bundle variant: explode into components.
+            # The InventoryTransferItem above records the bundle-level quantities
+            # for the document trail; all actual stock / ledger / FIFO movements
+            # happen at the component level.
+            for comp in components:
+                comp_out = actual_out * comp.quantity
+                comp_in  = actual_in  * comp.quantity
+                _move_variant(db, comp.component_variant_id,
+                              payload.from_location_id, payload.to_location_id,
+                              comp_out, comp_in, ref_id)
+        else:
+            _move_variant(db, item_in.variant_id,
+                          payload.from_location_id, payload.to_location_id,
+                          actual_out, actual_in, ref_id)
+
+    db.commit()
+    return _load_transfer(transfer.transfer_id, db)
+
+
+# ── Admin-only header edit ────────────────────────────────────────────────────
+
+class _HeaderPatch(schemas.BaseModel):
+    transfer_pid: str | None = None
+    released_by_user_id: int | None = None
+    received_by_user_id: int | None = None
+    requested_by_user_id: int | None = None
+    total_bundle_count: int | None = None
+
+    class Config:
+        from_attributes = True
+
+
+@router.put(
+    "/{transfer_id}/header",
+    response_model=schemas.TransferOut,
+)
+def update_transfer_header(
+    transfer_id: int,
+    payload: _HeaderPatch,
+    db: Session = Depends(get_db),
+    _user: models.User = Depends(require_permission("edit_transfer_header")),
+):
+    transfer = _load_transfer(transfer_id, db)
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(transfer, key, value)
+
+    db.commit()
+    return _load_transfer(transfer_id, db)

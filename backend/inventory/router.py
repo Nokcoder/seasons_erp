@@ -1,303 +1,772 @@
 # inventory/router.py
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
-from typing import List, Optional
-from datetime import datetime
-from pydantic import BaseModel
 
 from core.database import get_db
 from inventory import models, schemas
-import math
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
-# 1. READ ALL (For the Dashboard)
-@router.get("/", response_model=List[schemas.ProductSchema])
-def get_products(db: Session = Depends(get_db)):
-    return db.query(models.Product).options(
-        selectinload(models.Product.categories),
-        selectinload(models.Product.current_stock).selectinload(models.CurrentStock.location),
-        selectinload(models.Product.cost_layers),
-        selectinload(models.Product.price_history)
-    ).all()
 
-# 2. READ SINGLE (For the Detail Page)
-@router.get("/{product_id}", response_model=schemas.ProductSchema)
-def get_product(product_id: int, db: Session = Depends(get_db)):
-    product = db.query(models.Product).filter(models.Product.product_id == product_id).options(
-        selectinload(models.Product.categories),
-        selectinload(models.Product.current_stock).selectinload(models.CurrentStock.location),
-        selectinload(models.Product.cost_layers),
-        selectinload(models.Product.price_history)
-    ).first()
+# ── helpers ───────────────────────────────────────────────────────────────────
 
+def _load_product(product_id: int, db: Session) -> models.Product:
+    product = (
+        db.query(models.Product)
+        .options(
+            selectinload(models.Product.categories),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.current_stock)
+                .selectinload(models.CurrentStock.location),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.suppliers)
+                .selectinload(models.VariantSupplier.supplier),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.cost_layers),
+        )
+        .filter(
+            models.Product.product_id == product_id,
+            models.Product.is_deleted == False,
+        )
+        .first()
+    )
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     return product
 
-# 3. CREATE
 
-# 3. CREATE
-# 3. CREATE
-@router.post("/", response_model=schemas.ProductSchema)
-def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
-    product_data = product.model_dump()
-
-    # 1. Intercept the string (e.g., "Hardware, Tools")
-    categories_str = product_data.pop('categories', None)
-
-    # 2. Save the flat data
-    db_product = models.Product(**product_data)
-
-    # 3. The Auto-Tagger: Parse the string into real Database Categories
-    if categories_str:
-        category_names = [c.strip() for c in categories_str.split(',') if c.strip()]
-        category_objects = []
-        for name in category_names:
-            # Check if category already exists (case-insensitive)
-            cat = db.query(models.Category).filter(models.Category.category_name.ilike(name)).first()
-            if not cat:
-                # Auto-create it if it's a brand new category!
-                cat = models.Category(category_name=name)
-                db.add(cat)
-            category_objects.append(cat)
-        db_product.categories = category_objects
-
-    db.add(db_product)
-    db.flush()
-
-    # 4. Create the Genesis Price History record
-    if db_product.tag_price is not None or db_product.net_price is not None:
-        initial_history = models.PriceHistory(
-            product_id=db_product.product_id,
-            new_tag_price=db_product.tag_price,
-            new_net_price=db_product.net_price,
-            changed_at=datetime.utcnow()
+def _enforce_single_default(product_id: int, new_default_id: int, db: Session) -> None:
+    """Unset is_default on every other variant for this product, then set it on new_default_id."""
+    (
+        db.query(models.Variant)
+        .filter(
+            models.Variant.product_id == product_id,
+            models.Variant.variant_id != new_default_id,
+            models.Variant.is_deleted == False,
         )
-        db.add(initial_history)
+        .update({"is_default": False}, synchronize_session="fetch")
+    )
+
+
+def _resolve_categories(names: List[str], db: Session) -> List[models.ProductCategory]:
+    cats = []
+    for name in names:
+        cat = (
+            db.query(models.ProductCategory)
+            .filter(models.ProductCategory.category_name.ilike(name.strip()))
+            .first()
+        )
+        if not cat:
+            cat = models.ProductCategory(category_name=name.strip())
+            db.add(cat)
+        cats.append(cat)
+    return cats
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRODUCTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/", response_model=List[schemas.ProductOut])
+def list_products(db: Session = Depends(get_db)):
+    return (
+        db.query(models.Product)
+        .options(
+            selectinload(models.Product.categories),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.current_stock)
+                .selectinload(models.CurrentStock.location),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.suppliers)
+                .selectinload(models.VariantSupplier.supplier),
+            selectinload(models.Product.variants)
+                .selectinload(models.Variant.cost_layers),
+        )
+        .filter(models.Product.is_deleted == False)
+        .all()
+    )
+
+
+@router.get("/{product_id}", response_model=schemas.ProductOut)
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    return _load_product(product_id, db)
+
+
+@router.post("/", response_model=schemas.ProductOut, status_code=201)
+def create_product(payload: schemas.ProductCreate, db: Session = Depends(get_db)):
+    if not payload.variants:
+        raise HTTPException(status_code=400, detail="At least one variant is required")
+
+    product = models.Product(
+        name=payload.name,
+        product_type=payload.product_type,
+        description=payload.description,
+        base_uom_id=payload.base_uom_id,
+    )
+
+    if payload.category_names:
+        product.categories = _resolve_categories(payload.category_names, db)
+
+    db.add(product)
+    db.flush()  # get product_id
+
+    defaults = [v for v in payload.variants if v.is_default]
+    if len(defaults) > 1:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Only one variant may have is_default=true")
+
+    # auto-assign default to first variant if none is marked
+    if not defaults:
+        payload.variants[0].is_default = True
+
+    for v in payload.variants:
+        # ensure PID is unique
+        if db.query(models.Variant).filter(models.Variant.PID == v.PID).first():
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"PID '{v.PID}' already exists")
+        db.add(models.Variant(
+            product_id=product.product_id,
+            PID=v.PID,
+            variant_name=v.variant_name,
+            sku=v.sku,
+            price=v.price,
+            promo_price=v.promo_price,
+            is_default=v.is_default,
+            attributes=v.attributes,
+        ))
 
     db.commit()
-    db.refresh(db_product)
-    return db_product
+    return _load_product(product.product_id, db)
 
 
-# 4. UPDATE
-@router.put("/{product_id}", response_model=schemas.ProductSchema)
-def update_product(product_id: int, product_update: schemas.ProductUpdate, db: Session = Depends(get_db)):
-    db_product = db.query(models.Product).filter(models.Product.product_id == product_id).first()
-    if not db_product:
-        raise HTTPException(status_code=404, detail="Product not found")
+@router.put("/{product_id}", response_model=schemas.ProductOut)
+def update_product(
+    product_id: int,
+    payload: schemas.ProductUpdate,
+    db: Session = Depends(get_db),
+):
+    product = _load_product(product_id, db)
+    data = payload.model_dump(exclude_unset=True)
 
-    update_data = product_update.model_dump(exclude_unset=True)
+    if "category_names" in data:
+        product.categories = _resolve_categories(data.pop("category_names") or [], db)
 
-    # 1. The Auto-Tagger for Updates
-    if 'category_text' in update_data:
-        categories_str = update_data.pop('category_text')
-
-        if categories_str:
-            category_names = [c.strip() for c in categories_str.split(',') if c.strip()]
-            category_objects = []
-            for name in category_names:
-                cat = db.query(models.ProductCategory).filter(models.ProductCategory.category_name.ilike(name)).first()
-                if not cat:
-                    cat = models.ProductCategory(category_name=name)
-                    db.add(cat)
-                category_objects.append(cat)
-            db_product.categories = category_objects
-        else:
-            db_product.categories = []  # Clear if empty
-
-    # 2. Apply updates
-    for key, value in update_data.items():
-        setattr(db_product, key, value)
+    for key, value in data.items():
+        setattr(product, key, value)
 
     try:
         db.commit()
-        return get_product(product_id, db)
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Database error.")
+        raise HTTPException(status_code=400, detail="Database error")
+
+    return _load_product(product_id, db)
 
 
-@router.get("/{product_id}/ledger/{location_id}")  # <--- FIXED PREFIX AND INDENTATION
-def get_item_ledger(product_id: int, location_id: int, db: Session = Depends(get_db)):
-        # 1. Fetch Context (Header Info)
-        product = db.query(models.Product).filter(models.Product.product_id == product_id).first()
-        location = db.query(models.Location).filter(models.Location.location_id == location_id).first()
-
-        # Get current stock at this specific location
-        stock = db.query(models.CurrentStock).filter(
-            models.CurrentStock.product_id == product_id,
-            models.CurrentStock.location_id == location_id
-        ).first()
-
-        if not product or not location:
-            raise HTTPException(status_code=404, detail="Product or Location not found")
-
-        # 2. Fetch Outbound Movements (Leaving this location)
-        outbound = db.query(models.StockTransfer, models.StockTransferItem). \
-            join(models.StockTransferItem). \
-            filter(
-            models.StockTransfer.from_location_id == location_id,
-            models.StockTransferItem.product_id == product_id,
-            models.StockTransfer.status.in_(["IN_TRANSIT", "COMPLETED"])
-        ).all()
-
-        # 3. Fetch Inbound Movements (Entering this location)
-        inbound = db.query(models.StockTransfer, models.StockTransferItem). \
-            join(models.StockTransferItem). \
-            filter(
-            models.StockTransfer.to_location_id == location_id,
-            models.StockTransferItem.product_id == product_id,
-            models.StockTransfer.status == "COMPLETED"
-        ).all()
-
-        ledger_entries = []
-
-        # Format Outbound
-        for transfer, item in outbound:
-            qty = item.released_qty if item.released_qty is not None else item.requested_qty
-            if qty:
-                ledger_entries.append({
-                    "timestamp": transfer.transfer_date,
-                    "movement_type": "TRANSFER_OUT",
-                    "document_id": transfer.document_id or f"TRN-{transfer.transfer_id}",
-                    "transfer_id": transfer.transfer_id,
-                    "quantity": -float(qty)  # Negative for leaving
-                })
-
-        # Format Inbound
-        for transfer, item in inbound:
-            qty = item.received_qty if item.received_qty is not None else item.requested_qty
-            if qty:
-                ledger_entries.append({
-                    "timestamp": transfer.transfer_date,
-                    "movement_type": "TRANSFER_IN",
-                    "document_id": transfer.document_id or f"TRN-{transfer.transfer_id}",
-                    "transfer_id": transfer.transfer_id,
-                    "quantity": float(qty)  # Positive for arriving
-                })
-
-        # 4. Sort chronologically (newest first)
-        ledger_entries.sort(key=lambda x: x["timestamp"], reverse=True)
-
-        return {
-            "pid": product.pid,
-            "product_name": product.name,
-            "location_name": location.name,
-            "current_qty": float(stock.quantity) if stock else 0.0,
-            "units_per_bundle": product.units_per_bundle or 1,
-            "ledger": ledger_entries
-        }
+@router.delete("/{product_id}", status_code=204)
+def delete_product(product_id: int, db: Session = Depends(get_db)):
+    product = _load_product(product_id, db)
+    product.is_deleted = True
+    # cascade soft-delete to all active variants
+    (
+        db.query(models.Variant)
+        .filter(
+            models.Variant.product_id == product_id,
+            models.Variant.is_deleted == False,
+        )
+        .update({"is_deleted": True}, synchronize_session="fetch")
+    )
+    db.commit()
 
 
-# 1. Define what the frontend will send us after it parses the Excel file
-class ProductImportRow(BaseModel):
-    pid: str
-    brand: str | None = None
-    name: str | None = None
-    variant: str | None = None
-    sku: str | None = None
-    tag_price: float | None = None
-    net_price: float | None = None
-    categories: str | None = None
-    units_per_bundle: int | None = None
-    gross_cost: float | None = None
-    cost_discount: float | None = None
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIANTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
+@router.post("/{product_id}/variants", response_model=schemas.ProductOut, status_code=201)
+def add_variant(
+    product_id: int,
+    payload: schemas.VariantCreate,
+    db: Session = Depends(get_db),
+):
+    product = _load_product(product_id, db)
 
-# 2. The Preview Endpoint
-@router.post("/products/import-preview")
-def preview_product_import(rows: List[ProductImportRow], db: Session = Depends(get_db)):
-    from inventory.models import Product
+    if db.query(models.Variant).filter(models.Variant.PID == payload.PID).first():
+        raise HTTPException(status_code=400, detail=f"PID '{payload.PID}' already exists")
 
-    preview_results = {
-        "new_items": [],
-        "updates": [],
-        "errors": []
-    }
+    new_variant = models.Variant(
+        product_id=product.product_id,
+        PID=payload.PID,
+        variant_name=payload.variant_name,
+        sku=payload.sku,
+        price=payload.price,
+        promo_price=payload.promo_price,
+        is_default=payload.is_default,
+        attributes=payload.attributes,
+    )
+    db.add(new_variant)
+    db.flush()  # get variant_id before enforcing exclusivity
 
-    for row in rows:
-        if not row.pid:
-            continue
-
-        existing_product = db.query(Product).filter(Product.pid == row.pid).first()
-
-        if existing_product:
-            # It exists! Let's check if they changed anything important
-            changes = {}
-            if existing_product.tag_price != row.tag_price:
-                changes['price'] = {'old': existing_product.tag_price, 'new': row.tag_price}
-            if existing_product.name != row.name:
-                changes['name'] = {'old': existing_product.name, 'new': row.name}
-
-            if changes:
-                preview_results["updates"].append({
-                    "pid": row.pid,
-                    "product_name": existing_product.name,
-                    "changes": changes
-                })
-        else:
-            # It's a brand new item!
-            preview_results["new_items"].append({
-                "pid": row.pid,
-                "name": row.name,
-                "price": row.tag_price
-            })
-
-    return preview_results
-
-
-def is_valid(value):
-    """Helper to check if an Excel cell actually has data (not None or NaN)"""
-    if value is None: return False
-    if isinstance(value, float) and math.isnan(value): return False
-    if isinstance(value, str) and value.strip() == "": return False
-    return True
-
-
-@router.post("/products/import-confirm")
-def confirm_product_import(rows: List[ProductImportRow], db: Session = Depends(get_db)):
-    from inventory.models import Product
-    count_new = 0
-    count_updated = 0
-
-    for row in rows:
-        if not is_valid(row.pid):
-            continue
-
-        existing = db.query(Product).filter(Product.pid == row.pid).first()
-
-        if existing:
-            # ONLY update fields if they have valid data in the Excel sheet
-            if is_valid(row.name): existing.name = row.name
-            if is_valid(row.brand): existing.brand = row.brand
-            if is_valid(row.variant): existing.variant = row.variant
-            if is_valid(row.sku): existing.sku = row.sku
-            if is_valid(row.tag_price): existing.tag_price = row.tag_price
-            if is_valid(row.categories): existing.categories = row.categories
-            if is_valid(row.units_per_bundle): existing.units_per_bundle = row.units_per_bundle
-            if is_valid(row.gross_cost): existing.gross_cost = row.gross_cost
-            if is_valid(row.cost_discount): existing.cost_discount = row.cost_discount
-            count_updated += 1
-        else:
-            # Create brand new product
-            new_product = Product(
-                pid=row.pid,
-                name=row.name or "Unnamed Item",
-                brand=row.brand,
-                variant=row.variant,
-                sku=row.sku,
-                tag_price=row.tag_price or 0.0,
-                categories=row.categories,
-                units_per_bundle=row.units_per_bundle or 1,
-                gross_cost=row.gross_cost or 0.0,
-                cost_discount=row.cost_discount or 0.0,
-                is_active=True
-            )
-            db.add(new_product)
-            count_new += 1
+    if payload.is_default:
+        _enforce_single_default(product.product_id, new_variant.variant_id, db)
 
     db.commit()
-    return {"message": f"Successfully imported {count_new} new items and updated {count_updated} items."}
+    return _load_product(product_id, db)
+
+
+@router.put("/variants/{variant_id}", response_model=schemas.VariantOut)
+def update_variant(
+    variant_id: int,
+    payload: schemas.VariantUpdate,
+    db: Session = Depends(get_db),
+):
+    variant = (
+        db.query(models.Variant)
+        .filter(models.Variant.variant_id == variant_id, models.Variant.is_deleted == False)
+        .first()
+    )
+    if not variant:
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if updates.get("is_default") is True:
+        _enforce_single_default(variant.product_id, variant.variant_id, db)
+    elif updates.get("is_default") is False and variant.is_default:
+        # Unsetting the current default would leave the product with no default.
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot unset the only default variant — promote another variant first",
+        )
+
+    for key, value in updates.items():
+        setattr(variant, key, value)
+
+    try:
+        db.commit()
+        db.refresh(variant)
+        return variant
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Database error")
+
+
+@router.delete("/variants/{variant_id}", status_code=204)
+def delete_variant(variant_id: int, db: Session = Depends(get_db)):
+    variant = (
+        db.query(models.Variant)
+        .filter(models.Variant.variant_id == variant_id, models.Variant.is_deleted == False)
+        .first()
+    )
+    if not variant:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    if variant.is_default:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the default variant — promote another variant first",
+        )
+    variant.is_deleted = True
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INVENTORY LEDGER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/variants/{variant_id}/ledger", response_model=List[schemas.LedgerEntryOut])
+def get_variant_ledger(
+    variant_id: int,
+    location_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Returns the full ledger for a variant, optionally filtered by location."""
+    q = (
+        db.query(models.InventoryLedger)
+        .filter(models.InventoryLedger.variant_id == variant_id)
+    )
+    if location_id is not None:
+        q = q.filter(models.InventoryLedger.location_id == location_id)
+
+    entries = q.order_by(models.InventoryLedger.occurred_at.desc()).all()
+
+    if not entries and not db.query(models.Variant).filter(
+        models.Variant.variant_id == variant_id
+    ).first():
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    return entries
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SUPPLIERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/suppliers/all", response_model=List[schemas.SupplierOut])
+def list_suppliers(db: Session = Depends(get_db)):
+    return (
+        db.query(models.Supplier)
+        .filter(models.Supplier.is_deleted == False)
+        .all()
+    )
+
+
+@router.get("/suppliers/{supplier_id}", response_model=schemas.SupplierOut)
+def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
+    supplier = (
+        db.query(models.Supplier)
+        .filter(models.Supplier.supplier_id == supplier_id, models.Supplier.is_deleted == False)
+        .first()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    return supplier
+
+
+@router.post("/suppliers", response_model=schemas.SupplierOut, status_code=201)
+def create_supplier(payload: schemas.SupplierCreate, db: Session = Depends(get_db)):
+    supplier = models.Supplier(**payload.model_dump())
+    db.add(supplier)
+    db.commit()
+    db.refresh(supplier)
+    return supplier
+
+
+@router.put("/suppliers/{supplier_id}", response_model=schemas.SupplierOut)
+def update_supplier(
+    supplier_id: int,
+    payload: schemas.SupplierUpdate,
+    db: Session = Depends(get_db),
+):
+    supplier = (
+        db.query(models.Supplier)
+        .filter(models.Supplier.supplier_id == supplier_id, models.Supplier.is_deleted == False)
+        .first()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(supplier, key, value)
+
+    db.commit()
+    db.refresh(supplier)
+    return supplier
+
+
+@router.delete("/suppliers/{supplier_id}", status_code=204)
+def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
+    supplier = (
+        db.query(models.Supplier)
+        .filter(models.Supplier.supplier_id == supplier_id, models.Supplier.is_deleted == False)
+        .first()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    supplier.is_deleted = True
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIANT BARCODES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_variant_or_404(variant_id: int, db: Session) -> models.Variant:
+    v = db.query(models.Variant).filter(
+        models.Variant.variant_id == variant_id,
+        models.Variant.is_deleted == False,
+    ).first()
+    if not v:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    return v
+
+
+@router.get("/variants/{variant_id}/barcodes", response_model=List[schemas.VariantBarcodeOut])
+def list_barcodes(variant_id: int, db: Session = Depends(get_db)):
+    _get_variant_or_404(variant_id, db)
+    return (
+        db.query(models.VariantBarcode)
+        .filter(models.VariantBarcode.variant_id == variant_id)
+        .all()
+    )
+
+
+@router.post("/variants/{variant_id}/barcodes",
+             response_model=schemas.VariantBarcodeOut, status_code=201)
+def add_barcode(
+    variant_id: int,
+    payload: schemas.VariantBarcodeCreate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+
+    if db.query(models.VariantBarcode).filter(
+        models.VariantBarcode.barcode == payload.barcode
+    ).first():
+        raise HTTPException(status_code=400, detail="Barcode already exists")
+
+    if payload.is_primary:
+        db.query(models.VariantBarcode).filter(
+            models.VariantBarcode.variant_id == variant_id,
+        ).update({"is_primary": False}, synchronize_session="fetch")
+
+    bc = models.VariantBarcode(
+        variant_id=variant_id,
+        barcode=payload.barcode,
+        uom_id=payload.uom_id,
+        is_primary=payload.is_primary,
+    )
+    db.add(bc)
+    db.commit()
+    db.refresh(bc)
+    return bc
+
+
+@router.put("/variants/{variant_id}/barcodes/{barcode_id}",
+            response_model=schemas.VariantBarcodeOut)
+def update_barcode(
+    variant_id: int,
+    barcode_id: int,
+    payload: schemas.VariantBarcodeUpdate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    bc = db.query(models.VariantBarcode).filter(
+        models.VariantBarcode.barcode_id == barcode_id,
+        models.VariantBarcode.variant_id == variant_id,
+    ).first()
+    if not bc:
+        raise HTTPException(status_code=404, detail="Barcode not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if updates.get("is_primary") is True:
+        db.query(models.VariantBarcode).filter(
+            models.VariantBarcode.variant_id == variant_id,
+            models.VariantBarcode.barcode_id != barcode_id,
+        ).update({"is_primary": False}, synchronize_session="fetch")
+
+    for key, value in updates.items():
+        setattr(bc, key, value)
+
+    db.commit()
+    db.refresh(bc)
+    return bc
+
+
+@router.delete("/variants/{variant_id}/barcodes/{barcode_id}", status_code=204)
+def delete_barcode(variant_id: int, barcode_id: int, db: Session = Depends(get_db)):
+    _get_variant_or_404(variant_id, db)
+    bc = db.query(models.VariantBarcode).filter(
+        models.VariantBarcode.barcode_id == barcode_id,
+        models.VariantBarcode.variant_id == variant_id,
+    ).first()
+    if not bc:
+        raise HTTPException(status_code=404, detail="Barcode not found")
+    db.delete(bc)
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIANT UOM CONVERSIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/variants/{variant_id}/uom-conversions",
+            response_model=List[schemas.VariantUomConversionOut])
+def list_uom_conversions(variant_id: int, db: Session = Depends(get_db)):
+    _get_variant_or_404(variant_id, db)
+    return (
+        db.query(models.VariantUomConversion)
+        .filter(models.VariantUomConversion.variant_id == variant_id)
+        .all()
+    )
+
+
+@router.post("/variants/{variant_id}/uom-conversions",
+             response_model=schemas.VariantUomConversionOut, status_code=201)
+def add_uom_conversion(
+    variant_id: int,
+    payload: schemas.VariantUomConversionCreate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+
+    exists = db.query(models.VariantUomConversion).filter(
+        models.VariantUomConversion.variant_id == variant_id,
+        models.VariantUomConversion.from_uom_id == payload.from_uom_id,
+        models.VariantUomConversion.to_uom_id == payload.to_uom_id,
+    ).first()
+    if exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Conversion for this from/to UOM pair already exists — use PUT to update",
+        )
+
+    conv = models.VariantUomConversion(
+        variant_id=variant_id,
+        from_uom_id=payload.from_uom_id,
+        to_uom_id=payload.to_uom_id,
+        factor=payload.factor,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return conv
+
+
+@router.put("/variants/{variant_id}/uom-conversions/{from_uom_id}/{to_uom_id}",
+            response_model=schemas.VariantUomConversionOut)
+def update_uom_conversion(
+    variant_id: int,
+    from_uom_id: int,
+    to_uom_id: int,
+    payload: schemas.VariantUomConversionUpdate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    conv = db.query(models.VariantUomConversion).filter(
+        models.VariantUomConversion.variant_id == variant_id,
+        models.VariantUomConversion.from_uom_id == from_uom_id,
+        models.VariantUomConversion.to_uom_id == to_uom_id,
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="UOM conversion not found")
+
+    conv.factor = payload.factor
+    db.commit()
+    db.refresh(conv)
+    return conv
+
+
+@router.delete("/variants/{variant_id}/uom-conversions/{from_uom_id}/{to_uom_id}",
+               status_code=204)
+def delete_uom_conversion(
+    variant_id: int,
+    from_uom_id: int,
+    to_uom_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    conv = db.query(models.VariantUomConversion).filter(
+        models.VariantUomConversion.variant_id == variant_id,
+        models.VariantUomConversion.from_uom_id == from_uom_id,
+        models.VariantUomConversion.to_uom_id == to_uom_id,
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="UOM conversion not found")
+    db.delete(conv)
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIANT SUPPLIERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/variants/{variant_id}/suppliers",
+            response_model=List[schemas.VariantSupplierOut])
+def list_variant_suppliers(variant_id: int, db: Session = Depends(get_db)):
+    _get_variant_or_404(variant_id, db)
+    return (
+        db.query(models.VariantSupplier)
+        .options(selectinload(models.VariantSupplier.supplier))
+        .filter(models.VariantSupplier.variant_id == variant_id)
+        .all()
+    )
+
+
+@router.post("/variants/{variant_id}/suppliers",
+             response_model=schemas.VariantSupplierOut, status_code=201)
+def add_variant_supplier(
+    variant_id: int,
+    payload: schemas.VariantSupplierCreate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+
+    if not db.query(models.Supplier).filter(
+        models.Supplier.supplier_id == payload.supplier_id,
+        models.Supplier.is_deleted == False,
+    ).first():
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    if db.query(models.VariantSupplier).filter(
+        models.VariantSupplier.variant_id == variant_id,
+        models.VariantSupplier.supplier_id == payload.supplier_id,
+    ).first():
+        raise HTTPException(
+            status_code=400, detail="Supplier already linked to this variant"
+        )
+
+    if payload.is_primary:
+        db.query(models.VariantSupplier).filter(
+            models.VariantSupplier.variant_id == variant_id,
+        ).update({"is_primary": False}, synchronize_session="fetch")
+
+    vs = models.VariantSupplier(
+        variant_id=variant_id,
+        supplier_id=payload.supplier_id,
+        supplier_sku=payload.supplier_sku,
+        gross_cost=payload.gross_cost,
+        supplier_discount=payload.supplier_discount,
+        is_primary=payload.is_primary,
+    )
+    db.add(vs)
+    db.commit()
+    db.refresh(vs)
+
+    return (
+        db.query(models.VariantSupplier)
+        .options(selectinload(models.VariantSupplier.supplier))
+        .filter(models.VariantSupplier.id == vs.id)
+        .first()
+    )
+
+
+@router.put("/variants/{variant_id}/suppliers/{vs_id}",
+            response_model=schemas.VariantSupplierOut)
+def update_variant_supplier(
+    variant_id: int,
+    vs_id: int,
+    payload: schemas.VariantSupplierUpdate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    vs = db.query(models.VariantSupplier).filter(
+        models.VariantSupplier.id == vs_id,
+        models.VariantSupplier.variant_id == variant_id,
+    ).first()
+    if not vs:
+        raise HTTPException(status_code=404, detail="Variant supplier link not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if updates.get("is_primary") is True:
+        db.query(models.VariantSupplier).filter(
+            models.VariantSupplier.variant_id == variant_id,
+            models.VariantSupplier.id != vs_id,
+        ).update({"is_primary": False}, synchronize_session="fetch")
+
+    for key, value in updates.items():
+        setattr(vs, key, value)
+
+    db.commit()
+
+    return (
+        db.query(models.VariantSupplier)
+        .options(selectinload(models.VariantSupplier.supplier))
+        .filter(models.VariantSupplier.id == vs_id)
+        .first()
+    )
+
+
+@router.delete("/variants/{variant_id}/suppliers/{vs_id}", status_code=204)
+def delete_variant_supplier(
+    variant_id: int,
+    vs_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    vs = db.query(models.VariantSupplier).filter(
+        models.VariantSupplier.id == vs_id,
+        models.VariantSupplier.variant_id == variant_id,
+    ).first()
+    if not vs:
+        raise HTTPException(status_code=404, detail="Variant supplier link not found")
+    db.delete(vs)
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUNDLE COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/variants/{variant_id}/bundle-components",
+            response_model=List[schemas.BundleComponentOut])
+def list_bundle_components(variant_id: int, db: Session = Depends(get_db)):
+    _get_variant_or_404(variant_id, db)
+    return (
+        db.query(models.BundleComponent)
+        .filter(models.BundleComponent.bundle_variant_id == variant_id)
+        .all()
+    )
+
+
+@router.post("/variants/{variant_id}/bundle-components",
+             response_model=schemas.BundleComponentOut, status_code=201)
+def add_bundle_component(
+    variant_id: int,
+    payload: schemas.BundleComponentCreate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+
+    if payload.component_variant_id == variant_id:
+        raise HTTPException(
+            status_code=400, detail="A variant cannot be a component of itself"
+        )
+
+    # validate component variant exists and is not soft-deleted
+    if not db.query(models.Variant).filter(
+        models.Variant.variant_id == payload.component_variant_id,
+        models.Variant.is_deleted == False,
+    ).first():
+        raise HTTPException(status_code=404, detail="Component variant not found")
+
+    if db.query(models.BundleComponent).filter(
+        models.BundleComponent.bundle_variant_id == variant_id,
+        models.BundleComponent.component_variant_id == payload.component_variant_id,
+    ).first():
+        raise HTTPException(
+            status_code=400, detail="Component already in this bundle — use PUT to update"
+        )
+
+    bc = models.BundleComponent(
+        bundle_variant_id=variant_id,
+        component_variant_id=payload.component_variant_id,
+        quantity=payload.quantity,
+    )
+    db.add(bc)
+    db.commit()
+    db.refresh(bc)
+    return bc
+
+
+@router.put("/variants/{variant_id}/bundle-components/{component_variant_id}",
+            response_model=schemas.BundleComponentOut)
+def update_bundle_component(
+    variant_id: int,
+    component_variant_id: int,
+    payload: schemas.BundleComponentUpdate,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    bc = db.query(models.BundleComponent).filter(
+        models.BundleComponent.bundle_variant_id == variant_id,
+        models.BundleComponent.component_variant_id == component_variant_id,
+    ).first()
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bundle component not found")
+
+    bc.quantity = payload.quantity
+    db.commit()
+    db.refresh(bc)
+    return bc
+
+
+@router.delete("/variants/{variant_id}/bundle-components/{component_variant_id}",
+               status_code=204)
+def delete_bundle_component(
+    variant_id: int,
+    component_variant_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_variant_or_404(variant_id, db)
+    bc = db.query(models.BundleComponent).filter(
+        models.BundleComponent.bundle_variant_id == variant_id,
+        models.BundleComponent.component_variant_id == component_variant_id,
+    ).first()
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bundle component not found")
+    db.delete(bc)
+    db.commit()

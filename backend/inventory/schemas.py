@@ -1,183 +1,307 @@
 # inventory/schemas.py
+from __future__ import annotations
 from pydantic import BaseModel
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from decimal import Decimal
 from datetime import datetime
-from auth.schemas import UserSchema
 
 
-# --- 1. INPUT SCHEMAS (The Catching Mitts for POST and PUT requests) ---
+# ── UOM ───────────────────────────────────────────────────────────────────────
+class UOMOut(BaseModel):
+    uom_id: int
+    uom_code: str
+    uom_name: Optional[str] = None
+    class Config: from_attributes = True
 
-class ProductCreate(BaseModel):
-    pid: str
-    name: str
-    is_bundle: bool = False
-    sku: Optional[str] = None
-    brand: Optional[str] = None
-    variant: Optional[str] = None
-    description: Optional[str] = None
-    category_text: Optional[str] = None
 
-    tag_price: Optional[Decimal] = None
-    net_price: Optional[Decimal] = None
-    price_discount: Optional[Decimal] = Decimal('0.0000')
+# ── CATEGORY ─────────────────────────────────────────────────────────────────
+class CategoryOut(BaseModel):
+    category_id: int
+    category_name: str
+    parent_category_id: Optional[int] = None
+    class Config: from_attributes = True
+
+
+# ── LOCATION ─────────────────────────────────────────────────────────────────
+class LocationCreate(BaseModel):
+    location_name: str
+    location_type: str          # Warehouse | Store | Bin | Virtual
+    parent_location_id: Optional[int] = None
+    address: Optional[str] = None
+
+class LocationUpdate(BaseModel):
+    location_name: Optional[str] = None
+    location_type: Optional[str] = None
+    status: Optional[str] = None    # Active | Inactive
+    address: Optional[str] = None
+
+class LocationOut(BaseModel):
+    location_id: int
+    location_name: str
+    location_type: str
+    status: str
+    is_system: bool = False
+    address: Optional[str] = None
+    parent_location_id: Optional[int] = None
+    class Config: from_attributes = True
+
+
+# ── CURRENT STOCK ─────────────────────────────────────────────────────────────
+class CurrentStockOut(BaseModel):
+    quantity: Decimal
+    location: LocationOut
+    class Config: from_attributes = True
+
+
+# ── COST LAYER ────────────────────────────────────────────────────────────────
+class CostLayerOut(BaseModel):
+    layer_id: int
+    gross_cost: Decimal
+    supplier_discount: Decimal
+    net_unit_cost: Decimal
+    original_quantity: Decimal
+    quantity_remaining: Decimal
+    location_id: int
+    created_at: datetime
+    class Config: from_attributes = True
+
+
+# ── VARIANT BARCODES ─────────────────────────────────────────────────────────
+class VariantBarcodeCreate(BaseModel):
+    barcode: str
+    uom_id: Optional[int] = None
+    is_primary: bool = False
+
+class VariantBarcodeUpdate(BaseModel):
+    uom_id: Optional[int] = None
+    is_primary: Optional[bool] = None
+
+class VariantBarcodeOut(BaseModel):
+    barcode_id: int
+    variant_id: int
+    barcode: str
+    uom_id: Optional[int] = None
+    is_primary: bool
+    class Config: from_attributes = True
+
+
+# ── VARIANT UOM CONVERSIONS ───────────────────────────────────────────────────
+class VariantUomConversionCreate(BaseModel):
+    from_uom_id: int
+    to_uom_id: int
+    factor: Decimal
+
+class VariantUomConversionUpdate(BaseModel):
+    factor: Decimal
+
+class VariantUomConversionOut(BaseModel):
+    variant_id: int
+    from_uom_id: int
+    to_uom_id: int
+    factor: Decimal
+    class Config: from_attributes = True
+
+
+# ── VARIANT SUPPLIERS ─────────────────────────────────────────────────────────
+class VariantSupplierCreate(BaseModel):
+    supplier_id: int
+    supplier_sku: Optional[str] = None
     gross_cost: Optional[Decimal] = None
-    cost_discount: Optional[Decimal] = Decimal('0.0000')
-    units_per_bundle: int = 1
-    categories: Optional[str] = None
+    supplier_discount: Decimal = Decimal("0")
+    is_primary: bool = False
 
+class VariantSupplierUpdate(BaseModel):
+    supplier_sku: Optional[str] = None
+    gross_cost: Optional[Decimal] = None
+    supplier_discount: Optional[Decimal] = None
+    is_primary: Optional[bool] = None
+
+
+# ── BUNDLE COMPONENTS ─────────────────────────────────────────────────────────
+class BundleComponentCreate(BaseModel):
+    component_variant_id: int
+    quantity: Decimal
+
+class BundleComponentUpdate(BaseModel):
+    quantity: Decimal
+
+class BundleComponentOut(BaseModel):
+    bundle_variant_id: int
+    component_variant_id: int
+    quantity: Decimal
+    class Config: from_attributes = True
+
+
+# ── SUPPLIER (reference) ──────────────────────────────────────────────────────
+class SupplierRefOut(BaseModel):
+    supplier_id: int
+    supplier_name: str
+    class Config: from_attributes = True
+
+class VariantSupplierOut(BaseModel):
+    id: int
+    supplier_sku: Optional[str] = None
+    gross_cost: Optional[Decimal] = None
+    supplier_discount: Decimal
+    is_primary: bool
+    supplier: SupplierRefOut
+    class Config: from_attributes = True
+
+
+# ── SUPPLIER CRUD ─────────────────────────────────────────────────────────────
+class SupplierCreate(BaseModel):
+    supplier_name: str
+    bank_account_name: Optional[str] = None
+    terms: int = 0
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    contact_notes: Optional[str] = None
+
+class SupplierUpdate(BaseModel):
+    supplier_name: Optional[str] = None
+    bank_account_name: Optional[str] = None
+    terms: Optional[int] = None
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    contact_notes: Optional[str] = None
+
+class SupplierOut(BaseModel):
+    supplier_id: int
+    supplier_name: str
+    bank_account_name: Optional[str] = None
+    terms: int
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    contact_notes: Optional[str] = None
+    is_deleted: bool
+    class Config: from_attributes = True
+
+
+# ── VARIANTS ─────────────────────────────────────────────────────────────────
+class VariantCreate(BaseModel):
+    PID: str
+    variant_name: str = "Default"
+    sku: Optional[str] = None
+    price: Optional[Decimal] = None
+    promo_price: Optional[Decimal] = None
+    is_default: bool = False
+    attributes: Optional[Dict[str, Any]] = None
+
+class VariantUpdate(BaseModel):
+    variant_name: Optional[str] = None
+    sku: Optional[str] = None
+    price: Optional[Decimal] = None
+    promo_price: Optional[Decimal] = None
+    is_default: Optional[bool] = None
+    attributes: Optional[Dict[str, Any]] = None
+
+class VariantOut(BaseModel):
+    variant_id: int
+    PID: str
+    variant_name: str
+    sku: Optional[str] = None
+    price: Optional[Decimal] = None
+    promo_price: Optional[Decimal] = None
+    is_default: bool
+    is_deleted: bool
+    attributes: Optional[Dict[str, Any]] = None
+    current_stock: List[CurrentStockOut] = []
+    suppliers: List[VariantSupplierOut] = []
+    cost_layers: List[CostLayerOut] = []
+    class Config: from_attributes = True
+
+
+# ── PRODUCTS ──────────────────────────────────────────────────────────────────
+class ProductCreate(BaseModel):
+    name: str
+    product_type: str = "Inventory"     # Inventory | Non-Inventory | Service
+    description: Optional[str] = None
+    base_uom_id: Optional[int] = None
+    category_names: List[str] = []
+    variants: List[VariantCreate]       # at least one required
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
-    sku: Optional[str] = None
-    brand: Optional[str] = None
-    variant: Optional[str] = None
+    product_type: Optional[str] = None
     description: Optional[str] = None
+    status: Optional[str] = None        # Active | Inactive
+    base_uom_id: Optional[int] = None
+    category_names: Optional[List[str]] = None
 
-    tag_price: Optional[Decimal] = None
-    net_price: Optional[Decimal] = None
-    category_text: Optional[str] = None
-
-    price_discount: Optional[Decimal] = None
-    gross_cost: Optional[Decimal] = None
-    cost_discount: Optional[Decimal] = None
-    is_active: Optional[bool] = None
-    units_per_bundle: int = 1
-    categories: Optional[str] = None
-
-
-# --- 2. OUTPUT SCHEMAS (The Blueprints for GET requests to React) ---
-
-class CategorySchema(BaseModel):
-    category_id: int
-    category_name: str
-    class Config: from_attributes = True
-
-class LocationSchema(BaseModel):
-    location_id: int
-    name: str
-    class Config: from_attributes = True
-
-class CurrentStockSchema(BaseModel):
-    quantity: Decimal
-    location: LocationSchema
-    class Config: from_attributes = True
-
-class SupplierBasicSchema(BaseModel):
-    name: str
-    class Config: from_attributes = True
-
-class ProductSupplierSchema(BaseModel):
-    vendor_sku: Optional[str] = None
-    vendor_cost: Optional[Decimal] = None
-    lead_time_days: Optional[int] = None
-    is_primary: bool
-    supplier: SupplierBasicSchema
-    class Config: from_attributes = True
-
-class PriceHistorySchema(BaseModel):
-    history_id: int
-    old_tag_price: Optional[Decimal] = None
-    new_tag_price: Optional[Decimal] = None
-    old_net_price: Optional[Decimal] = None
-    new_net_price: Optional[Decimal] = None
-    old_gross_cost: Optional[Decimal] = None
-    new_gross_cost: Optional[Decimal] = None
-    old_net_cost: Optional[Decimal] = None
-    new_net_cost: Optional[Decimal] = None
-    changed_at: datetime
-    class Config: from_attributes = True
-
-class CostLayerSchema(BaseModel):
-    layer_id: int
-    unit_cost: Decimal
-    original_qty: Decimal
-    remaining_qty: Decimal
-    received_at: datetime
-    class Config: from_attributes = True
-
-class ProductSchema(BaseModel):
+class ProductOut(BaseModel):
     product_id: int
-    pid: str
     name: str
-    sku: Optional[str] = None
-    brand: Optional[str] = None
-    variant: Optional[str] = None
+    product_type: str
     description: Optional[str] = None
-
-    tag_price: Optional[Decimal] = None
-    price_discount: Optional[Decimal] = None
-    net_price: Optional[Decimal] = None
-    gross_cost: Optional[Decimal] = None
-    cost_discount: Optional[Decimal] = None
-    net_cost: Optional[Decimal] = None
-
-    units_per_bundle: int = 1
-
-    categories: List[CategorySchema] = []
-    current_stock: List[CurrentStockSchema] = []
-    vendors: List[ProductSupplierSchema] = []  # <--- THE FIX
-    price_history: List[PriceHistorySchema] = []
-    cost_layers: List[CostLayerSchema] = []
-
-    class Config: from_attributes = True
-
-
-# --- 3. SYSTEM SCHEMAS ---
-
-
-# --- 4. LOGISTICS SCHEMAS (Transfers) ---
-
-class TransferLocationSchema(BaseModel):
-    location_id: int
-    name: str
-    class Config: from_attributes = True
-
-class StockTransferItemSchema(BaseModel):
-    item_id: int
-    product_id: int
-    bundling: Optional[str] = None
-
-    # THE THREE TRUTHS
-    requested_qty: Decimal
-    released_qty: Optional[Decimal] = None
-    received_qty: Optional[Decimal] = None
-
-    product: Optional[ProductSchema] = None
-    class Config: from_attributes = True
-
-class StockTransferSchema(BaseModel):
-    transfer_id: int
-    document_id: Optional[str] = None
-    transfer_date: datetime
-    bundle_count: int
-
-    # STATE MACHINE
     status: str
-    has_discrepancy: bool
-
-    from_location: Optional[TransferLocationSchema] = None
-    to_location: Optional[TransferLocationSchema] = None
-    released_by: Optional[UserSchema] = None
-    received_by: Optional[UserSchema] = None
-    items: List[StockTransferItemSchema] = []
-
+    is_deleted: bool
+    categories: List[CategoryOut] = []
+    variants: List[VariantOut] = []
     class Config: from_attributes = True
 
 
-# --- 5. LOGISTICS INPUT SCHEMAS (For Creating Transfers) ---
+# ── INVENTORY LEDGER ──────────────────────────────────────────────────────────
+class LedgerEntryOut(BaseModel):
+    ledger_id: int
+    variant_id: int
+    location_id: int
+    qty_change: Decimal
+    reason: str
+    reference_type: Optional[str] = None
+    reference_id: Optional[str] = None
+    occurred_at: datetime
+    class Config: from_attributes = True
 
+
+# ── USER REF (for transfer output) ───────────────────────────────────────────
+class UserRefOut(BaseModel):
+    user_id: int
+    username: str
+    class Config: from_attributes = True
+
+
+# ── TRANSFERS ─────────────────────────────────────────────────────────────────
 class TransferItemCreate(BaseModel):
-    product_id: int
-    bundling: Optional[str] = None
-    requested_qty: Decimal
+    variant_id: int
+    quantity_requested: Decimal
+    quantity_released: Optional[Decimal] = None
+    quantity_received: Optional[Decimal] = None
 
-class StockTransferCreate(BaseModel):
-    document_id: Optional[str] = None
+class TransferCreate(BaseModel):
     from_location_id: int
     to_location_id: int
-    released_by_id: int
-    received_by_id: int
-    bundle_count: int = 0
-    is_direct: bool = False # Needed for the two-button setup!
+    released_by_user_id: Optional[int] = None
+    received_by_user_id: Optional[int] = None
+    requested_by_user_id: Optional[int] = None
+    transfer_pid: Optional[str] = None
+    total_bundle_count: int = 0
     items: List[TransferItemCreate]
+
+class TransferItemOut(BaseModel):
+    transfer_item_id: int
+    variant_id: int
+    quantity_requested: Decimal
+    quantity_released: Optional[Decimal] = None
+    quantity_received: Optional[Decimal] = None
+    class Config: from_attributes = True
+
+class TransferOut(BaseModel):
+    transfer_id: int
+    transfer_pid: Optional[str] = None
+    from_location_id: int
+    to_location_id: int
+    total_bundle_count: int
+    occurred_at: datetime
+    from_location: Optional[LocationOut] = None
+    to_location: Optional[LocationOut] = None
+    released_by: Optional[UserRefOut] = None
+    received_by: Optional[UserRefOut] = None
+    requested_by: Optional[UserRefOut] = None
+    items: List[TransferItemOut] = []
+    class Config: from_attributes = True

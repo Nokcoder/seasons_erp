@@ -1,233 +1,368 @@
-from sqlalchemy import Column, Integer, String, Boolean, Numeric, ForeignKey, Text, Table, DateTime, BigInteger, Enum as SQLEnum, FetchedValue, text
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+# inventory/models.py
 import enum
+from sqlalchemy import (Column, Integer, BigInteger, String, Boolean, Numeric,
+                         ForeignKey, Text, DateTime, Table,
+                         UniqueConstraint, Enum as SAEnum)
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql import func
 from core.database import Base
 from auth.models import User
 
-# --- 1. ENUMS ---
+
+# ==========================================
+# 1. ENUMS
+# ==========================================
 class LedgerReason(enum.Enum):
-    RECEIVE = 'RECEIVE'
-    SALE = 'SALE'
-    TRANSFER_IN = 'TRANSFER_IN'
-    TRANSFER_OUT = 'TRANSFER_OUT'
-    ADJUST = 'ADJUST'
+    RECEIVE      = "RECEIVE"
+    SALE         = "SALE"
+    RETURN_IN    = "RETURN_IN"
+    RETURN_OUT   = "RETURN_OUT"
+    TRANSFER_IN  = "TRANSFER_IN"
+    TRANSFER_OUT = "TRANSFER_OUT"
+    ADJUST       = "ADJUST"
 
-# --- 2. THE MANY-TO-MANY BRIDGE ---
-product_category_association = Table(
-    'product_category_link',
-    Base.metadata,
-    Column('product_id', Integer, ForeignKey('inventory.products.product_id', ondelete="CASCADE"), primary_key=True),
-    Column('category_id', Integer, ForeignKey('inventory.product_categories.category_id', ondelete="CASCADE"), primary_key=True),
-    schema='inventory'
-)
 
-# --- 3. SUPPORTING TABLES ---
-class Supplier(Base):
-    __tablename__ = "suppliers"
-    __table_args__ = {"schema": "inventory"}
-
-    supplier_id = Column(Integer, primary_key=True)
-    name = Column(String(255), nullable=False)
-    contact_person = Column(String(255))
-    contact_notes = Column(Text)
-    phone = Column(String(50))
-    email = Column(String(255))
-    address = Column(Text)
-    payment_terms = Column(String(100))
-    banking_details = Column(Text)
-    registered_at = Column(DateTime(timezone=True), server_default=func.now())
-    is_active = Column(Boolean, default=True)
-
-class ProductCategory(Base):
-    __tablename__ = "product_categories"
-    __table_args__ = {"schema": "inventory"}
-
-    category_id = Column(Integer, primary_key=True)
-    category_name = Column(String(255), unique=True, nullable=False)
-    parent_category_id = Column(Integer, ForeignKey('inventory.product_categories.category_id'))
-    is_deleted = Column(Boolean, default=False)
-
+# ==========================================
+# 2. UNITS OF MEASURE
+# ==========================================
 class UOM(Base):
     __tablename__ = "uoms"
     __table_args__ = {"schema": "inventory"}
 
-    uom_id = Column(Integer, primary_key=True)
+    uom_id   = Column(Integer, primary_key=True)
     uom_code = Column(String(50), unique=True, nullable=False)
     uom_name = Column(String(255))
     is_deleted = Column(Boolean, default=False)
 
-# --- 4. MASTER PRODUCT TABLE ---
-class Product(Base):
-    __tablename__ = "products"
+
+# ==========================================
+# 3. PRODUCT CATEGORIES
+# ==========================================
+class ProductCategory(Base):
+    __tablename__ = "product_categories"
     __table_args__ = {"schema": "inventory"}
 
-    product_id = Column(Integer, primary_key=True)
-    pid = Column(String(50), unique=True)
-    sku = Column(String(50))
-    name = Column(String(100), nullable=False)
-    brand = Column(String(50))
-    description = Column(Text)
-    variant = Column(String(100))
-    is_bundle = Column(Boolean, default=False)
-    units_per_bundle = Column(Integer, default=1)
+    category_id       = Column(Integer, primary_key=True)
+    category_name     = Column(String(255), unique=True, nullable=False)
+    parent_category_id = Column(Integer, ForeignKey("inventory.product_categories.category_id"))
+    is_deleted        = Column(Boolean, default=False)
 
-    # --- NEW: CUSTOMER PRICING ---
-    tag_price = Column(Numeric(12, 2))
-    price_discount = Column(Numeric(5, 4), default=0)
-    # FetchedValue() tells Python: "Don't write to this, the database calculates it!"
-    net_price = Column(Numeric(12, 2), FetchedValue())
 
-    # --- NEW: SUPPLIER COSTING ---
-    gross_cost = Column(Numeric(12, 2))
-    cost_discount = Column(Numeric(5, 4), default=0)
-    net_cost = Column(Numeric(12, 2), FetchedValue())
+# Many-to-many bridge (product ↔ category)
+product_category_links = Table(
+    "product_category_links",
+    Base.metadata,
+    Column("product_id",  Integer, ForeignKey("inventory.products.product_id",
+           ondelete="CASCADE"), primary_key=True),
+    Column("category_id", Integer, ForeignKey("inventory.product_categories.category_id",
+           ondelete="CASCADE"), primary_key=True),
+    schema="inventory",
+)
 
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
-    base_uom_id = Column(Integer, ForeignKey("inventory.uoms.uom_id"))
 
-    # Relationships
-    categories = relationship("ProductCategory", secondary="inventory.product_category_link")
-    current_stock = relationship("CurrentStock", backref="product")
-    vendors = relationship("ProductSupplier", back_populates="product", cascade="all, delete-orphan")
-    price_history = relationship("PriceHistory", backref="product", order_by="desc(PriceHistory.changed_at)")
-    cost_layers = relationship("CostLayer", backref="product", order_by="asc(CostLayer.received_at)") # NEW!
-# --- 5. LEDGERS & HISTORY ---
-class PriceHistory(Base):
-    __tablename__ = "price_history"
-    __table_args__ = {"schema": "inventory"}
-
-    history_id = Column(BigInteger, primary_key=True)
-    product_id = Column(Integer, ForeignKey("inventory.products.product_id", ondelete="CASCADE"))
-
-    old_tag_price = Column(Numeric(12, 2))
-    new_tag_price = Column(Numeric(12, 2))
-    old_net_price = Column(Numeric(12, 2))
-    new_net_price = Column(Numeric(12, 2))
-
-    old_gross_cost = Column(Numeric(12, 2))
-    new_gross_cost = Column(Numeric(12, 2))
-    old_net_cost = Column(Numeric(12, 2))
-    new_net_cost = Column(Numeric(12, 2))
-
-    changed_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
-
+# ==========================================
+# 4. LOCATIONS
+# ==========================================
 class Location(Base):
     __tablename__ = "locations"
     __table_args__ = {"schema": "inventory"}
 
-    location_id = Column(Integer, primary_key=True)
-    name = Column(String(255), nullable=False)
-    parent_location_id = Column(Integer, ForeignKey('inventory.locations.location_id'))
-    type = Column(String(50))
-    is_active = Column(Boolean, default=True)
+    location_id        = Column(Integer, primary_key=True)
+    location_name      = Column(String(255), unique=True, nullable=False)
+    location_type      = Column(
+        SAEnum("Warehouse", "Store", "Bin", "Virtual",
+               name="location_type", schema="inventory"),
+        nullable=False,
+    )
+    parent_location_id = Column(Integer, ForeignKey("inventory.locations.location_id"))
+    address            = Column(Text)
+    status             = Column(
+        SAEnum("Active", "Inactive", name="location_status", schema="inventory"),
+        default="Active",
+    )
+    is_system          = Column(Boolean, default=False, nullable=False)
+    is_deleted         = Column(Boolean, default=False)
 
+
+# ==========================================
+# 5. PRODUCTS  (the master shell — no PID here)
+# ==========================================
+class Product(Base):
+    __tablename__ = "products"
+    __table_args__ = {"schema": "inventory"}
+
+    product_id   = Column(Integer, primary_key=True, index=True)
+    name         = Column(String(255), nullable=False)
+    product_type = Column(
+        SAEnum("Inventory", "Non-Inventory", "Service",
+               name="product_type", schema="inventory"),
+        nullable=False,
+        default="Inventory",
+    )
+    description  = Column(Text)
+    base_uom_id  = Column(Integer, ForeignKey("inventory.uoms.uom_id"))
+    status       = Column(
+        SAEnum("Active", "Inactive", name="product_status", schema="inventory"),
+        default="Active",
+    )
+    is_deleted   = Column(Boolean, default=False)
+
+    base_uom   = relationship("UOM")
+    categories = relationship("ProductCategory",
+                              secondary="inventory.product_category_links")
+    variants   = relationship("Variant", back_populates="product",
+                              cascade="all, delete-orphan")
+
+
+# ==========================================
+# 6. VARIANTS  (the atomic SKU — PID lives here)
+# ==========================================
+class Variant(Base):
+    __tablename__ = "variants"
+    __table_args__ = {"schema": "inventory"}
+
+    variant_id  = Column(Integer, primary_key=True, index=True)
+    product_id  = Column(Integer, ForeignKey("inventory.products.product_id",
+                          ondelete="CASCADE"), nullable=False)
+    PID         = Column(String(50), unique=True, nullable=False)
+    variant_name = Column(String(100), nullable=False, default="Default")
+    sku         = Column(String(100), index=True, nullable=True)
+    is_default  = Column(Boolean, default=False, nullable=False)
+    attributes  = Column(JSONB, nullable=True)
+    price       = Column(Numeric(15, 2), nullable=True)
+    promo_price = Column(Numeric(15, 2), nullable=True)
+    is_deleted  = Column(Boolean, default=False)
+
+    product          = relationship("Product", back_populates="variants")
+    current_stock    = relationship("CurrentStock", back_populates="variant")
+    suppliers        = relationship("VariantSupplier", back_populates="variant")
+    cost_layers      = relationship("CostLayer", back_populates="variant")
+    barcodes         = relationship("VariantBarcode", back_populates="variant")
+    uom_conversions  = relationship("VariantUomConversion", back_populates="variant")
+    bundle_components = relationship(
+        "BundleComponent",
+        foreign_keys="[BundleComponent.bundle_variant_id]",
+        back_populates="bundle_variant",
+        cascade="all, delete-orphan",
+    )
+
+
+# ==========================================
+# 7. VARIANT BARCODES
+# ==========================================
+class VariantBarcode(Base):
+    __tablename__ = "variant_barcodes"
+    __table_args__ = {"schema": "inventory"}
+
+    barcode_id = Column(BigInteger, primary_key=True)
+    variant_id = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                         ondelete="CASCADE"), nullable=False)
+    barcode    = Column(String(100), unique=True, nullable=False)
+    uom_id     = Column(Integer, ForeignKey("inventory.uoms.uom_id"))
+    is_primary = Column(Boolean, default=False)
+
+    variant = relationship("Variant", back_populates="barcodes")
+    uom     = relationship("UOM")
+
+
+# ==========================================
+# 8. VARIANT UOM CONVERSIONS
+# ==========================================
+class VariantUomConversion(Base):
+    __tablename__ = "variant_uom_conversions"
+    __table_args__ = {"schema": "inventory"}
+
+    variant_id  = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                          ondelete="CASCADE"), primary_key=True)
+    from_uom_id = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
+    to_uom_id   = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
+    factor      = Column(Numeric(15, 4), nullable=False)
+
+    variant  = relationship("Variant", back_populates="uom_conversions")
+    from_uom = relationship("UOM", foreign_keys=[from_uom_id])
+    to_uom   = relationship("UOM", foreign_keys=[to_uom_id])
+
+
+# ==========================================
+# 9. BUNDLE COMPONENTS  (composite PK)
+# ==========================================
+class BundleComponent(Base):
+    __tablename__ = "bundle_components"
+    __table_args__ = {"schema": "inventory"}
+
+    bundle_variant_id    = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                                   ondelete="CASCADE"), primary_key=True)
+    component_variant_id = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                                  primary_key=True)
+    quantity             = Column(Numeric(15, 4), nullable=False, default=1)
+
+    bundle_variant    = relationship("Variant", foreign_keys=[bundle_variant_id],
+                                     back_populates="bundle_components")
+    component_variant = relationship("Variant", foreign_keys=[component_variant_id])
+
+
+# ==========================================
+# 10. SUPPLIERS
+# ==========================================
+class Supplier(Base):
+    __tablename__ = "suppliers"
+    __table_args__ = {"schema": "inventory"}
+
+    supplier_id       = Column(Integer, primary_key=True)
+    supplier_name     = Column(String(255), nullable=False)
+    bank_account_name = Column(String(255))
+    terms             = Column(Integer, default=0)   # payment terms in days
+    is_deleted        = Column(Boolean, default=False)
+
+    # Preserved fields (not in schema but kept per project requirement)
+    contact_person = Column(String(255))
+    phone          = Column(String(50))
+    email          = Column(String(255))
+    address        = Column(Text)
+    contact_notes  = Column(Text)
+    registered_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ==========================================
+# 11. VARIANT SUPPLIERS
+# ==========================================
+class VariantSupplier(Base):
+    __tablename__ = "variant_suppliers"
+    __table_args__ = (
+        UniqueConstraint("variant_id", "supplier_id", name="uq_variant_suppliers"),
+        {"schema": "inventory"},
+    )
+
+    id                = Column(Integer, primary_key=True)
+    variant_id        = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                                ondelete="CASCADE"), nullable=False)
+    supplier_id       = Column(Integer, ForeignKey("inventory.suppliers.supplier_id",
+                                ondelete="CASCADE"), nullable=False)
+    supplier_sku      = Column(String(100))
+    gross_cost        = Column(Numeric(15, 2))
+    supplier_discount = Column(Numeric(5, 2), default=0)
+    is_primary        = Column(Boolean, default=False)
+
+    variant  = relationship("Variant", back_populates="suppliers")
+    supplier = relationship("Supplier")
+
+
+# ==========================================
+# 12. INVENTORY TRANSFERS  (no status — recorded after the fact)
+# ==========================================
+class InventoryTransfer(Base):
+    __tablename__ = "inventory_transfers"
+    __table_args__ = {"schema": "inventory"}
+
+    transfer_id           = Column(Integer, primary_key=True)
+    transfer_pid          = Column(String(100), unique=True)
+    from_location_id      = Column(Integer, ForeignKey("inventory.locations.location_id"))
+    to_location_id        = Column(Integer, ForeignKey("inventory.locations.location_id"))
+    released_by_user_id   = Column(Integer, ForeignKey("auth.users.user_id"))
+    received_by_user_id   = Column(Integer, ForeignKey("auth.users.user_id"))
+    requested_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"))
+    total_bundle_count    = Column(Integer, default=0)
+    occurred_at           = Column(DateTime(timezone=True), server_default=func.now())
+
+    from_location  = relationship("Location", foreign_keys=[from_location_id])
+    to_location    = relationship("Location", foreign_keys=[to_location_id])
+    released_by    = relationship("User", foreign_keys=[released_by_user_id])
+    received_by    = relationship("User", foreign_keys=[received_by_user_id])
+    requested_by   = relationship("User", foreign_keys=[requested_by_user_id])
+    items          = relationship("InventoryTransferItem", back_populates="transfer",
+                                  cascade="all, delete-orphan")
+
+
+# ==========================================
+# 13. INVENTORY TRANSFER ITEMS
+# ==========================================
+class InventoryTransferItem(Base):
+    __tablename__ = "inventory_transfer_items"
+    __table_args__ = {"schema": "inventory"}
+
+    transfer_item_id   = Column(Integer, primary_key=True)
+    transfer_id        = Column(Integer, ForeignKey("inventory.inventory_transfers.transfer_id",
+                                 ondelete="CASCADE"))
+    variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                                nullable=False)
+    quantity_requested = Column(Numeric(15, 4), nullable=False)
+    quantity_released  = Column(Numeric(15, 4), nullable=True)
+    quantity_received  = Column(Numeric(15, 4), nullable=True)
+
+    transfer = relationship("InventoryTransfer", back_populates="items")
+    variant  = relationship("Variant")
+
+
+# ==========================================
+# 14. INVENTORY LEDGER  (immutable event log)
+# ==========================================
 class InventoryLedger(Base):
     __tablename__ = "inventory_ledger"
     __table_args__ = {"schema": "inventory"}
 
-    ledger_id = Column(BigInteger, primary_key=True)
-    product_id = Column(Integer, ForeignKey('inventory.products.product_id'), nullable=False)
-    location_id = Column(Integer, ForeignKey('inventory.locations.location_id'), nullable=False)
-    qty_change = Column(Numeric(12, 2), nullable=False)
-    reason = Column(SQLEnum(LedgerReason, name="ledger_reason", schema="inventory"), nullable=False)
-    ref_table = Column(String(100))
-    ref_pk = Column(String(100))
-    occurred_at = Column(DateTime(timezone=True), server_default=func.now())
+    ledger_id      = Column(BigInteger, primary_key=True)
+    variant_id     = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                             nullable=False)
+    location_id    = Column(Integer, ForeignKey("inventory.locations.location_id"),
+                             nullable=False)
+    qty_change     = Column(Numeric(15, 4), nullable=False)
+    reason         = Column(SAEnum(LedgerReason, name="ledger_reason", schema="inventory"),
+                             nullable=False)
+    reference_type = Column(String(100))
+    reference_id   = Column(String(100))
+    occurred_at    = Column(DateTime(timezone=True), server_default=func.now())
 
+
+# ==========================================
+# 15. CURRENT STOCKS  (materialized running total)
+# ==========================================
 class CurrentStock(Base):
     __tablename__ = "current_stocks"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("variant_id", "location_id",
+                         name="uq_current_stocks_variant_location"),
+        {"schema": "inventory"},
+    )
 
-    stock_id = Column(BigInteger, primary_key=True)
-    product_id = Column(Integer, ForeignKey('inventory.products.product_id'), nullable=False)
-    location_id = Column(Integer, ForeignKey('inventory.locations.location_id'), nullable=False)
-    quantity = Column(Numeric(12, 2), default=0)
+    stock_id     = Column(BigInteger, primary_key=True)
+    variant_id   = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                          nullable=False)
+    location_id  = Column(Integer, ForeignKey("inventory.locations.location_id"),
+                          nullable=False)
+    quantity     = Column(Numeric(15, 4), default=0)
+    last_updated = Column(DateTime(timezone=True), server_default=func.now(),
+                          onupdate=func.now())
 
+    variant  = relationship("Variant", back_populates="current_stock")
     location = relationship("Location")
 
 
-class ProductSupplier(Base):
-    """The Multi-Sourcing Bridge Table"""
-    __tablename__ = "product_suppliers"
-    __table_args__ = {"schema": "inventory"}
-
-    sourcing_id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, ForeignKey('inventory.products.product_id', ondelete="CASCADE"))
-    supplier_id = Column(Integer, ForeignKey('inventory.suppliers.supplier_id', ondelete="CASCADE"))
-
-    # ERP Specifics
-    vendor_sku = Column(String(100))
-    vendor_cost = Column(Numeric(12, 2))
-    lead_time_days = Column(Integer)
-    is_primary = Column(Boolean, default=False)
-
-    # Allow us to pull the supplier's actual name through the bridge
-    supplier = relationship("Supplier")
-    product = relationship("Product", back_populates="vendors")
-
-
+# ==========================================
+# 16. COST LAYERS  (FIFO buckets, per variant per location)
+# ==========================================
 class CostLayer(Base):
     __tablename__ = "cost_layers"
     __table_args__ = {"schema": "inventory"}
 
-    layer_id = Column(BigInteger, primary_key=True)
-    product_id = Column(Integer, ForeignKey("inventory.products.product_id"), nullable=False)
+    layer_id          = Column(BigInteger, primary_key=True)
+    variant_id        = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                                ondelete="CASCADE"), nullable=False)
+    # FK to procurement schema — resolved at runtime after all models are imported
+    shipment_id       = Column(Integer,
+                               ForeignKey("procurement.inventory_shipments.shipment_id"),
+                               nullable=True)
+    location_id       = Column(Integer, ForeignKey("inventory.locations.location_id"),
+                                nullable=False)
+    original_quantity = Column(Numeric(15, 4), nullable=False)
+    quantity_remaining = Column(Numeric(15, 4), nullable=False)
+    gross_cost        = Column(Numeric(15, 2), nullable=False)
+    supplier_discount = Column(Numeric(5, 2), default=0)
+    net_unit_cost     = Column(Numeric(15, 2), nullable=False)
+    created_at        = Column(DateTime(timezone=True), server_default=func.now())
 
-    unit_cost = Column(Numeric(12, 2), nullable=False)
-    original_qty = Column(Numeric(12, 2), nullable=False)
-    remaining_qty = Column(Numeric(12, 2), nullable=False)
-
-    received_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
-    ref_table = Column(String(100))
-    ref_pk = Column(String(100))
-
-
-# --- ADD THESE TO THE BOTTOM OF inventory/models.py ---
-
-
-class StockTransfer(Base):
-    __tablename__ = "stock_transfers"
-    __table_args__ = {"schema": "inventory"}
-
-    transfer_id = Column(Integer, primary_key=True)
-    document_id = Column(String(100))
-    transfer_date = Column(DateTime(timezone=True), server_default=text("NOW()"))
-
-    from_location_id = Column(Integer, ForeignKey("inventory.locations.location_id"))
-    to_location_id = Column(Integer, ForeignKey("inventory.locations.location_id"))
-
-    released_by_id = Column(Integer, ForeignKey("auth.users.user_id"))
-    received_by_id = Column(Integer, ForeignKey("auth.users.user_id"))
-
-    bundle_count = Column(Integer, default=0)
-
-    # NEW: The State Machine & Discrepancy Flag
-    status = Column(String(50), default='REQUESTED')
-    has_discrepancy = Column(Boolean, default=False)
-
-    from_location = relationship("Location", foreign_keys=[from_location_id])
-    to_location = relationship("Location", foreign_keys=[to_location_id])
-    released_by = relationship(User, foreign_keys=[released_by_id])
-    received_by = relationship(User, foreign_keys=[received_by_id])
-    items = relationship("StockTransferItem", backref="transfer", cascade="all, delete-orphan")
-
-
-class StockTransferItem(Base):
-    __tablename__ = "stock_transfer_items"
-    __table_args__ = {"schema": "inventory"}
-
-    item_id = Column(Integer, primary_key=True)
-    transfer_id = Column(Integer, ForeignKey("inventory.stock_transfers.transfer_id", ondelete="CASCADE"))
-    product_id = Column(Integer, ForeignKey("inventory.products.product_id"))
-    bundling = Column(String(100))
-
-    # NEW: The Three Truths
-    requested_qty = Column(Numeric(12, 2), nullable=False)
-    released_qty = Column(Numeric(12, 2), nullable=True)
-    received_qty = Column(Numeric(12, 2), nullable=True)
-
-    product = relationship("Product")
-
-
+    variant  = relationship("Variant", back_populates="cost_layers")
+    location = relationship("Location")
+    # InventoryShipment relationship resolved by string — requires procurement
+    # models to be imported before any query is made (handled in main.py)
+    shipment = relationship("InventoryShipment")

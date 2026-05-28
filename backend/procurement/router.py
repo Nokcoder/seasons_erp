@@ -1,265 +1,411 @@
-from sqlalchemy.orm import joinedload, selectinload
+# procurement/router.py
+from __future__ import annotations
+from typing import List, Optional
+from decimal import Decimal
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import List
-from pydantic import BaseModel
-from datetime import datetime
+from sqlalchemy.orm import Session, selectinload
 
 from core.database import get_db
+from procurement import models as proc_models, schemas
 from inventory import models as inv_models
-from procurement.models import PurchaseOrder, PurchaseOrderItem, InboundShipment, GoodsReceipt, GoodsReceiptItem
-from inventory.models import Product, CurrentStock, InventoryLedger, LedgerReason
 
 router = APIRouter(prefix="/procurement", tags=["Procurement"])
 
 
-# --- UNIFIED SCHEMAS ---
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-class SupplierCreate(BaseModel):
-    name: str
-    contact_person: str | None = None
-    contact_notes: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    address: str | None = None
-    payment_terms: str | None = None
-    banking_details: str | None = None
-
-
-class SupplierUpdate(BaseModel):
-    name: str | None = None
-    contact_person: str | None = None
-    contact_notes: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    address: str | None = None
-    payment_terms: str | None = None
-    banking_details: str | None = None
-    is_active: bool | None = None
-
-
-class POItemCreate(BaseModel):
-    product_id: int | None = None
-    pid: str
-    brand: str | None = None
-    name: str | None = None
-    sku: str | None = None
-    bundling: str | None = None
-    requested_qty: float
-    unit_gross_cost: float
-    discount: float = 0.0
-
-
-class POCreate(BaseModel):
-    supplier_id: int
-    document_id: str | None = None
-    target_delivery_date: datetime | None = None
-    payment_terms: str | None = None
-    items: List[POItemCreate]
-
-
-class ShipmentCreate(BaseModel):
-    logistics_name: str | None = None
-    logistics_doc_id: str | None = None
-    van_number: str | None = None
-    collected_by_id: int | None = None
-    status: str = 'IN_TRANSIT'
-
-
-class ShipmentUpdate(BaseModel):
-    status: str | None = None
-
-
-class GRNItemCreate(BaseModel):
-    pid: str
-    product_id: int | None = None
-    bundles: float = 0
-    received_qty: float
-
-
-class GRNCreate(BaseModel):
-    supplier_id: int
-    shipment_id: int | None = None
-    rcv_document_id: str | None = None
-    van_number: str | None = None
-    bundle_count: int = 0
-    date_checked: str | None = None
-    location_id: int | None = None
-    checked_by_id: int | None = None
-    items: List[GRNItemCreate]
-
-
-# --- SUPPLIER ROUTES ---
-
-@router.get("/suppliers")
-def get_suppliers(db: Session = Depends(get_db)):
-    return db.query(inv_models.Supplier).order_by(inv_models.Supplier.name).all()
-
-
-@router.post("/suppliers")
-def create_supplier(supplier: SupplierCreate, db: Session = Depends(get_db)):
-    new_supplier = inv_models.Supplier(**supplier.model_dump(exclude_unset=True))
-    db.add(new_supplier)
-    db.commit()
-    db.refresh(new_supplier)
-    return new_supplier
-
-
-# --- PURCHASE ORDER ROUTES ---
-
-@router.get("/orders")
-def get_purchase_orders(db: Session = Depends(get_db)):
-    return db.query(PurchaseOrder).options(selectinload(PurchaseOrder.supplier)).order_by(
-        PurchaseOrder.po_id.desc()).all()
-
-
-@router.post("/orders")
-def create_purchase_order(po: POCreate, db: Session = Depends(get_db)):
-    new_po = PurchaseOrder(
-        supplier_id=po.supplier_id,
-        document_id=po.document_id,
-        target_delivery_date=po.target_delivery_date,
-        payment_terms=po.payment_terms,
-        status='DRAFT'
-    )
-    db.add(new_po)
-    db.flush()
-    grand_total = 0.0
-    for item in po.items:
-        prod_id = item.product_id or db.query(Product.product_id).filter(Product.pid == item.pid).scalar()
-        if not prod_id: raise HTTPException(status_code=400, detail=f"Product {item.pid} not found")
-        net = item.unit_gross_cost * (1 - item.discount)
-        grand_total += (net * item.requested_qty)
-        db.add(PurchaseOrderItem(po_id=new_po.po_id, product_id=prod_id, requested_qty=item.requested_qty,
-                                 unit_gross_cost=item.unit_gross_cost, discount=item.discount, net_cost=net))
-    new_po.total_value = grand_total
-    db.commit()
-    return {"message": "PO Created", "po_id": new_po.po_id}
-
-
-# --- SHIPMENT ROUTES ---
-
-@router.get("/shipments")
-def get_shipments(db: Session = Depends(get_db)):
-    return db.query(InboundShipment).options(selectinload(InboundShipment.collected_by)).all()
-
-
-# --- GOODS RECEIPT (GRN) ROUTES ---
-
-@router.get("/receipts")
-def get_all_receipts(db: Session = Depends(get_db)):
-    return db.query(GoodsReceipt).options(
-        joinedload(GoodsReceipt.supplier),
-        joinedload(GoodsReceipt.location),
-        joinedload(GoodsReceipt.checked_by),
-        joinedload(GoodsReceipt.items).joinedload(GoodsReceiptItem.product)
-    ).order_by(GoodsReceipt.grn_id.desc()).all()
-
-
-@router.post("/receipts")
-def create_goods_receipt(grn: GRNCreate, db: Session = Depends(get_db)):
-    new_grn = GoodsReceipt(
-        supplier_id=grn.supplier_id,
-        rcv_document_id=grn.rcv_document_id,
-        van_number=grn.van_number,
-        bundle_count=grn.bundle_count,
-        date_collected=grn.date_checked,
-        location_id=grn.location_id,
-        checked_by_id=grn.checked_by_id,
-        status='DRAFT'
-    )
-    db.add(new_grn)
-    db.flush()
-
-    for item in grn.items:
-        prod_id = item.product_id or db.query(Product.product_id).filter(Product.pid == item.pid).scalar()
-        db_item = GoodsReceiptItem(
-            grn_id=new_grn.grn_id,
-            product_id=prod_id,
-            bundling=str(item.bundles),
-            received_qty=item.received_qty
+def _load_po(po_id: int, db: Session) -> proc_models.PurchaseOrder:
+    po = (
+        db.query(proc_models.PurchaseOrder)
+        .options(
+            selectinload(proc_models.PurchaseOrder.supplier),
+            selectinload(proc_models.PurchaseOrder.location),
+            selectinload(proc_models.PurchaseOrder.items)
+                .selectinload(proc_models.PurchaseOrderItem.variant),
         )
-        db.add(db_item)
-    db.commit()
-    return {"message": "GRN Draft Saved!", "grn_id": new_grn.grn_id}
+        .filter(proc_models.PurchaseOrder.po_id == po_id)
+        .first()
+    )
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return po
 
 
-@router.put("/receipts/{grn_id}")
-def update_goods_receipt(grn_id: int, grn: GRNCreate, db: Session = Depends(get_db)):
-    db_grn = db.query(GoodsReceipt).filter(GoodsReceipt.grn_id == grn_id).first()
-    if not db_grn or db_grn.status != 'DRAFT':
-        raise HTTPException(status_code=400, detail="Cannot edit confirmed record.")
-
-    db_grn.supplier_id = grn.supplier_id
-    db_grn.rcv_document_id = grn.rcv_document_id
-    db_grn.van_number = grn.van_number
-    db_grn.bundle_count = grn.bundle_count
-    db_grn.date_collected = grn.date_checked
-    db_grn.location_id = grn.location_id
-    db_grn.checked_by_id = grn.checked_by_id
-
-    db.query(GoodsReceiptItem).filter(GoodsReceiptItem.grn_id == grn_id).delete()
-    for item in grn.items:
-        prod_id = item.product_id or db.query(Product.product_id).filter(Product.pid == item.pid).scalar()
-        db.add(GoodsReceiptItem(grn_id=grn_id, product_id=prod_id, bundling=str(item.bundles),
-                                received_qty=item.received_qty))
-
-    db.commit()
-    return {"message": "GRN Updated"}
+def _load_shipment(shipment_id: int, db: Session) -> proc_models.InventoryShipment:
+    shipment = (
+        db.query(proc_models.InventoryShipment)
+        .options(
+            selectinload(proc_models.InventoryShipment.supplier),
+            selectinload(proc_models.InventoryShipment.receiving_details),
+        )
+        .filter(proc_models.InventoryShipment.shipment_id == shipment_id)
+        .first()
+    )
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    return shipment
 
 
-@router.put("/receipts/{grn_id}/confirm")
-def confirm_goods_receipt(grn_id: int, db: Session = Depends(get_db)):
-    grn = db.query(GoodsReceipt).filter(GoodsReceipt.grn_id == grn_id).first()
-    if not grn or grn.status != 'DRAFT':
-        raise HTTPException(status_code=400, detail="GRN not in draft status.")
-
-    for item in grn.items:
-        stock = db.query(CurrentStock).filter(CurrentStock.location_id == grn.location_id,
-                                              CurrentStock.product_id == item.product_id).first()
-        if stock:
-            stock.quantity += item.received_qty
-        else:
-            db.add(CurrentStock(location_id=grn.location_id, product_id=item.product_id, quantity=item.received_qty))
-
-        db.add(InventoryLedger(
-            product_id=item.product_id, location_id=grn.location_id,
-            qty_change=item.received_qty, reason=LedgerReason.RECEIVE,
-            ref_table='goods_receipts', ref_pk=str(grn.grn_id)
+def _upsert_stock(db: Session, variant_id: int, location_id: int, delta: Decimal):
+    stock = (
+        db.query(inv_models.CurrentStock)
+        .filter_by(variant_id=variant_id, location_id=location_id)
+        .first()
+    )
+    if stock:
+        stock.quantity += delta
+    else:
+        db.add(inv_models.CurrentStock(
+            variant_id=variant_id,
+            location_id=location_id,
+            quantity=delta,
         ))
 
-    grn.status = 'CONFIRMED'
-    db.commit()
-    return {"message": "Confirmed"}
+
+def _resolve_cost(
+    db: Session,
+    variant_id: int,
+    po_item: proc_models.PurchaseOrderItem | None,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """
+    Returns (gross_cost, supplier_discount, net_unit_cost).
+
+    Priority:
+      1. PO item unit_cost (always gross cost, no discount applied at PO level)
+      2. Primary VariantSupplier record
+      3. Zero fallback
+    """
+    gross_cost       = Decimal('0')
+    supplier_discount = Decimal('0')
+
+    if po_item is not None:
+        gross_cost = po_item.unit_cost
+        # try to find a matching supplier discount from the primary VariantSupplier
+        vs = (
+            db.query(inv_models.VariantSupplier)
+            .filter_by(variant_id=variant_id, is_primary=True)
+            .first()
+        )
+        if vs and vs.supplier_discount:
+            supplier_discount = vs.supplier_discount
+    else:
+        # no PO link — fall back to primary VariantSupplier record
+        vs = (
+            db.query(inv_models.VariantSupplier)
+            .filter_by(variant_id=variant_id, is_primary=True)
+            .first()
+        )
+        if vs:
+            gross_cost        = vs.gross_cost or Decimal('0')
+            supplier_discount = vs.supplier_discount or Decimal('0')
+
+    net_unit_cost = gross_cost * (Decimal('1') - supplier_discount / Decimal('100'))
+    return gross_cost, supplier_discount, net_unit_cost
 
 
-@router.put("/receipts/{grn_id}/void")
-def void_goods_receipt(grn_id: int, db: Session = Depends(get_db)):
-    grn = db.query(GoodsReceipt).filter(GoodsReceipt.grn_id == grn_id).first()
-    if not grn or grn.status != 'CONFIRMED':
-        raise HTTPException(status_code=400, detail="Can only void confirmed records.")
+def _recalculate_po_status(
+    db: Session, po: proc_models.PurchaseOrder
+) -> str | None:
+    """
+    Checks all PO items and returns the new status if it should change, else None.
+    Only transitions from Open or Partially_Received.
+    """
+    if po.status not in ("Open", "Partially_Received"):
+        return None
 
-    for item in grn.items:
-        stock = db.query(CurrentStock).filter(CurrentStock.location_id == grn.location_id,
-                                              CurrentStock.product_id == item.product_id).first()
-        if stock: stock.quantity -= item.received_qty
+    items = (
+        db.query(proc_models.PurchaseOrderItem)
+        .filter(proc_models.PurchaseOrderItem.po_id == po.po_id)
+        .all()
+    )
+    if not items:
+        return None
 
-        db.add(InventoryLedger(
-            product_id=item.product_id, location_id=grn.location_id,
-            qty_change=-item.received_qty, reason=LedgerReason.ADJUST,
-            ref_table='goods_receipts', ref_pk=str(grn.grn_id)
+    all_received  = all(i.received_quantity >= i.ordered_quantity for i in items)
+    some_received = any(i.received_quantity > 0 for i in items)
+
+    if all_received:
+        return "Closed"
+    if some_received:
+        return "Partially_Received"
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PURCHASE ORDERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/orders", response_model=List[schemas.POOut])
+def list_purchase_orders(db: Session = Depends(get_db)):
+    return (
+        db.query(proc_models.PurchaseOrder)
+        .options(
+            selectinload(proc_models.PurchaseOrder.supplier),
+            selectinload(proc_models.PurchaseOrder.location),
+            selectinload(proc_models.PurchaseOrder.items)
+                .selectinload(proc_models.PurchaseOrderItem.variant),
+        )
+        .order_by(proc_models.PurchaseOrder.po_id.desc())
+        .all()
+    )
+
+
+@router.get("/orders/{po_id}", response_model=schemas.POOut)
+def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    return _load_po(po_id, db)
+
+
+@router.post("/orders", response_model=schemas.POOut, status_code=201)
+def create_purchase_order(payload: schemas.POCreate, db: Session = Depends(get_db)):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Purchase order must have at least one item")
+
+    po = proc_models.PurchaseOrder(
+        supplier_id=payload.supplier_id,
+        location_id=payload.location_id,
+        expected_arrival_date=payload.expected_arrival_date,
+        created_by_user_id=payload.created_by_user_id,
+        status="Draft",
+        total_amount=Decimal('0'),
+    )
+    db.add(po)
+    db.flush()  # get po_id for PID generation and item FKs
+
+    # auto-generate PO PID if not provided
+    po.po_pid = payload.po_pid or f"PO-{po.po_id:06d}"
+
+    grand_total = Decimal('0')
+    for item in payload.items:
+        grand_total += item.unit_cost * item.ordered_quantity
+        db.add(proc_models.PurchaseOrderItem(
+            po_id=po.po_id,
+            variant_id=item.variant_id,
+            ordered_quantity=item.ordered_quantity,
+            received_quantity=Decimal('0'),
+            unit_cost=item.unit_cost,
         ))
 
-    grn.status = 'VOIDED'
+    po.total_amount = grand_total
     db.commit()
-    return {"message": "Voided"}
+    return _load_po(po.po_id, db)
 
 
-@router.delete("/receipts/{grn_id}")
-def delete_goods_receipt(grn_id: int, db: Session = Depends(get_db)):
-    grn = db.query(GoodsReceipt).filter(GoodsReceipt.grn_id == grn_id).first()
-    if not grn or grn.status != 'DRAFT':
-        raise HTTPException(status_code=400, detail="Can only delete drafts.")
-    db.delete(grn)
+@router.patch("/orders/{po_id}/status", response_model=schemas.POOut)
+def update_po_status(
+    po_id: int,
+    payload: schemas.POStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    allowed = {"Draft", "Open", "Partially_Received", "Closed", "Cancelled"}
+    if payload.status not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed: {sorted(allowed)}",
+        )
+    po = _load_po(po_id, db)
+    po.status = payload.status
     db.commit()
-    return {"message": "Deleted"}
+    return _load_po(po_id, db)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SHIPMENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/shipments", response_model=List[schemas.ShipmentOut])
+def list_shipments(db: Session = Depends(get_db)):
+    return (
+        db.query(proc_models.InventoryShipment)
+        .options(
+            selectinload(proc_models.InventoryShipment.supplier),
+            selectinload(proc_models.InventoryShipment.receiving_details),
+        )
+        .order_by(proc_models.InventoryShipment.shipment_id.desc())
+        .all()
+    )
+
+
+@router.get("/shipments/{shipment_id}", response_model=schemas.ShipmentOut)
+def get_shipment(shipment_id: int, db: Session = Depends(get_db)):
+    return _load_shipment(shipment_id, db)
+
+
+@router.post("/shipments", response_model=schemas.ShipmentOut, status_code=201)
+def create_shipment(payload: schemas.ShipmentCreate, db: Session = Depends(get_db)):
+    shipment = proc_models.InventoryShipment(
+        supplier_id=payload.supplier_id,
+        po_id=payload.po_id,
+        reference_number=payload.reference_number,
+        received_at=payload.received_at or datetime.now(timezone.utc),
+    )
+    db.add(shipment)
+    db.flush()
+
+    shipment.shipment_pid = payload.shipment_pid or f"SHP-{shipment.shipment_id:06d}"
+
+    # auto-advance PO to Open if it is still in Draft
+    if payload.po_id:
+        po = db.query(proc_models.PurchaseOrder).filter_by(po_id=payload.po_id).first()
+        if po and po.status == "Draft":
+            po.status = "Open"
+
+    db.commit()
+    return _load_shipment(shipment.shipment_id, db)
+
+
+# ── Receiving details ─────────────────────────────────────────────────────────
+
+@router.post(
+    "/shipments/{shipment_id}/details",
+    response_model=schemas.ShipmentOut,
+    status_code=201,
+)
+def add_receiving_details(
+    shipment_id: int,
+    details: List[schemas.ReceivingDetailCreate],
+    db: Session = Depends(get_db),
+):
+    """Attach one or more receiving-detail rows to a shipment (QC data entry)."""
+    _load_shipment(shipment_id, db)  # 404 guard
+
+    for d in details:
+        if not db.query(inv_models.Variant).filter(
+            inv_models.Variant.variant_id == d.variant_id,
+            inv_models.Variant.is_deleted == False,
+        ).first():
+            raise HTTPException(
+                status_code=404, detail=f"Variant {d.variant_id} not found"
+            )
+        loc = db.query(inv_models.Location).filter(
+            inv_models.Location.location_id == d.location_id,
+            inv_models.Location.is_deleted == False,
+        ).first()
+        if not loc:
+            raise HTTPException(
+                status_code=404, detail=f"Location {d.location_id} not found"
+            )
+        if loc.status == "Inactive":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Location '{loc.location_name}' is inactive",
+            )
+
+        db.add(proc_models.ReceivingDetail(
+            shipment_id=shipment_id,
+            variant_id=d.variant_id,
+            location_id=d.location_id,
+            po_item_id=d.po_item_id,
+            quantity_ordered=d.quantity_ordered,
+            quantity_declared=d.quantity_declared,
+            quantity_actual=d.quantity_actual,
+            quantity_rejected=d.quantity_rejected,
+            qc_status=d.qc_status,
+        ))
+
+    db.commit()
+    return _load_shipment(shipment_id, db)
+
+
+# ── Confirm shipment ──────────────────────────────────────────────────────────
+
+@router.post("/shipments/{shipment_id}/confirm", response_model=schemas.ConfirmResult)
+def confirm_shipment(shipment_id: int, db: Session = Depends(get_db)):
+    """
+    Confirm a shipment. For every non-deleted detail with QC status
+    Passed or Partially_Passed this endpoint atomically:
+
+      1. Writes an InventoryLedger entry  (reason = RECEIVE)
+      2. Upserts CurrentStock
+      3. Creates a CostLayer              (FIFO bucket)
+      4. Updates PurchaseOrderItem.received_quantity  (if linked)
+      5. Auto-advances the parent PO status
+
+    All writes happen in a single transaction.
+    """
+    shipment = _load_shipment(shipment_id, db)
+
+    passing_statuses = {"Passed", "Partially_Passed"}
+    eligible = [
+        d for d in shipment.receiving_details
+        if not d.is_deleted and d.qc_status in passing_statuses
+    ]
+
+    if not eligible:
+        raise HTTPException(
+            status_code=400,
+            detail="No passing receiving details to confirm on this shipment",
+        )
+
+    ledger_count     = 0
+    cost_layer_count = 0
+    po_status_new: str | None = None
+    po: proc_models.PurchaseOrder | None = None
+
+    if shipment.po_id:
+        po = db.query(proc_models.PurchaseOrder).filter_by(po_id=shipment.po_id).first()
+
+    for detail in eligible:
+        qty = detail.quantity_actual
+
+        # ── 1. resolve cost ───────────────────────────────────────────────────
+        po_item: proc_models.PurchaseOrderItem | None = None
+        if detail.po_item_id:
+            po_item = (
+                db.query(proc_models.PurchaseOrderItem)
+                .filter_by(po_item_id=detail.po_item_id)
+                .first()
+            )
+
+        gross_cost, supplier_discount, net_unit_cost = _resolve_cost(
+            db, detail.variant_id, po_item
+        )
+
+        # ── 2. inventory ledger ───────────────────────────────────────────────
+        db.add(inv_models.InventoryLedger(
+            variant_id=detail.variant_id,
+            location_id=detail.location_id,
+            qty_change=qty,
+            reason=inv_models.LedgerReason.RECEIVE,
+            reference_type="inventory_shipments",
+            reference_id=str(shipment_id),
+        ))
+        ledger_count += 1
+
+        # ── 3. current stock ──────────────────────────────────────────────────
+        _upsert_stock(db, detail.variant_id, detail.location_id, qty)
+
+        # ── 4. cost layer (FIFO bucket) ───────────────────────────────────────
+        db.add(inv_models.CostLayer(
+            variant_id=detail.variant_id,
+            location_id=detail.location_id,
+            shipment_id=shipment_id,
+            original_quantity=qty,
+            quantity_remaining=qty,
+            gross_cost=gross_cost,
+            supplier_discount=supplier_discount,
+            net_unit_cost=net_unit_cost,
+        ))
+        cost_layer_count += 1
+
+        # ── 5. update PO item received qty ────────────────────────────────────
+        if po_item:
+            po_item.received_quantity = (po_item.received_quantity or Decimal('0')) + qty
+
+    # ── 6. auto-advance PO status ─────────────────────────────────────────────
+    if po:
+        new_status = _recalculate_po_status(db, po)
+        if new_status and new_status != po.status:
+            po.status = new_status
+            po_status_new = new_status
+
+    db.commit()
+
+    return schemas.ConfirmResult(
+        shipment_id=shipment_id,
+        details_confirmed=len(eligible),
+        ledger_entries_written=ledger_count,
+        cost_layers_created=cost_layer_count,
+        po_status_updated=po_status_new,
+    )

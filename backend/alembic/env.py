@@ -31,7 +31,7 @@ db_name = os.getenv("DB_NAME")
 safe_password = quote_plus(db_password)
 
 # 4. Stitch the URL together and inject it into Alembic's config
-database_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+database_url = f"postgresql+psycopg2://{db_user}:{safe_password}@{db_host}:{db_port}/{db_name}"
 config.set_main_option("sqlalchemy.url", database_url)
 
 
@@ -61,10 +61,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from core.database import Base
 from core.database import DATABASE_URL  # <--- Import your dynamic URL
 
-# 3. CRITICAL: Import ALL of your model files here so Alembic can see them
-import sales.models
-import inventory.models
+# 3. CRITICAL: Import ALL model files so Alembic can see every table.
+#    Order: auth → inventory → procurement → ap  (FK dependency order)
 import auth.models
+import inventory.models
+import procurement.models
+import ap.models
 
 # 4. Point target_metadata to your Base
 target_metadata = Base.metadata

@@ -1,44 +1,58 @@
 # auth/dependencies.py
 from fastapi import Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from core.database import get_db
-from inventory import models  # Importing your User model
+from auth import models
 
-# 1. THE DICTIONARY (Who can do what)
-ROLE_PERMISSIONS = {
+
+# ── Role → permission map ─────────────────────────────────────────────────────
+ROLE_PERMISSIONS: dict[str, list[str]] = {
     "ADMIN": [
         "edit_transfer_header",
         "create_transfer",
         "receive_transfer",
-        "view_inventory"
+        "view_inventory",
     ],
     "WAREHOUSE_MANAGER": [
         "create_transfer",
         "receive_transfer",
-        "view_inventory"
+        "view_inventory",
     ],
     "WAREHOUSE_STAFF": [
-        "view_inventory"
-    ]
+        "view_inventory",
+    ],
 }
 
-# 2. THE IDENTITY CHECKER
-def get_current_user(db: Session = Depends(get_db)):
+
+# ── Identity stub ─────────────────────────────────────────────────────────────
+def get_current_user(db: Session = Depends(get_db)) -> models.User:
     """
-    NOTE: Since we haven't fully wired up JWT tokens to headers yet,
-    this is a temporary mock that just grabs the first user in the DB (usually your Admin).
-    We will replace this with real token decoding later!
+    Temporary stub — returns the first active user instead of decoding a JWT.
+    Replace with real token validation before production use.
     """
-    user = db.query(models.User).first()
+    user = (
+        db.query(models.User)
+        .options(joinedload(models.User.roles))
+        .filter(models.User.is_active == True)
+        .first()
+    )
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
 
-# 3. THE PERMISSION GATEKEEPER
+
+# ── Permission guard ──────────────────────────────────────────────────────────
 def require_permission(required_perm: str):
-    def permission_checker(current_user: models.User = Depends(get_current_user)):
-        user_perms = ROLE_PERMISSIONS.get(current_user.role, [])
+    def permission_checker(
+        current_user: models.User = Depends(get_current_user),
+    ) -> models.User:
+        # collect all permissions for every role the user holds
+        user_perms: set[str] = set()
+        for role in current_user.roles:
+            user_perms.update(ROLE_PERMISSIONS.get(role.role_name, []))
         if required_perm not in user_perms:
-            raise HTTPException(status_code=403, detail=f"Missing permission: {required_perm}")
+            raise HTTPException(
+                status_code=403, detail=f"Missing permission: {required_perm}"
+            )
         return current_user
     return permission_checker
