@@ -9,12 +9,12 @@ from passlib.context import CryptContext
 import jwt
 
 from core.database import get_db
+from core.audit import write_audit, _serialize
 from auth import models, schemas
+from auth.dependencies import SECRET_KEY, ALGORITHM, get_current_user, require_permission
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key-change-this-in-production")
-ALGORITHM  = "HS256"
 TOKEN_TTL_HOURS = 12
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -92,6 +92,9 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
+    write_audit(db, "auth.users", str(user.user_id), "INSERT",
+                new_values=_serialize(user))
+    db.commit()
     return user
 
 
@@ -142,3 +145,258 @@ def get_all_active_users(db: Session = Depends(get_db)):
         .filter(models.User.is_active == True)
         .all()
     )
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _load_user_by_id(user_id: int, db: Session) -> models.User:
+    user = (
+        db.query(models.User)
+        .options(joinedload(models.User.employee), joinedload(models.User.roles))
+        .filter(models.User.user_id == user_id)
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+# ── PATCH /auth/users/{user_id}/active ───────────────────────────────────────
+
+@router.patch("/users/{user_id}/active", response_model=schemas.UserResponse)
+def set_user_active(
+    user_id: int,
+    payload: schemas.UserActiveUpdate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    """Activate or deactivate a user account (Requirements §4.1)."""
+    user = _load_user_by_id(user_id, db)
+    old = _serialize(user)
+    user.is_active = payload.is_active
+    # Cascade to the linked employee so dropdowns respect the flag
+    if user.employee:
+        user.employee.is_active = payload.is_active
+    db.commit()
+    db.refresh(user)
+    write_audit(db, "auth.users", str(user_id), "UPDATE",
+                actor_user_id=_actor.user_id, old_values=old, new_values=_serialize(user))
+    db.commit()
+    return user
+
+
+# ── PUT /auth/users/{user_id}/roles ──────────────────────────────────────────
+
+@router.put("/users/{user_id}/roles", response_model=schemas.UserResponse)
+def update_user_roles(
+    user_id: int,
+    payload: schemas.UserRolesUpdate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    """Replace a user's role assignments entirely (Requirements §4.2)."""
+    user = _load_user_by_id(user_id, db)
+    old = _serialize(user)
+
+    roles = []
+    for role_name in payload.role_names:
+        role = db.query(models.Role).filter(models.Role.role_name == role_name).first()
+        if not role:
+            role = models.Role(role_name=role_name)
+            db.add(role)
+            db.flush()
+        roles.append(role)
+
+    user.roles = roles
+    db.commit()
+    db.refresh(user)
+    write_audit(db, "auth.users", str(user_id), "UPDATE",
+                actor_user_id=_actor.user_id, old_values=old,
+                new_values={"roles": payload.role_names})
+    db.commit()
+    return user
+
+
+# ── PATCH /auth/users/{user_id}/password ─────────────────────────────────────
+
+@router.patch("/users/{user_id}/password", status_code=204)
+def change_password(
+    user_id: int,
+    payload: schemas.UserPasswordChange,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    """Change a user's password (Requirements §4.1)."""
+    user = _load_user_by_id(user_id, db)
+    user.password_hash = pwd_context.hash(payload.new_password)
+    db.commit()
+    write_audit(db, "auth.users", str(user_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                new_values={"password_changed": True})
+    db.commit()
+
+
+# ── GET /auth/users ───────────────────────────────────────────────────────────
+# All users (active + inactive) — used by the Settings page.
+
+@router.get("/users", response_model=List[schemas.UserResponse])
+def get_all_users(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    return (
+        db.query(models.User)
+        .options(joinedload(models.User.employee), joinedload(models.User.roles))
+        .order_by(models.User.user_id)
+        .all()
+    )
+
+
+# ── GET /auth/roles ───────────────────────────────────────────────────────────
+
+@router.get("/roles", response_model=List[schemas.RoleDetailOut])
+def list_roles(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(get_current_user),
+):
+    roles = (
+        db.query(models.Role)
+        .options(joinedload(models.Role.users))
+        .order_by(models.Role.role_name)
+        .all()
+    )
+    return [
+        schemas.RoleDetailOut(
+            role_id=r.role_id,
+            role_name=r.role_name,
+            user_count=len(r.users),
+        )
+        for r in roles
+    ]
+
+
+# ── POST /auth/roles ──────────────────────────────────────────────────────────
+
+@router.post("/roles", response_model=schemas.RoleDetailOut, status_code=201)
+def create_role(
+    payload: schemas.RoleCreate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    name = payload.role_name.strip().upper()
+    if db.query(models.Role).filter(models.Role.role_name == name).first():
+        raise HTTPException(status_code=400, detail=f"Role '{name}' already exists")
+    role = models.Role(role_name=name)
+    db.add(role)
+    db.commit()
+    db.refresh(role)
+    return schemas.RoleDetailOut(role_id=role.role_id, role_name=role.role_name, user_count=0)
+
+
+# ── PATCH /auth/roles/{role_id} ───────────────────────────────────────────────
+
+@router.patch("/roles/{role_id}", response_model=schemas.RoleDetailOut)
+def update_role(
+    role_id: int,
+    payload: schemas.RolePatch,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    role.role_name = payload.role_name.strip().upper()
+    db.commit()
+    db.refresh(role)
+    return schemas.RoleDetailOut(
+        role_id=role.role_id, role_name=role.role_name, user_count=len(role.users)
+    )
+
+
+# ── DELETE /auth/roles/{role_id} ──────────────────────────────────────────────
+
+@router.delete("/roles/{role_id}", status_code=204)
+def delete_role(
+    role_id: int,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    count = len(role.users)
+    if count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete '{role.role_name}': {count} user{'s' if count != 1 else ''} assigned",
+        )
+    db.delete(role)
+    db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EMPLOYEE CRUD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_employee(employee_id: int, db: Session) -> models.Employee:
+    emp = db.query(models.Employee).filter(
+        models.Employee.employee_id == employee_id
+    ).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return emp
+
+
+@router.get("/employees", response_model=List[schemas.EmployeeOut])
+def list_employees(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    return (
+        db.query(models.Employee)
+        .order_by(models.Employee.last_name, models.Employee.first_name)
+        .all()
+    )
+
+
+@router.post("/employees", response_model=schemas.EmployeeOut, status_code=201)
+def create_employee(
+    payload: schemas.EmployeeCreate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    emp = models.Employee(
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        is_active=True,
+    )
+    db.add(emp)
+    db.commit()
+    db.refresh(emp)
+    write_audit(db, "auth.employees", str(emp.employee_id), "INSERT",
+                actor_user_id=_actor.user_id, new_values=_serialize(emp))
+    db.commit()
+    return emp
+
+
+@router.patch("/employees/{employee_id}", response_model=schemas.EmployeeOut)
+def update_employee(
+    employee_id: int,
+    payload: schemas.EmployeePatch,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    emp = _load_employee(employee_id, db)
+    old = _serialize(emp)
+    if payload.first_name is not None:
+        emp.first_name = payload.first_name
+    if payload.last_name is not None:
+        emp.last_name = payload.last_name
+    if payload.is_active is not None:
+        emp.is_active = payload.is_active
+    db.commit()
+    db.refresh(emp)
+    write_audit(db, "auth.employees", str(employee_id), "UPDATE",
+                actor_user_id=_actor.user_id, old_values=old, new_values=_serialize(emp))
+    db.commit()
+    return emp

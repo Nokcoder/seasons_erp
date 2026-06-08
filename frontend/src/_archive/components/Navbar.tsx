@@ -43,10 +43,10 @@ const Navbar: React.FC<NavbarProps> = ({ user }) => {
         🚚 Internal Logistics
       </Link>
 
-      <Link to="/locations" className={`px-4 py-2 rounded-md font-medium transition-colors ${
+      <Link to="/settings" className={`px-4 py-2 rounded-md font-medium transition-colors ${
         isActive('/locations') ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-200'
       }`}>
-        📍 Locations
+        📍 Settings
       </Link>
       
       {/* PROCUREMENT GROUP */}

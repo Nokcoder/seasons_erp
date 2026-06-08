@@ -10,6 +10,7 @@ from datetime import datetime, date
 
 class SupplierRefOut(BaseModel):
     supplier_id: int
+    supplier_code: str = ""
     supplier_name: str
     class Config: from_attributes = True
 
@@ -24,6 +25,24 @@ class VariantRefOut(BaseModel):
     variant_name: str
     class Config: from_attributes = True
 
+class ProductBrandRef(BaseModel):
+    brand: str
+    class Config: from_attributes = True
+
+class VariantWithProductRef(BaseModel):
+    variant_id: int
+    PID: str
+    variant_name: str
+    sku: Optional[str] = None
+    product: Optional[ProductBrandRef] = None
+    class Config: from_attributes = True
+
+class EmployeeRefOut(BaseModel):
+    employee_id: int
+    first_name: str
+    last_name: str
+    class Config: from_attributes = True
+
 
 # ── PURCHASE ORDER ITEMS ──────────────────────────────────────────────────────
 
@@ -31,6 +50,10 @@ class POItemCreate(BaseModel):
     variant_id: int
     ordered_quantity: Decimal
     unit_cost: Decimal          # gross cost per unit at time of ordering
+
+class POItemUpdate(BaseModel):
+    ordered_quantity: Optional[Decimal] = None
+    unit_cost: Optional[Decimal] = None
 
 class POItemOut(BaseModel):
     po_item_id: int
@@ -99,6 +122,7 @@ class ReceivingDetailOut(BaseModel):
     quantity_rejected: Decimal
     qc_status: str
     is_deleted: bool
+    variant: Optional[VariantWithProductRef] = None
     class Config: from_attributes = True
 
 
@@ -110,6 +134,10 @@ class ShipmentCreate(BaseModel):
     po_id: Optional[int] = None
     reference_number: Optional[str] = None
     received_at: Optional[datetime] = None
+    received_by_user_id:      Optional[int] = None
+    inspected_by_user_id:     Optional[int] = None
+    received_by_employee_id:  Optional[int] = None
+    inspected_by_employee_id: Optional[int] = None
 
 class ShipmentOut(BaseModel):
     shipment_id: int
@@ -118,8 +146,76 @@ class ShipmentOut(BaseModel):
     po_id: Optional[int] = None
     reference_number: Optional[str] = None
     received_at: Optional[datetime] = None
+    is_confirmed: bool = False
+    received_by_user_id:      Optional[int] = None
+    inspected_by_user_id:     Optional[int] = None
+    received_by_employee_id:  Optional[int] = None
+    inspected_by_employee_id: Optional[int] = None
     supplier: Optional[SupplierRefOut] = None
+    received_by_employee:  Optional[EmployeeRefOut] = None
+    inspected_by_employee: Optional[EmployeeRefOut] = None
     receiving_details: List[ReceivingDetailOut] = []
+    class Config: from_attributes = True
+
+
+# ── CONFIRM COSTS (Stage 2) ───────────────────────────────────────────────────
+
+class ConfirmCostLine(BaseModel):
+    detail_id: int
+    unit_cost: Decimal
+
+class ConfirmCostsRequest(BaseModel):
+    lines: List[ConfirmCostLine]
+    inspected_by_employee_id: Optional[int] = None
+
+class ReceiveResult(BaseModel):
+    shipment_id: int
+    ledger_entries_written: int
+
+
+# ── SUPPLIER RETURNS ─────────────────────────────────────────────────────────
+
+class SupplierReturnItemIn(BaseModel):
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    unit_credit_expected: Optional[Decimal] = None
+
+
+class SupplierReturnCreate(BaseModel):
+    supplier_id: int
+    location_id: int              # source — typically Quarantine
+    items: List[SupplierReturnItemIn]
+    total_credit_amount: Optional[Decimal] = None   # auto-computed if omitted
+
+
+class SupplierReturnStatusPatch(BaseModel):
+    """Advance: Draft → Shipped → Credit_Received"""
+    status: str
+
+
+class SupplierReturnItemOut(BaseModel):
+    return_item_id: int
+    return_id: int
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    unit_credit_expected: Optional[Decimal] = None
+    variant: Optional[VariantRefOut] = None
+    class Config: from_attributes = True
+
+
+class SupplierReturnOut(BaseModel):
+    return_id: int
+    return_pid: Optional[str] = None
+    supplier_id: int
+    location_id: int
+    status: str
+    total_credit_amount: Decimal
+    created_by_user_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    items: List[SupplierReturnItemOut] = []
+    supplier: Optional[SupplierRefOut] = None
     class Config: from_attributes = True
 
 

@@ -1,19 +1,25 @@
-import { useAuth } from '../context/AuthContext';
+import type { ReactNode } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 interface CanProps {
-  perform: string; // The exact permission string (e.g., "edit_transfer_header")
-  children: React.ReactNode;
+  /** Roles that are allowed to see the children. */
+  roles: string[]
+  children: ReactNode
+  /** Rendered when the user does not have an allowed role. Defaults to nothing. */
+  fallback?: ReactNode
 }
 
-export default function Can({ perform, children }: CanProps) {
-  const { user } = useAuth();
-  
-  // Assuming your backend sends the permissions array during login
-  const userPermissions = user?.permissions || [];
-
-  if (userPermissions.includes(perform)) {
-    return <>{children}</>;
-  }
-  
-  return null; // Renders absolutely nothing if they lack permission
+/**
+ * Renders `children` only if the authenticated user holds at least one of the
+ * specified `roles`. Use `fallback` to render alternative content.
+ *
+ * Example:
+ *   <Can roles={['ADMIN', 'STORE_MANAGER']}>
+ *     <button>Void sale</button>
+ *   </Can>
+ */
+export default function Can({ roles, children, fallback = null }: CanProps) {
+  const { user } = useAuth()
+  if (!user) return <>{fallback}</>
+  return <>{user.roles.some(r => roles.includes(r)) ? children : fallback}</>
 }

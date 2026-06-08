@@ -28,3 +28,6 @@ dist/
 db_seed.txt
 *.sql
 *.csv
+
+
+cloudflare docker tunnel token.txt

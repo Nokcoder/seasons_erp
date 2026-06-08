@@ -17,6 +17,7 @@ class Employee(Base):
     employee_id = Column(Integer, primary_key=True)
     first_name  = Column(String, nullable=False)
     last_name   = Column(String, nullable=False)
+    is_active   = Column(Boolean, default=True, nullable=False)
 
     user = relationship("User", back_populates="employee", uselist=False)
 

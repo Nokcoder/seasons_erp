@@ -163,3 +163,7 @@ The backend reads this via `python-dotenv`. The frontend only uses `VITE_API_URL
 | `/settings` | Registers, shifts, payment methods, locations |
 
 Nginx routes `/api/*` → FastAPI root, so `/api/products/` maps to FastAPI's `/products/`.
+
+
+
+Do not run any git commands. Never stage, commit, or push. All version control is handled manually.

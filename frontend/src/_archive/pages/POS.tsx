@@ -1,7 +1,7 @@
 // frontend/src/pages/POS.tsx
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { fetchProducts, fetchLocations, createSale, fetchPosSettings } from '../services/api';
+import { fetchProducts, fetchLocations, createSale, fetchPosSettings, fetchSaleByDocumentId, fetchUsers, fetchRegisters, fetchShifts, fetchPayments  } from '../services/api';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CartItem {
@@ -11,6 +11,7 @@ interface CartItem {
   brand: string;
   sku: string;
   net_cost: number;
+  is_inventory: boolean;
   price: number;
   qty: number;
   discount_pct: number;
@@ -33,7 +34,13 @@ export default function POS() {
     );
   }, [user]);
 
-  // --- UI MODE STATE ---
+  const isOverrideAllowed = useMemo(() => {
+    if (!user) return false;
+    const role = String(user.role || user.user_type || '').toUpperCase();
+    const name = String(user.username || '').toLowerCase();
+    return (role === 'ADMIN' || name === 'admin' || user.is_superuser === true);
+  }, [user]);
+
   const [mode, setMode] = useState<'LIVE' | 'BATCH'>('LIVE');
 
   useEffect(() => {
@@ -47,6 +54,11 @@ export default function POS() {
   const [locations, setLocations] = useState<any[]>([]);
   const [posSettings, setPosSettings] = useState({ is_vat_enabled: false, vat_rate: 0.12 });
   const [searchQuery, setSearchQuery] = useState('');
+  
+  const [usersList, setUsersList] = useState<any[]>([]);
+  const [registers, setRegisters] = useState<any[]>([]);
+  const [shifts, setShifts] = useState<any[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
 
   // --- BATCH ENTRY SPECIFIC STATE ---
   const [batchInput, setBatchInput] = useState({ pid: '', qty: 1, discount_pct: 0, discount_flat: 0 });
@@ -57,39 +69,66 @@ export default function POS() {
   const [payments, setPayments] = useState([{ method: 'Cash', amount: 0 }]);
   const [receiptDiscount, setReceiptDiscount] = useState<number>(0);
   
-  // FIX 1: Use en-CA to safely grab the local timezone YYYY-MM-DD (prevents UTC shift bugs)
+  const [overrideTotal, setOverrideTotal] = useState<number | null>(null);
+
+  // --- REFUND & EXCHANGE STATE ---
+  const [isRefundMode, setIsRefundMode] = useState(false);
+  const [linkedReceipt, setLinkedReceipt] = useState('');
+  const [isFetchingReceipt, setIsFetchingReceipt] = useState(false);
+  
   const localToday = new Date().toLocaleDateString('en-CA');
 
   const [header, setHeader] = useState({
     date: localToday,
-    shift: '1', 
+    shift: '', 
     sales_invoice_id: '',
     delivery_receipt_id: '',
     customer_name: '',
-    register_id: 'REG-01', 
+    register_id: '', 
     location_id: '',
+    cashier_id: '',
   });
 
   const [parkedSales, setParkedSales] = useState<any[]>([]);
   const [showParkedModal, setShowParkedModal] = useState(false);
   const [processing, setProcessing] = useState(false);
-
-  // --- DRAG TO COPY STATE ---
   const [dragSourceIdx, setDragSourceIdx] = useState<number | null>(null);
 
-  // Global mouse up to stop dragging if they let go of the mouse outside the table
   useEffect(() => {
     const handleGlobalMouseUp = () => setDragSourceIdx(null);
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+    
   }, []);
 
-  // --- INITIALIZATION ---
   useEffect(() => {
-    Promise.all([fetchProducts(), fetchLocations(), fetchPosSettings()]).then(([pData, lData, sData]) => {
+    Promise.all([
+      fetchProducts(), 
+      fetchLocations(), 
+      fetchPosSettings(),
+      fetchUsers(),      // <-- NEW
+      fetchRegisters(),  // <-- NEW
+      fetchShifts(),     // <-- NEW
+      fetchPayments()    // <-- NEW
+    ]).then(([pData, lData, sData, uData, rData, shData, pmData]) => {
       setProducts(pData);
       setLocations(lData);
       if (sData) setPosSettings(sData);
+      
+      setUsersList(uData);
+      setRegisters(rData);
+      setShifts(shData);
+      setPaymentMethods(pmData);
+
+      // Dynamically set defaults!
+      const defaultUserId = user?.id || user?.user_id || user?.userId || '';
+      
+      setHeader(prev => ({ 
+        ...prev, 
+        cashier_id: prev.cashier_id || defaultUserId,
+        register_id: prev.register_id || (rData.length > 0 ? rData[0].id : ''),
+        shift: prev.shift || (shData.length > 0 ? shData[0].id : '')
+      }));
     });
 
     const stickyDate = localStorage.getItem('pos_sticky_date');
@@ -111,27 +150,28 @@ export default function POS() {
     const pctAmt = item.price * ((item.discount_pct || 0) / 100);
     const totalItemDisc = pctAmt + (item.discount_flat || 0);
     const finalPrice = Math.max(0, item.price - totalItemDisc);
-    return sum + (finalPrice * item.qty);
+    return sum + (finalPrice * item.qty); 
   }, 0);
   
-  const grandTotal = Math.max(0, rawCartTotal - receiptDiscount);
+  const grandTotal = rawCartTotal - receiptDiscount; 
+  const finalAmountDue = overrideTotal !== null ? overrideTotal : grandTotal;
+  const discrepancyAmount = overrideTotal !== null ? (overrideTotal - grandTotal) : 0;
 
   let vatableSales = grandTotal;
   let taxAmount = 0;
-  
   if (posSettings.is_vat_enabled) {
       vatableSales = grandTotal / (1 + posSettings.vat_rate);
       taxAmount = grandTotal - vatableSales;
   }
 
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
-  const balanceDue = grandTotal - totalPaid;
+  const balanceDue = finalAmountDue - totalPaid;
 
   useEffect(() => {
     if (mode === 'BATCH') {
-      setPayments([{ method: 'Cash', amount: grandTotal }]);
+      setPayments([{ method: 'Cash', amount: finalAmountDue }]);
     }
-  }, [grandTotal, mode]);
+  }, [finalAmountDue, mode]);
 
   // --- HANDLERS ---
   const handleHeaderChange = (field: string, val: string) => {
@@ -143,21 +183,70 @@ export default function POS() {
     }
   };
 
+  // NEW: FETCH HISTORICAL RECEIPT
+const handleFetchReceipt = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && linkedReceipt.trim()) {
+      setIsFetchingReceipt(true);
+      try {
+        console.log("1. Enter pressed. Fetching receipt:", linkedReceipt.trim());
+        
+        const data = await fetchSaleByDocumentId(linkedReceipt.trim());
+        
+        console.log("2. Data received from backend:", data);
+        
+        const historicalCart = data.items.map((item: any) => ({
+          product_id: item.product_id,
+          pid: item.pid,
+          name: item.product_name,
+          brand: item.brand || '',
+          sku: item.sku || '',
+          net_cost: Number(item.net_cost),
+          is_inventory: item.is_inventory,
+          price: Number(item.price), 
+          qty: 0, 
+          discount_pct: Number(item.discount_pct),
+          discount_flat: Number(item.discount_flat)
+        }));
+        
+        setCart(historicalCart);
+        setReceiptDiscount(Number(data.header.discount_amount) || 0);
+        alert("Receipt loaded! Change the Qty to negative (-1) for the items being returned.");
+        
+      } catch (err: any) {
+        // THIS IS THE FIX: We are exposing the silent crash
+        console.error("SILENT CRASH EXPOSED:", err);
+        alert(`CRASH: ${err.response?.data?.detail || err.message}`);
+      } finally {
+        setIsFetchingReceipt(false);
+      }
+    }
+  };
+
   const addToCart = (p: any, forcedQty: number = 1, forcedPct: number = 0, forcedFlat: number = 0) => {
+    if (isRefundMode && !linkedReceipt.trim()) {
+      alert("Please enter the Original Receipt # first.");
+      document.getElementById('refund_receipt_input')?.focus();
+      return;
+    }
+
+    const actualQty = isRefundMode ? -Math.abs(forcedQty) : forcedQty;
     const existingIdx = cart.findIndex(item => item.product_id === p.product_id);
+    
     if (existingIdx >= 0) {
       const newCart = [...cart];
-      newCart[existingIdx].qty += forcedQty;
+      newCart[existingIdx].qty += actualQty;
       newCart[existingIdx].discount_pct = forcedPct || newCart[existingIdx].discount_pct;
       newCart[existingIdx].discount_flat = forcedFlat || newCart[existingIdx].discount_flat;
       setCart(newCart);
     } else {
       const netCost = Number(p.gross_cost || 0) * (1 - (Number(p.cost_discount || 0) / 100));
       const activePrice = Number(p.net_price) || Number(p.tag_price) || 0;
+      const isInventory = p.is_inventory !== false; 
 
       setCart([...cart, {
         product_id: p.product_id, pid: p.pid, name: p.name, brand: p.brand || '', sku: p.sku || '',
-        net_cost: netCost, price: activePrice, qty: forcedQty, discount_pct: forcedPct, discount_flat: forcedFlat
+        net_cost: netCost, price: activePrice, is_inventory: isInventory, 
+        qty: actualQty, discount_pct: forcedPct, discount_flat: forcedFlat
       }]);
     }
   };
@@ -186,7 +275,6 @@ export default function POS() {
 
   const removeCartItem = (index: number) => setCart(cart.filter((_, i) => i !== index));
 
-  // --- ADVANCED DISCOUNT SPREADING LOGIC ---
   const copyDiscountDownOne = (startIndex: number) => {
     if (startIndex >= cart.length - 1) return;
     const newCart = [...cart];
@@ -226,12 +314,32 @@ export default function POS() {
 
   const handleCheckout = async () => {
     if (cart.length === 0) return alert("Cart is empty.");
-    if (balanceDue > 0 && mode === 'LIVE') return alert("Balance must be fully paid before checking out.");
+    if (balanceDue > 0.01 && mode === 'LIVE') return alert("Insufficient payment amount. Balance is still due.");
     if (!header.location_id) return alert("Please select a location/store.");
+    
+    // Filter out items that have 0 quantity (from the historical receipt load)
+    const activeItems = cart.filter(item => item.qty !== 0);
+    if (activeItems.length === 0) return alert("Cart has no active items.");
+
+    const hasNegativeItems = activeItems.some(item => item.qty < 0);
+    const hasPositiveItems = activeItems.some(item => item.qty > 0);
+    
+    if (hasNegativeItems && !linkedReceipt.trim()) {
+      return alert("A linked receipt number is required for returns/exchanges.");
+    }
+
+    let txnType = "SALE";
+    if (hasNegativeItems && hasPositiveItems) txnType = "EXCHANGE";
+    else if (hasNegativeItems && !hasPositiveItems) txnType = "REFUND";
 
     const cashierId = user?.user_id || user?.id || user?.userId || 1;
-
     setProcessing(true);
+
+
+
+
+
+
     try {
       const payload = { 
         header: { 
@@ -244,13 +352,19 @@ export default function POS() {
           subtotal_amount: Number(vatableSales.toFixed(2)),
           discount_amount: Number(receiptDiscount.toFixed(2)),
           tax_amount: Number(taxAmount.toFixed(2)),
-          total_amount: Number(grandTotal.toFixed(2)),
+          total_amount: Number(finalAmountDue.toFixed(2)),
+          
+          transaction_type: txnType,
+          manual_adjustment_amount: Number(discrepancyAmount.toFixed(2)),
+          adjustment_reason: (linkedReceipt ? `RETURN RECEIPT: ${linkedReceipt}` : (discrepancyAmount !== 0 ? "Cashier Math Override" : null)),
+          linked_receipt_id: null, 
+          
           customer_id: null,
           customer_name: header.customer_name || null,
           register_id: header.register_id,
           idempotency_key: uuidv4()
         }, 
-        items: cart.map(item => ({
+        items: activeItems.map(item => ({
           product_id: Number(item.product_id),
           qty: Number(item.qty),
           price: Number(item.price.toFixed(2)),
@@ -258,21 +372,21 @@ export default function POS() {
           discount_flat: Number((item.discount_flat || 0).toFixed(2)),
           net_cost: Number(item.net_cost.toFixed(2))
         })),
-        payments: payments
-          .filter(p => Number(p.amount) > 0)
-          .map(p => ({
+        payments: payments.map(p => ({
             method: p.method,
             amount: Number(Number(p.amount).toFixed(2))
-          }))
+        }))
       };
       
       const result = await createSale(payload);
-      alert(`Sale Completed! Receipt #: ${result.document_id}`);
+      alert(`${txnType} Completed! Document #: ${result.document_id}`);
       
       setCart([]);
       setReceiptDiscount(0);
+      setOverrideTotal(null);
+      setIsRefundMode(false);
+      setLinkedReceipt('');
       setPayments([{ method: 'Cash', amount: 0 }]);
-      // Note: We deliberately leave date and location intact here so it stays sticky!
       setHeader(prev => ({ ...prev, sales_invoice_id: '', delivery_receipt_id: '', customer_name: '' }));
       
       if (mode === 'BATCH') {
@@ -289,31 +403,35 @@ export default function POS() {
     <div className="min-h-screen bg-gray-100 flex flex-col pt-4 px-4 pb-10">
       
       {/* TOP NAVBAR */}
-      <div className="flex flex-col md:flex-row justify-between items-center bg-white p-4 rounded-lg shadow-sm mb-4 gap-4">
-        <div>
+      <div className="flex flex-col md:flex-row items-center bg-white p-4 rounded-lg shadow-sm mb-4 w-full">
+        <div className="flex-1 flex flex-col items-start w-full mb-4 md:mb-0">
           <h2 className="text-2xl font-black text-gray-800 tracking-tight">Point of Sale</h2>
           <p className="text-sm text-gray-500 font-medium mt-1">Operator: <span className="text-blue-600">{user?.username}</span> | Reg: {header.register_id}</p>
         </div>
 
-        {isBackdateAllowed && (
-          <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
-            <button onClick={() => setMode('LIVE')} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${mode === 'LIVE' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-              🏬 Live Register
-            </button>
-            <button onClick={() => setMode('BATCH')} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${mode === 'BATCH' ? 'bg-white text-purple-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-              ⌨️ Batch Entry
-            </button>
-          </div>
-        )}
+        <div className="flex-1 flex justify-center w-full mb-4 md:mb-0">
+          {mode === 'LIVE' && (
+            <div className="flex items-center gap-4">
+              <button onClick={() => setShowParkedModal(true)} className="px-4 py-2 bg-yellow-100 text-yellow-800 font-bold border border-yellow-300 rounded shadow-sm hover:bg-yellow-200">
+                P {parkedSales.length > 0 && <span className="bg-red-500 text-white rounded-full px-2 py-0.5 text-xs ml-1">{parkedSales.length}</span>}
+              </button>
+              <button onClick={parkTransaction} className="px-4 py-2 bg-gray-200 text-gray-700 font-bold rounded shadow-sm hover:bg-gray-300">Park Sale ⏸</button>
+            </div>
+          )}
+        </div>
 
-        {mode === 'LIVE' && (
-          <div className="flex items-center gap-4">
-            <button onClick={() => setShowParkedModal(true)} className="px-4 py-2 bg-yellow-100 text-yellow-800 font-bold border border-yellow-300 rounded shadow-sm hover:bg-yellow-200">
-              P {parkedSales.length > 0 && <span className="bg-red-500 text-white rounded-full px-2 py-0.5 text-xs ml-1">{parkedSales.length}</span>}
-            </button>
-            <button onClick={parkTransaction} className="px-4 py-2 bg-gray-200 text-gray-700 font-bold rounded shadow-sm hover:bg-gray-300">Park Sale ⏸</button>
-          </div>
-        )}
+        <div className="flex-1 flex justify-end w-full">
+          {isBackdateAllowed && (
+            <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
+              <button onClick={() => setMode('LIVE')} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${mode === 'LIVE' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                🏬 Live Register
+              </button>
+              <button onClick={() => setMode('BATCH')} className={`px-4 py-1.5 text-sm font-bold rounded-md transition ${mode === 'BATCH' ? 'bg-white text-purple-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                ⌨️ Batch Entry
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-col lg:flex-row gap-4 h-full">
@@ -322,6 +440,19 @@ export default function POS() {
           {/* HEADER METADATA */}
           <div className={`bg-white p-4 rounded-lg shadow-sm grid grid-cols-2 md:grid-cols-5 gap-4 border-l-4 ${mode === 'BATCH' ? 'border-purple-500 bg-purple-50/10' : 'border-blue-500'}`}>
             <div className="md:col-span-2">
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cashier *</label>
+              <select 
+                value={header.cashier_id} 
+                onChange={e => handleHeaderChange('cashier_id', e.target.value)} 
+                disabled={!isOverrideAllowed} // Only admins can change this!
+                className={`w-full p-2 border rounded text-sm font-bold focus:ring-blue-500 ${!isOverrideAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}
+              >
+                <option value="">Select Cashier...</option>
+                {usersList.map(u => <option key={u.id} value={u.id}>{u.username || u.name}</option>)}
+              </select>
+            </div>
+                               
+            <div className="md:col-span-2">
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Location *</label>
               <select value={header.location_id} onChange={e => handleHeaderChange('location_id', e.target.value)} className="w-full p-2 border rounded text-sm font-bold focus:ring-blue-500 bg-white">
                 <option value="">Select Store/Warehouse...</option>
@@ -329,25 +460,22 @@ export default function POS() {
               </select>
             </div>
             <div>
-              {/* FIX 2: Unlocked the date input for Admins regardless of LIVE/BATCH mode */}
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
-                Date {isBackdateAllowed ? '(Override)' : ''}
-              </label>
-              <input 
-                type="date" 
-                value={header.date} 
-                onChange={e => handleHeaderChange('date', e.target.value)} 
-                disabled={!isBackdateAllowed} 
-                className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}
-              />
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Date {isBackdateAllowed ? '(Override)' : ''}</label>
+              <input type="date" value={header.date} onChange={e => handleHeaderChange('date', e.target.value)} disabled={!isBackdateAllowed} className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}/>
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Shift</label>
-              <input type="number" min="1" max="10" value={header.shift} onChange={e => handleHeaderChange('shift', e.target.value)} className="w-full p-2 border rounded text-sm focus:ring-blue-500"/>
+              <select value={header.shift} onChange={e => handleHeaderChange('shift', e.target.value)} className="w-full p-2 border rounded text-sm focus:ring-blue-500 bg-white">
+                <option value="">Select...</option>
+                {shifts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Register ID</label>
-              <input type="text" value={header.register_id} onChange={e => handleHeaderChange('register_id', e.target.value)} disabled={!isBackdateAllowed} className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}/>
+              <select value={header.register_id} onChange={e => handleHeaderChange('register_id', e.target.value)} disabled={!isBackdateAllowed} className={`w-full p-2 border rounded text-sm focus:ring-blue-500 ${!isBackdateAllowed ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}>
+                <option value="">Select...</option>
+                {registers.map(r => <option key={r.id} value={r.id}>{r.name} ({r.id})</option>)}
+              </select>
             </div>
             <div className="md:col-span-2">
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Customer Name</label>
@@ -363,26 +491,58 @@ export default function POS() {
             </div>
           </div>
 
-          {mode === 'LIVE' && (
-            <div className="relative bg-white rounded-lg shadow-sm border border-gray-200">
-              <div className="flex items-center p-3">
-                <span className="text-xl mr-3">🔍</span>
-                <input type="text" placeholder="Scan Barcode or Search..." value={searchQuery} onChange={e => {setSearchQuery(e.target.value);}} className="w-full outline-none text-lg font-medium"/>
-              </div>
-              {searchResults.length > 0 && (
-                <div className="absolute z-20 w-full bg-white shadow-xl border rounded-b-lg top-full left-0 overflow-hidden">
-                  {searchResults.map((p: any) => (
-                    <div key={p.product_id} onClick={() => {addToCart(p); setSearchQuery('');}} className="p-4 hover:bg-blue-50 cursor-pointer border-b flex justify-between items-center transition">
-                      <div><span className="font-mono text-gray-500 text-xs mr-2">[{p.pid}]</span><span className="font-bold text-gray-800">{p.name}</span></div>
-                      <span className="font-bold text-green-700">{Number(p.net_price || p.tag_price || 0).toFixed(2)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 flex-grow flex flex-col overflow-hidden min-h-[400px]">
+            
+            {/* --- REFUND TOGGLE & SEARCH BAR --- */}
+            {mode === 'LIVE' && (
+              <div className="flex flex-col border-b bg-gray-50">
+                <div className="flex gap-2 p-3 pb-2 items-center">
+                  <button 
+                    onClick={() => {
+                      setIsRefundMode(!isRefundMode);
+                      if (isRefundMode) {
+                        setLinkedReceipt('');
+                        setCart([]); 
+                      }
+                    }} 
+                    className={`px-4 py-2 font-bold rounded shadow-sm transition-colors whitespace-nowrap ${isRefundMode ? 'bg-red-600 text-white' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+                  >
+                    {isRefundMode ? '🔙 Refund Mode ON' : '🛒 Refund Mode'}
+                  </button>
+                  {isRefundMode && (
+                    <input 
+                      id="refund_receipt_input"
+                      type="text" 
+                      placeholder={isFetchingReceipt ? "Fetching receipt..." : "Enter Receipt # & Press Enter (e.g., POS-1...)"}
+                      value={linkedReceipt}
+                      onChange={e => setLinkedReceipt(e.target.value.toUpperCase())}
+                      onKeyDown={handleFetchReceipt}
+                      disabled={isFetchingReceipt}
+                      className={`w-full p-2 border-2 rounded font-mono text-red-900 uppercase font-bold transition-colors ${isFetchingReceipt ? 'bg-gray-200 border-gray-400' : 'bg-red-50 border-red-300 focus:ring-red-500 placeholder-red-300'}`}
+                      autoFocus
+                    />
+                  )}
+                </div>
+
+                <div className="relative">
+                  <div className="flex items-center p-3 pt-1">
+                    <span className="text-xl mr-3">🔍</span>
+                    <input type="text" placeholder={isRefundMode ? "Scan items to exchange..." : "Scan Barcode or Search..."} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full outline-none text-lg font-medium bg-transparent"/>
+                  </div>
+                  {searchResults.length > 0 && (
+                    <div className="absolute z-20 w-full bg-white shadow-xl border rounded-b-lg top-full left-0 overflow-hidden">
+                      {searchResults.map((p: any) => (
+                        <div key={p.product_id} onClick={() => {addToCart(p); setSearchQuery('');}} className="p-4 hover:bg-blue-50 cursor-pointer border-b flex justify-between items-center transition">
+                          <div><span className="font-mono text-gray-500 text-xs mr-2">[{p.pid}]</span><span className="font-bold text-gray-800">{p.name}</span></div>
+                          <span className="font-bold text-green-700">{Number(p.net_price || p.tag_price || 0).toFixed(2)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="overflow-auto flex-grow">
               <table className="min-w-full text-left text-sm whitespace-nowrap">
                 <thead className={`${mode === 'BATCH' ? 'bg-purple-800' : 'bg-gray-800'} text-white sticky top-0 z-10 transition-colors`}>
@@ -395,28 +555,48 @@ export default function POS() {
                     <th className="px-3 py-3 text-right font-bold w-32">Subtotal</th>
                   </tr>
                 </thead>
+
                 <tbody className={`divide-y divide-gray-100 ${dragSourceIdx !== null ? 'cursor-grabbing' : ''}`}>
                   {cart.map((item, idx) => (
                     <tr 
                       key={`${item.product_id}-${idx}`} 
-                      className={`hover:bg-gray-50 group ${dragSourceIdx === idx ? 'bg-blue-50' : ''}`}
+                      className={`hover:bg-gray-50 group ${dragSourceIdx === idx ? 'bg-blue-50' : ''} ${item.qty < 0 ? 'bg-red-50/50' : ''} ${item.qty === 0 ? 'opacity-50 hover:opacity-100' : ''}`}
                       onMouseEnter={() => handleDragEnterRow(idx)}
                     >
                       <td className="px-3 py-3 text-center"><button onClick={() => removeCartItem(idx)} className="text-gray-300 hover:text-red-500 font-bold">✖</button></td>
                       <td className="px-3 py-3">
-                        <div className="font-bold text-gray-900">{item.name}</div>
+                        <div className="font-bold text-gray-900">{item.name} {item.qty < 0 && <span className="text-red-500 text-xs ml-1">(RETURN)</span>}</div>
                         <div className="text-xs text-gray-500 font-mono">[{item.pid}]</div>
                       </td>
-                      <td className="px-3 py-3 text-right tabular-nums text-gray-600 font-medium">{item.price.toFixed(2)}</td>
+                      
+                      <td className="px-3 py-3 text-right tabular-nums">
+                        {item.is_inventory !== false ? (
+                          <span className="text-gray-600 font-medium">{Number(item.price).toFixed(2)}</span>
+                        ) : (
+                          <input 
+                            type="number" 
+                            min="0" 
+                            step="0.01" 
+                            value={item.price === 0 ? '' : item.price} 
+                            onChange={e => {
+                              const newCart = [...cart]; 
+                              newCart[idx].price = Number(e.target.value) || 0; 
+                              setCart(newCart);
+                            }} 
+                            className="w-24 p-1.5 border-2 border-blue-400 bg-blue-50 rounded text-right font-bold text-blue-700 focus:ring-blue-500 shadow-inner" 
+                            placeholder="0.00"
+                          />
+                        )}
+                      </td>
+
                       <td className="px-3 py-3 text-center">
-                        <input type="number" min="1" value={item.qty || ''} onChange={e => {const newCart = [...cart]; newCart[idx].qty = Number(e.target.value); setCart(newCart);}} className="w-full p-1.5 border border-gray-300 rounded text-center font-bold focus:ring-blue-500" />
+                        <input type="number" value={item.qty} onChange={e => {const newCart = [...cart]; newCart[idx].qty = Number(e.target.value); setCart(newCart);}} className={`w-full p-1.5 border border-gray-300 rounded text-center font-bold focus:ring-blue-500 ${item.qty < 0 ? 'text-red-600' : ''}`} />
                       </td>
                       <td className="px-3 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <input type="number" min="0" max="100" value={item.discount_pct || ''} onChange={e => {const newCart = [...cart]; newCart[idx].discount_pct = Number(e.target.value); setCart(newCart);}} className="w-16 p-1.5 border border-gray-300 rounded text-right font-medium text-orange-600 focus:ring-blue-500" placeholder="%"/>
                           <input type="number" min="0" step="0.01" value={item.discount_flat || ''} onChange={e => {const newCart = [...cart]; newCart[idx].discount_flat = Number(e.target.value); setCart(newCart);}} className="w-20 p-1.5 border border-gray-300 rounded text-right font-medium text-red-600 focus:ring-blue-500" placeholder="Flat"/>
                           
-                          {/* THE UPGRADED DRAG/CLICK HANDLE */}
                           {idx < cart.length - 1 && (
                             <button 
                               onMouseDown={(e) => {
@@ -433,8 +613,8 @@ export default function POS() {
                           )}
                         </div>
                       </td>
-                      <td className="px-3 py-3 text-right font-black text-gray-800 text-base tabular-nums">
-                        {Math.max(0, ((item.price - (item.price * ((item.discount_pct || 0) / 100))) - (item.discount_flat || 0)) * item.qty).toFixed(2)}
+                      <td className={`px-3 py-3 text-right font-black text-base tabular-nums ${item.qty < 0 ? 'text-red-600' : 'text-gray-800'}`}>
+                        {(((item.price - (item.price * ((item.discount_pct || 0) / 100))) - (item.discount_flat || 0)) * item.qty).toFixed(2)}
                       </td>
                     </tr>
                   ))}
@@ -447,7 +627,7 @@ export default function POS() {
                       </td>
                       <td className="px-3 py-3 text-right text-gray-400 italic">Auto</td>
                       <td className="px-3 py-3 text-center">
-                        <input type="number" min="1" value={batchInput.qty} onChange={e => setBatchInput({...batchInput, qty: Number(e.target.value)})} onKeyDown={handleBatchSubmit} className="w-full p-1.5 border border-purple-300 rounded text-center font-bold" />
+                        <input type="number" value={batchInput.qty} onChange={e => setBatchInput({...batchInput, qty: Number(e.target.value)})} onKeyDown={handleBatchSubmit} className="w-full p-1.5 border border-purple-300 rounded text-center font-bold" />
                       </td>
                       <td className="px-3 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -462,6 +642,7 @@ export default function POS() {
               </table>
             </div>
             
+            {/* SUBTOTALS AND AMOUNT DUE */}
             <div className="bg-gray-50 p-4 border-t border-gray-200 mt-auto">
               <div className="flex justify-between text-sm text-gray-600 mb-1">
                 <span>Subtotal (Vatable)</span>
@@ -477,18 +658,43 @@ export default function POS() {
                   <span>{taxAmount.toFixed(2)}</span>
                 </div>
               )}
-              <div className="flex justify-between text-xl font-black text-gray-900 mt-2 border-t border-gray-300 pt-2">
+              
+              <div className="flex justify-between text-xl font-black text-gray-900 mt-2 border-t border-gray-300 pt-2 items-center">
                 <span>Amount Due</span>
-                <span>{grandTotal.toFixed(2)}</span>
+                {isOverrideAllowed ? (
+                  <input 
+                    type="number"
+                    step="0.01"
+                    className={`w-32 p-1 text-right font-black border rounded focus:ring-red-500 outline-none ${overrideTotal !== null ? 'bg-red-50 text-red-700 border-red-300 shadow-inner' : 'bg-transparent border-transparent hover:border-gray-300 cursor-pointer'}`}
+                    value={overrideTotal !== null ? overrideTotal : grandTotal.toFixed(2)}
+                    onChange={(e) => {
+                      if (e.target.value === '') setOverrideTotal(null);
+                      else setOverrideTotal(Number(e.target.value));
+                    }}
+                    title="Click to override paper total"
+                  />
+                ) : (
+                  <span>{grandTotal.toFixed(2)}</span>
+                )}
               </div>
+
+              {discrepancyAmount !== 0 && (
+                <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
+                  <div className="flex justify-between text-sm font-bold text-red-700">
+                    <span>⚠️ Paper Discrepancy (Flagged for Ledger):</span>
+                    <span>{discrepancyAmount > 0 ? '+' : ''}{discrepancyAmount.toFixed(2)}</span>
+                  </div>
+                </div>
+              )}
+
             </div>
           </div>
         </div>
 
         <div className={`w-full ${mode === 'LIVE' ? 'lg:w-1/3' : 'lg:w-1/4'} flex flex-col gap-4`}>
-          <div className={`${mode === 'BATCH' ? 'bg-purple-900' : 'bg-gray-800'} text-white p-6 rounded-lg shadow-sm flex flex-col justify-center items-end`}>
-            <span className="text-gray-400 font-bold uppercase tracking-wider text-sm mb-1">Total Amount</span>
-            <span className="text-4xl lg:text-5xl font-black tracking-tighter tabular-nums">{grandTotal.toFixed(2)}</span>
+          <div className={`${mode === 'BATCH' ? 'bg-purple-900' : 'bg-gray-800'} text-white p-6 rounded-lg shadow-sm flex flex-col justify-center items-end transition-colors ${finalAmountDue < 0 ? 'bg-red-800' : ''}`}>
+            <span className="text-gray-400 font-bold uppercase tracking-wider text-sm mb-1">{finalAmountDue < 0 ? 'Refund Due' : 'Total Amount'}</span>
+            <span className="text-4xl lg:text-5xl font-black tracking-tighter tabular-nums">{finalAmountDue.toFixed(2)}</span>
           </div>
 
           <div className="bg-white p-5 rounded-lg shadow-sm border border-gray-200 flex-grow flex flex-col">
@@ -497,15 +703,12 @@ export default function POS() {
               {payments.map((pay, idx) => (
                 <div key={idx} className="flex gap-2 items-center bg-gray-50 p-2 rounded border border-gray-100">
                   <select value={pay.method} onChange={e => {const np = [...payments]; np[idx].method = e.target.value; setPayments(np);}} className="p-2 border rounded font-medium text-sm w-1/2 bg-white">
-                    <option value="Cash">Cash</option>
-                    <option value="GCash">GCash</option>
-                    <option value="Bank Transfer">Bank Transfer</option>
-                    <option value="Credit Card">Credit Card</option>
-                    <option value="Cheque">Cheque</option>
-                    <option value="Account">Charge to Account</option>
+                    {paymentMethods.map(pm => (
+                      <option key={pm.id} value={pm.name}>{pm.name}</option>
+                    ))}
                   </select>
                   <div className="relative w-1/2">
-                    <input type="number" step="0.01" value={pay.amount || ''} onChange={e => {const np = [...payments]; np[idx].amount = Number(e.target.value); setPayments(np);}} className="w-full p-2 border rounded text-right font-bold focus:ring-blue-500 bg-white" placeholder="0.00" disabled={mode === 'BATCH'} />
+                    <input type="number" step="0.01" value={pay.amount || ''} onChange={e => {const np = [...payments]; np[idx].amount = Number(e.target.value); setPayments(np);}} className={`w-full p-2 border rounded text-right font-bold focus:ring-blue-500 bg-white ${pay.amount < 0 ? 'text-red-600' : ''}`} placeholder="0.00" disabled={mode === 'BATCH'} />
                   </div>
                   {mode === 'LIVE' && payments.length > 1 && (
                     <button onClick={() => setPayments(payments.filter((_, i) => i !== idx))} className="px-2 text-red-400 font-bold">✖</button>
@@ -515,21 +718,21 @@ export default function POS() {
             </div>
 
             {mode === 'LIVE' && (
-              <button onClick={() => setPayments([...payments, { method: 'GCash', amount: Math.max(0, balanceDue) }])} disabled={balanceDue <= 0} className="w-full py-2 mt-4 border border-dashed border-blue-400 text-blue-600 font-bold rounded hover:bg-blue-50 disabled:opacity-50">+ Split Payment</button>
+              <button onClick={() => setPayments([...payments, { method: 'GCash', amount: balanceDue }])} className="w-full py-2 mt-4 border border-dashed border-blue-400 text-blue-600 font-bold rounded hover:bg-blue-50">+ Split Payment</button>
             )}
 
             <div className="mt-6 pt-4 border-t-2 border-dashed">
               <div className="flex justify-between items-center text-gray-500 font-medium mb-1">
                 <span>Total Paid:</span><span>{totalPaid.toFixed(2)}</span>
               </div>
-              <div className={`flex justify-between items-center text-xl font-black ${balanceDue > 0 ? 'text-red-600' : balanceDue < 0 ? 'text-orange-500' : 'text-green-600'}`}>
-                <span>{balanceDue < 0 ? 'Change Due:' : 'Balance Due:'}</span>
+              <div className={`flex justify-between items-center text-xl font-black ${Math.abs(balanceDue) > 0.01 ? 'text-red-600' : 'text-green-600'}`}>
+                <span>{balanceDue < -0.01 ? 'Change Due:' : 'Balance Due:'}</span>
                 <span>{Math.abs(balanceDue).toFixed(2)}</span>
               </div>
             </div>
 
-            <button onClick={handleCheckout} disabled={processing || cart.length === 0 || (balanceDue > 0 && mode === 'LIVE')} className={`w-full py-4 mt-6 text-white text-xl font-black rounded-lg shadow-lg disabled:bg-gray-300 ${mode === 'BATCH' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
-              {processing ? 'Processing...' : mode === 'BATCH' ? 'Save Record (Enter)' : 'Complete Sale'}
+            <button onClick={handleCheckout} disabled={processing || cart.length === 0} className={`w-full py-4 mt-6 text-white text-xl font-black rounded-lg shadow-lg disabled:bg-gray-300 ${mode === 'BATCH' ? 'bg-purple-600 hover:bg-purple-700' : finalAmountDue < 0 ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
+              {processing ? 'Processing...' : mode === 'BATCH' ? 'Save Record (Enter)' : finalAmountDue < 0 ? 'Process Refund' : 'Complete Sale'}
             </button>
           </div>
         </div>

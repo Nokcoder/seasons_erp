@@ -38,11 +38,19 @@ class InvoiceOut(BaseModel):
     invoice_date: date
     due_date: Optional[date] = None
     total_amount: Decimal
+    amended_amount: Optional[Decimal] = None
+    amendment_notes: Optional[str] = None
     status: str
     created_at: datetime
     supplier: Optional[SupplierRefOut] = None
 
     class Config: from_attributes = True
+
+
+class InvoiceAmend(BaseModel):
+    """Payload for PATCH /ap/invoices/{id} — set amended_amount and/or notes."""
+    amended_amount: Optional[Decimal] = None
+    amendment_notes: Optional[str] = None
 
 
 # ── PAYMENTS ──────────────────────────────────────────────────────────────────
@@ -83,6 +91,15 @@ class PaymentOut(BaseModel):
 
 
 # ── AP LEDGER ─────────────────────────────────────────────────────────────────
+
+class ManualApLedgerCreate(BaseModel):
+    """Payload for POST /ap/ledger — only CREDIT_MEMO and ADJUSTMENT are allowed."""
+    supplier_id: int
+    amount_change: Decimal
+    reason: str                         # CREDIT_MEMO | ADJUSTMENT
+    reference_type: Optional[str] = None
+    reference_id: Optional[str] = None
+
 
 class ApLedgerOut(BaseModel):
     ap_ledger_id: int

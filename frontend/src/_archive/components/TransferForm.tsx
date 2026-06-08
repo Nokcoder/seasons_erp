@@ -103,9 +103,13 @@ export default function TransferForm() {
   const addProductToCart = (p: Product) => {
     if (items.some(i => i.product_id === p.product_id)) return;
     const upb = p.units_per_bundle || 1;
+    const initialQty = 1;
+    const initialBundles = initialQty / upb; // Calculate instantly!
+
+
     setItems([...items, { 
       product_id: p.product_id, pid: p.pid, name: p.name, sku: p.sku || '', 
-      bundle_count: 0, qty: 1, upb: upb
+      bundle_count: initialBundles, qty: initialQty, upb: upb
     }]);
   };
 

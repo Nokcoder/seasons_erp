@@ -9,10 +9,17 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from core.database import get_db
+from core.audit import write_audit, _serialize
+from auth.dependencies import get_current_user, require_permission
+from auth.models import User as AuthUser
 from ap import models, schemas
 from inventory import models as inv_models
 
-router = APIRouter(prefix="/ap", tags=["Accounts Payable"])
+router = APIRouter(
+    prefix="/ap",
+    tags=["Accounts Payable"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -45,14 +52,23 @@ def _load_payment(payment_id: int, db: Session) -> models.SupplierPayment:
 
 
 def _recalculate_invoice_status(invoice: models.SupplierInvoice, db: Session) -> str:
-    """Returns the correct status for an invoice based on payments applied."""
+    """Returns the correct status for an invoice based on payments applied.
+
+    Uses amended_amount when set, falling back to total_amount (Requirements §10.1).
+    """
     total_applied = (
         db.query(func.sum(models.InvoicePayment.amount_applied))
         .filter(models.InvoicePayment.invoice_id == invoice.invoice_id)
         .scalar()
     ) or Decimal('0')
 
-    if total_applied >= invoice.total_amount:
+    effective_amount = (
+        invoice.amended_amount
+        if invoice.amended_amount is not None
+        else invoice.total_amount
+    )
+
+    if total_applied >= effective_amount:
         return "Paid"
     if total_applied > 0:
         return "Partial"
@@ -86,8 +102,33 @@ def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
     return _load_invoice(invoice_id, db)
 
 
+@router.patch("/invoices/{invoice_id}", response_model=schemas.InvoiceOut)
+def amend_invoice(
+    invoice_id: int,
+    payload: schemas.InvoiceAmend,
+    db: Session = Depends(get_db),
+):
+    """Set amended_amount and/or amendment_notes on an existing invoice.
+
+    After saving, the invoice status is recalculated against the new effective
+    amount so that Paid/Partial/Unpaid always reflects the amended figure.
+    """
+    invoice = _load_invoice(invoice_id, db)
+    if payload.amended_amount is not None:
+        invoice.amended_amount = payload.amended_amount
+    if payload.amendment_notes is not None:
+        invoice.amendment_notes = payload.amendment_notes
+    invoice.status = _recalculate_invoice_status(invoice, db)
+    db.commit()
+    return _load_invoice(invoice_id, db)
+
+
 @router.post("/invoices", response_model=schemas.InvoiceOut, status_code=201)
-def create_invoice(payload: schemas.InvoiceCreate, db: Session = Depends(get_db)):
+def create_invoice(
+    payload: schemas.InvoiceCreate,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_invoices")),
+):
     # validate supplier exists
     supplier = (
         db.query(inv_models.Supplier)
@@ -125,6 +166,9 @@ def create_invoice(payload: schemas.InvoiceCreate, db: Session = Depends(get_db)
     ))
 
     db.commit()
+    write_audit(db, "ap.supplier_invoices", str(invoice.invoice_id), "INSERT",
+                actor_user_id=_actor.user_id, new_values=_serialize(invoice))
+    db.commit()
     return _load_invoice(invoice.invoice_id, db)
 
 
@@ -156,7 +200,11 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/payments", response_model=schemas.PaymentOut, status_code=201)
-def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)):
+def create_payment(
+    payload: schemas.PaymentCreate,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_payments")),
+):
     # validate supplier
     supplier = (
         db.query(inv_models.Supplier)
@@ -226,6 +274,9 @@ def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)
     ))
 
     db.commit()
+    write_audit(db, "ap.supplier_payments", str(payment.payment_id), "INSERT",
+                actor_user_id=_actor.user_id, new_values=_serialize(payment))
+    db.commit()
     return _load_payment(payment.payment_id, db)
 
 
@@ -245,3 +296,48 @@ def list_ap_ledger(
     if supplier_id is not None:
         q = q.filter(models.ApLedger.supplier_id == supplier_id)
     return q.all()
+
+
+@router.post("/ledger", response_model=schemas.ApLedgerOut, status_code=201)
+def create_manual_ledger_entry(
+    payload: schemas.ManualApLedgerCreate,
+    db: Session = Depends(get_db),
+):
+    """Write a manual CREDIT_MEMO or ADJUSTMENT entry to the AP ledger.
+
+    INVOICE and PAYMENT entries are created automatically by their respective
+    endpoints. This endpoint exists for supplier return recoveries and free
+    replacement scenarios (Requirements §9.3, §10.4).
+    """
+    _MANUAL_REASONS = {"CREDIT_MEMO", "ADJUSTMENT"}
+    if payload.reason not in _MANUAL_REASONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only {sorted(_MANUAL_REASONS)} entries may be created manually. "
+                f"INVOICE and PAYMENT entries are written automatically."
+            ),
+        )
+
+    supplier = (
+        db.query(inv_models.Supplier)
+        .filter(
+            inv_models.Supplier.supplier_id == payload.supplier_id,
+            inv_models.Supplier.is_deleted == False,
+        )
+        .first()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    entry = models.ApLedger(
+        supplier_id=payload.supplier_id,
+        amount_change=payload.amount_change,
+        reason=payload.reason,
+        reference_type=payload.reference_type,
+        reference_id=payload.reference_id,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry

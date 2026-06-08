@@ -1,0 +1,327 @@
+# Customers & Accounts Receivable
+
+## Navigation
+Top-level section in the nav labeled "Customers".
+Covers customer management and AR in one section.
+
+## Access
+Admin and Manager roles only for create/edit/payment recording.
+All authenticated users can view customer profiles and balances.
+
+## Sub-pages
+1. Customer List — `/customers`
+2. Customer Detail — `/customers/:customer_id`
+3. AR Ledger — `/customers/ledger`
+4. Record Payment — modal or sub-page from Customer Detail
+
+---
+
+## Page 1 — Customer List (`/customers`)
+
+### Layout
+Full-width table view. Filter panel on the left. Table on
+the right. Follows same layout pattern as Product Catalogue.
+All data via React Query per ui_standards §4. Skeleton
+loaders per ui_standards §5.
+
+### Filter Panel (left)
+- Keyword search bar per ui_standards §1 — searches
+  customer name
+- Status filter: Active / Inactive / Both (default: Active)
+- Balance filter:
+  - All
+  - Has Outstanding Balance (outstanding_balance > 0)
+  - Overdue (outstanding_balance > 0 and terms_days exceeded)
+  - Has Credit (outstanding_balance < 0 — customer is owed)
+
+### Table Columns
+- Customer Name
+- Terms (COD / Net 15 / Net 30 etc — derived from terms_days)
+- Credit Limit (shows "No Limit" if null)
+- Outstanding Balance (highlighted in warning color when > 0,
+  accent color when negative = customer has credit)
+- Status (Active / Inactive)
+- Actions (View)
+
+### Sorting
+- Sortable by: Customer Name, Outstanding Balance, Terms
+- Click header to sort ascending, click again descending
+
+### Actions
+- + New Customer button (top right)
+- Clicking a row navigates to Customer Detail page
+
+### Export
+XLSX export of current filtered result set.
+
+---
+
+## Page 2 — Customer Detail (`/customers/:customer_id`)
+
+Full page dedicated to the customer. All fields inline
+editable. Save button appears when any field is modified.
+All data via React Query per ui_standards §4.
+
+### Header Section
+- Customer Name (editable)
+- Credit Limit (editable, nullable — null = no limit)
+- Terms Days (editable — 0 = COD, 15 = Net 15, 30 = Net 30)
+- Outstanding Balance (read-only — computed from ar_ledger.
+  Positive = customer owes. Negative = customer has credit.
+  Warning color when positive. Accent color when negative.)
+- Available Credit (read-only — shown only when
+  outstanding_balance < 0. Represents the amount the customer
+  can apply via AR Credit payment modes on future sales.
+  Available Credit = ABS(outstanding_balance) when negative.)
+- Status (editable, toggle Active/Inactive)
+
+### AR Ledger Section
+Running ledger of all transactions for this customer.
+
+Table columns:
+- Date
+- Type (SALE / PAYMENT / RETURN / ADJUSTMENT /
+  AR_CHARGE / AR_CREDIT)
+- Reference (clickable — links to source document)
+- Amount Change (positive = owes more, negative = balance
+  reduced)
+- Running Balance (cumulative)
+
+Filters:
+- Date range
+- Type filter (multi-select)
+
+Load More pagination — never unbounded per ui_standards §5.
+
+### Sales History Section
+Flat list of all sales linked to this customer.
+Columns: Sale PID, Date, Grand Total, Payment Status,
+Sale Status.
+Latest 10 shown, load more. Clicking a row navigates
+to the sale detail in the Sales Ledger.
+
+### Payments Section
+Flat list of all payments recorded for this customer.
+Columns: Date, Payment Mode, Amount, Reference Number,
+Unapplied Amount.
+Latest 10 shown, load more.
+
+### Returns Section
+Flat list of all returns linked to this customer.
+Columns: Return PID, Date, Items Returned, Credit Amount.
+Latest 10 shown, load more.
+Clicking a row navigates to Return Detail.
+
+### Actions
+- **Record Payment** — opens payment recording form
+- **Deactivate / Reactivate** — toggles is_deleted
+- **New Sale** — navigates to workstation with this
+  customer pre-selected in the session header
+
+---
+
+## Payment Recording
+
+Accessible from the Customer Detail page via
+Record Payment button. Opens as a modal or inline form.
+
+### Fields
+- Payment Date (defaults to today, editable)
+- Payment Mode (dropdown from active payment modes —
+  excludes modes where is_ar_charge = true or
+  is_ar_credit = true — those are point-of-sale only)
+- Amount (required, follows ui_standards §10)
+- Reference Number (shown only for is_physical = false
+  payment modes per workstation standard)
+- Notes (optional free text)
+
+### Application
+After recording a payment:
+- customer_payments row created
+- ar_ledger row created: reason = PAYMENT,
+  amount_change = negative value (reduces balance)
+- customers.outstanding_balance updated transactionally
+- If payment exceeds outstanding balance, excess recorded
+  as negative outstanding_balance (customer has credit)
+
+### No forced application to specific invoices
+Payments reduce the overall customer balance via the
+AR ledger. No requirement to apply against a specific
+sale — the ledger tracks the net balance automatically.
+
+---
+
+## Page 3 — AR Ledger (`/customers/ledger`)
+
+Standalone view of all AR movements across all customers.
+
+### Layout
+Full-width table. Filter panel left. Table right.
+Follows same pattern as Inventory Ledger.
+
+### Filter Panel
+- Keyword search bar per ui_standards §1 — searches
+  customer name, reference ID
+- Customer filter (dropdown of active customers)
+- Type filter: SALE / PAYMENT / RETURN / ADJUSTMENT /
+  AR_CHARGE / AR_CREDIT (multi-select)
+- Date range filter
+- Balance filter: Outstanding / Credit / All
+
+### Table Columns
+- Date
+- Customer Name
+- Type
+- Reference (clickable — links to source document)
+- Amount Change
+- Notes
+
+### Export
+XLSX export of current filtered result set.
+
+---
+
+## Customer Creation
+
+Accessible via + New Customer on the Customer List page.
+Opens as a modal or inline form.
+
+### Fields
+- Customer Name (required)
+- Credit Limit (optional — leave blank for no limit)
+- Terms Days (required — default 0 = COD)
+
+### On save
+- New customer record created with outstanding_balance = 0
+- Customer immediately available in workstation
+  customer search
+
+---
+
+## Workstation Integration
+
+### When customer is selected
+- customer_id sent in sale payload
+- Outstanding Balance shown as informational text
+- Credit Limit shown as informational text (no enforcement)
+- If outstanding_balance < 0: Available Credit shown
+  (e.g. "₱500.00 credit available")
+- AR Credit payment modes become available in tender section
+  with available credit amount as the maximum allowed
+
+### On sale post — standard
+- AR ledger entry: reason = SALE,
+  amount_change = grand_total (positive — customer owes)
+- outstanding_balance updated transactionally
+
+### On sale post — with AR Charge tender row
+- AR ledger entry: reason = AR_CHARGE,
+  amount_change = tender row amount (positive — owes more)
+- outstanding_balance updated transactionally
+- balance_due on sale updated
+
+### On sale post — with AR Credit tender row
+- Validates amount does not exceed available credit
+  before posting — inline error if exceeded
+- AR ledger entry: reason = AR_CREDIT,
+  amount_change = negative (reduces balance)
+- outstanding_balance updated transactionally
+
+### On sale void
+- All AR entries from that sale reversed via ADJUSTMENT
+- outstanding_balance updated transactionally
+
+---
+
+## Return Credit Policy
+
+### Registered customer returns
+- Credit posted to AR account as negative outstanding_balance
+- Available as AR Credit payment mode on future sales
+- Credit stays on account indefinitely
+
+### Walk-in returns
+- Cash refund processed same day only
+- No credit carried forward under any circumstances
+- If customer wants to apply return credit toward a new
+  purchase, the new sale must be processed on the same day
+  before they leave — auditor processes return then
+  immediately processes the new sale
+- No account, no future credit
+
+---
+
+## Schema Reference
+
+### sales.customers (existing)
+- customer_id int PK
+- customer_name varchar
+- credit_limit decimal(15,2) nullable
+- terms_days int default 0
+- outstanding_balance decimal(15,2)
+- is_deleted boolean
+
+### sales.ar_ledger (existing, immutable)
+- ar_ledger_id bigint PK
+- customer_id int FK → customers nullable
+- amount_change decimal(15,2)
+- reason enum(SALE, PAYMENT, RETURN, ADJUSTMENT,
+  AR_CHARGE, AR_CREDIT) — enum expansion required
+- reference_type varchar
+- reference_id varchar
+- occurred_at datetime
+
+### sales.customer_payments (existing)
+- payment_id int PK
+- customer_id int FK → customers nullable
+- payment_mode_id int FK → payment_modes
+- amount decimal(15,2)
+- payment_date datetime
+- reference_number varchar
+- unapplied_amount decimal(15,2) default 0
+
+### sales.customer_payment_applied (existing)
+- apply_id int PK
+- payment_id int FK → customer_payments
+- sale_id int FK → sales
+- amount_applied decimal(15,2)
+- applied_at datetime
+
+### sales.payment_modes (additions required)
+- is_ar_charge boolean default false
+- is_ar_credit boolean default false
+
+---
+
+## Schema Migrations Required
+1. Add is_ar_charge boolean default false to
+   sales.payment_modes
+2. Add is_ar_credit boolean default false to
+   sales.payment_modes
+3. Expand ar_reason enum to include AR_CHARGE and AR_CREDIT
+
+---
+
+## Data Fetching
+All data via React Query per ui_standards §4.
+Reference data stale time 10 minutes.
+Transactional data (balances, ledger) stale time 30 seconds.
+outstanding_balance invalidated immediately after any
+payment or sale post affecting that customer.
+
+---
+
+## Access Control
+- View customer list and detail: all authenticated users
+- Create / edit customers: Admin and Manager only
+- Record payments: Admin and Manager only
+- Deactivate customers: Admin and Manager only
+
+#### Overdue definition
+A customer is overdue when:
+- outstanding_balance > 0 AND
+- at least one linked Posted sale has
+  (current_date - transaction_date) > customer.terms_days
+  and payment_status != Paid
+Overdue customers shown with warning color on outstanding
+balance in both the list and detail page.

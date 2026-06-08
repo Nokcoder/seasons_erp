@@ -1,552 +1,1072 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api'
 
-// ==========================================
-// 1. NESTED BLUEPRINTS (Must come first!)
-// ==========================================
-export interface Category {
-  category_id: number;
-  category_name: string;
+// ── core fetch wrapper ────────────────────────────────────────────────────────
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  auth = true,
+): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (auth) {
+    const token = localStorage.getItem('erp_token')
+    if (token) headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+
+  if (res.status === 401) {
+    window.dispatchEvent(new Event('auth:unauthorized'))
+    throw new Error('Session expired. Please sign in again.')
+  }
+
+  if (!res.ok) {
+    let detail: unknown = res.statusText
+    try { detail = (await res.json()).detail } catch { /* ignore */ }
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+  }
+
+  if (res.status === 204) return undefined as T
+  return res.json() as Promise<T>
+}
+
+const get  = <T>(path: string)                => request<T>('GET',    path)
+const post = <T>(path: string, body?: unknown) => request<T>('POST',   path, body)
+const patch= <T>(path: string, body?: unknown) => request<T>('PATCH',  path, body)
+const del  = <T>(path: string)                => request<T>('DELETE', path)
+
+// ── AUTH ──────────────────────────────────────────────────────────────────────
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+}
+
+export interface RoleEntry {
+  role_id: number
+  role_name: string
+  user_count?: number
+}
+
+export interface EmployeeOut {
+  employee_id: number
+  first_name: string
+  last_name: string
+  is_active: boolean
+}
+
+export interface EmployeeCreate {
+  first_name: string
+  last_name: string
+}
+
+export interface EmployeePatch {
+  first_name?: string
+  last_name?: string
+  is_active?: boolean
+}
+
+export interface UserCreate {
+  first_name: string
+  last_name: string
+  username: string
+  password: string
+  role_names?: string[]
+}
+
+export const authApi = {
+  login: (username: string, password: string) =>
+    request<LoginResponse>('POST', '/auth/login', { username, password }, false),
+  users: {
+    allActive: () => get<UserEntry[]>('/auth/users/all'),       // active only — for dropdowns
+    all:       () => get<UserEntry[]>('/auth/users'),           // active + inactive — for Settings
+    register:  (payload: UserCreate) => post<UserEntry>('/auth/register', payload),
+    setActive: (id: number, is_active: boolean) =>
+      patch<UserEntry>(`/auth/users/${id}/active`, { is_active }),
+    setRoles: (id: number, role_names: string[]) =>
+      request<UserEntry>('PUT', `/auth/users/${id}/roles`, { role_names }),
+    changePassword: (id: number, new_password: string) =>
+      patch<void>(`/auth/users/${id}/password`, { new_password }),
+  },
+  employees: {
+    list:   ()                              => get<EmployeeOut[]>('/auth/employees'),
+    create: (payload: EmployeeCreate)       => post<EmployeeOut>('/auth/employees', payload),
+    patch:  (id: number, payload: EmployeePatch) =>
+      patch<EmployeeOut>(`/auth/employees/${id}`, payload),
+  },
+  roles: {
+    list:   ()                              => get<RoleEntry[]>('/auth/roles'),
+    create: (role_name: string)             => post<RoleEntry>('/auth/roles', { role_name }),
+    patch:  (id: number, role_name: string) => patch<RoleEntry>(`/auth/roles/${id}`, { role_name }),
+    delete: (id: number)                    => del<void>(`/auth/roles/${id}`),
+  },
+}
+
+// ── SHARED REFERENCE TYPES ───────────────────────────────────────────────────
+
+export interface Shift {
+  shift_id: number
+  shift_name: string
+  is_active: boolean
+}
+
+export interface PaymentMode {
+  payment_mode_id: number
+  name: string
+  is_physical: boolean
+  is_active: boolean
+  is_ar_charge: boolean
+  is_ar_credit: boolean
+}
+
+export interface CashRegister {
+  register_id: number
+  name: string
+  location_id: number
+  is_active: boolean
 }
 
 export interface Location {
-  name: string;
+  location_id: number
+  location_name: string
+  location_type: string
+  status: string
+  is_system: boolean
+  is_deleted: boolean
 }
 
-export interface CurrentStock {
-  location: Location;
-  quantity: number;
+export interface Employee {
+  employee_id: number
+  first_name: string
+  last_name: string
+  is_active: boolean
 }
 
-export interface CostLayer {
-  layer_id: number;
-  unit_cost: number;
-  original_qty: number;
-  remaining_qty: number;
-  received_at: string;
+export interface UserEntry {
+  user_id: number
+  username: string
+  is_active: boolean
+  employee: Employee
+  roles: Array<{ role_id: number; role_name: string }>
 }
 
-export interface PriceHistory {
-  history_id: number;
-  old_tag_price: number | null;
-  new_tag_price: number | null;
-  old_net_price: number | null;
-  new_net_price: number | null;
-  old_gross_cost: number | null;
-  new_gross_cost: number | null;
-  old_net_cost: number | null;
-  new_net_cost: number | null;
-  changed_at: string;
+// ── POS CATALOG TYPES ─────────────────────────────────────────────────────────
+
+export interface VariantBarcode {
+  barcode_id: number
+  variant_id: number
+  barcode: string
+  uom_id: number | null
+  is_primary: boolean | null
 }
 
-// ==========================================
-// 2. MAIN PRODUCT INTERFACE
-// ==========================================
-export interface Product {
-  product_id: number;
-  pid: string;
-  name: string;          
-  sku: string | null;
-  brand: string | null;
-  variant: string | null;
-  description: string | null;
-  
-  // FINANCIALS
-  tag_price: number | null;
-  price_discount: number | null;
-  net_price: number | null;
-  gross_cost: number | null;
-  cost_discount: number | null;
-  net_cost: number | null;   
-  
-  categories: Category[]; 
-  current_stock: CurrentStock[];
-  vendors: any[]; 
-  price_history: PriceHistory[]; 
-  cost_layers: CostLayer[];      
-  units_per_bundle: number;
+export interface POSStockEntry {
+  location_id: number
+  location_name: string
+  quantity: number
 }
 
-// ==========================================
-// 3. INPUT SCHEMAS
-// ==========================================
-export interface ProductCreate {
-  pid: string;
-  name: string;
-  sku?: string;
-  brand?: string;
-  variant?: string;
-  description?: string;
-  tag_price?: number;
-  price_discount?: number;
-  gross_cost?: number;
-  cost_discount?: number;
-  is_bundle?: boolean;
+export interface POSUomOption {
+  from_uom_id: number
+  from_uom_code: string
+  to_uom_id: number
+  to_uom_code: string
+  factor: number
+  price: number | null
+  promo_price: number | null
 }
 
-export interface ProductUpdate {
-  name?: string;
-  sku?: string;
-  brand?: string;
-  variant?: string;
-  description?: string;
-  tag_price?: number;
-  price_discount?: number;
-  gross_cost?: number;
-  cost_discount?: number;
-  is_active?: boolean;
+export interface POSVariant {
+  variant_id: number
+  PID: string
+  variant_name: string
+  price: number | null
+  promo_price: number | null
+  attributes: Record<string, unknown> | null
+  barcodes: VariantBarcode[]
+  stock: POSStockEntry[]
+  uom_conversions: POSUomOption[]
 }
 
-// ==========================================
-// 4. API FETCH FUNCTIONS
-// ==========================================
-export const fetchProducts = async (): Promise<Product[]> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/products/`);
-    if (!response.ok) {
-      throw new Error('Failed to fetch products');
-    }
-    return await response.json();
-  } catch (error) {
-    console.error("Error fetching products:", error);
-    return []; 
-  }
-};
-
-export const fetchProduct = async (id: number): Promise<Product> => {
-  const response = await fetch(`${API_BASE_URL}/products/${id}`);
-  if (!response.ok) throw new Error('Failed to fetch product');
-  return await response.json();
-};
-
-export const createProduct = async (data: ProductCreate): Promise<Product> => {
-  const response = await fetch(`${API_BASE_URL}/products/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to create product');
-  return await response.json();
-};
-
-export const updateProduct = async (id: number, data: ProductUpdate): Promise<Product> => {
-  const response = await fetch(`${API_BASE_URL}/products/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to update product');
-  return await response.json();
-};
-
-
-// --- LOGISTICS & TRANSFERS ---
-
-export interface User {
-  user_id: number;
-  username: string;
-  role: string;
+export interface POSCatalogItem {
+  product_id: number
+  product_brand: string
+  product_type: string
+  variants: POSVariant[]
 }
 
-export interface TransferLocation {
-  location_id: number;
-  name: string;
+// ── SALE TYPES ────────────────────────────────────────────────────────────────
+
+export interface SaleLineItemIn {
+  variant_id: number
+  quantity: number      // qty in selected UOM; backend converts to base units
+  unit_price: number    // price in selected UOM
+  discount_pct?: number | null
+  discount_flat?: number | null
+  uom_id?: number | null
+  uom_factor?: number | null
 }
 
-export interface StockTransferItem {
-  item_id: number;
-  product_id: number;
-  bundling: string | null;
-  requested_qty: number;
-  released_qty: number | null;
-  received_qty: number | null;
-  product?: Product;
+export interface SaleCreate {
+  location_id: number
+  register_id?: number | null
+  employee_id?: number | null
+  shift_id?: number | null
+  sale_pid?: string
+  idempotency_key?: string
+  cart_discount_pct?: number | null
+  cart_discount_flat?: number | null
+  discount_amount?: number
+  receipt_grand_total?: number | null
+  items: SaleLineItemIn[]
 }
 
-export interface StockTransfer {
-  transfer_id: number;
-  document_id: string | null;
-  transfer_date: string;
-  bundle_count: number;
-  status: string;
-  from_location: TransferLocation | null;
-  to_location: TransferLocation | null;
-  released_by: User | null;
-  received_by: User | null;
-  items: StockTransferItem[];
+export interface SalePatch {
+  register_id?: number | null
+  employee_id?: number | null
+  shift_id?: number | null
+  cart_discount_pct?: number | null
+  cart_discount_flat?: number | null
+  discount_amount?: number | null
+  receipt_grand_total?: number | null
+  items?: SaleLineItemIn[]
 }
 
-export const fetchTransfers = async (): Promise<StockTransfer[]> => {
-  try {
-    // FIX: Added trailing slash based on 307 logs
-    const response = await fetch(`${API_BASE_URL}/transfers/`);
-    if (!response.ok) throw new Error('Failed to fetch transfers');
-    return await response.json();
-  } catch (error) {
-    console.error("Error fetching transfers:", error);
-    return [];
-  }
-};
-
-export const fetchUsers = async (): Promise<User[]> => {
-  const response = await fetch(`${API_BASE_URL}/transfers/users/all`);
-  if (!response.ok) throw new Error('Failed to fetch users');
-  return await response.json();
-};
-
-export const fetchLocations = async (): Promise<TransferLocation[]> => {
-  const response = await fetch(`${API_BASE_URL}/transfers/locations/all`);
-  if (!response.ok) throw new Error('Failed to fetch locations');
-  return await response.json();
-};
-
-export const createTransfer = async (payload: any) => {
-  // FIX: Added trailing slash for consistency
-  const response = await fetch(`${API_BASE_URL}/transfers/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json(); 
-    console.error("🚨 FASTAPI REJECTION DETAILS:", JSON.stringify(errorData, null, 2));
-    throw new Error('Failed to create transfer');
-  }
-  
-  return await response.json();
-};
-
-export const fetchTransfer = async (id: string | number): Promise<StockTransfer> => {
-  const response = await fetch(`${API_BASE_URL}/transfers/${id}`);
-  if (!response.ok) throw new Error('Failed to fetch transfer details');
-  return await response.json();
-};
-
-export const releaseTransfer = async (id: number, items: Record<number, number>) => {
-  const response = await fetch(`${API_BASE_URL}/transfers/${id}/release`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
-  });
-  if (!response.ok) throw new Error('Failed to release transfer');
-  return await response.json();
-};
-
-export const receiveTransfer = async (
-  id: number, 
-  items: Record<number, number>, 
-  unexpected_items: { product_id: number, received_qty: number, bundling?: string }[]
-) => {
-  const response = await fetch(`${API_BASE_URL}/transfers/${id}/receive`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items, unexpected_items }),
-  });
-  if (!response.ok) throw new Error('Failed to receive transfer');
-  return await response.json();
-};
-
-export const fetchItemLedger = async (productId: number, locationId: number) => {
-  const response = await fetch(`${API_BASE_URL}/products/${productId}/ledger/${locationId}`);
-  if (!response.ok) throw new Error("Failed to fetch ledger");
-  return response.json();
-};
-
-export const createLocation = async (payload: { name: string; parent_location_id?: number | null; type: string }) => {
-  const response = await fetch(`${API_BASE_URL}/transfers/locations`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error("Failed to create location");
-  return response.json();
-};
-
-export const updateLocation = async (id: number, name: string) => {
-  const response = await fetch(`${API_BASE_URL}/transfers/locations/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  });
-  if (!response.ok) throw new Error("Failed to update location");
-  return response.json();
-};
-
-// --- AUTHENTICATION API ---
-
-export const loginUser = async (credentials: any) => {
-  const response = await fetch(`${API_BASE_URL}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credentials),
-  });
-  if (!response.ok) throw new Error("Invalid username or password");
-  return response.json();
-};
-
-export const registerUser = async (userData: any) => {
-  const response = await fetch(`${API_BASE_URL}/auth/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(userData),
-  });
-  if (!response.ok) throw new Error("Registration failed. Username may be taken.");
-  return response.json();
-};
-
-export const updateTransferHeader = async (id: number, data: { document_id?: string, released_by_id?: number, received_by_id?: number }) => {
-  const response = await fetch(`${API_BASE_URL}/transfers/${id}/header`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error("Failed to update transfer header");
-  return response.json();
-};
-
-// --- PROCUREMENT: SUPPLIERS ---
-
-export interface Supplier {
-  supplier_id: number;
-  name: string;
-  contact_person: string | null;
-  contact_notes: string | null;
-  phone: string | null;
-  email: string | null;
-  address: string | null;
-  payment_terms: string | null;
-  banking_details: string | null;
-  is_active: boolean;
-  registered_at: string;
+export interface SaleTenderIn {
+  payment_mode_id: number
+  amount: number
+  reference_number?: string
 }
 
-export const fetchSuppliers = async (): Promise<Supplier[]> => {
-  // FIX: Removed trailing slash based on 307 logs
-  const response = await fetch(`${API_BASE_URL}/procurement/suppliers`);
-  if (!response.ok) throw new Error('Failed to fetch suppliers');
-  return response.json();
-};
-
-export const createSupplier = async (data: Partial<Supplier>): Promise<Supplier> => {
-  // FIX: Removed trailing slash
-  const response = await fetch(`${API_BASE_URL}/procurement/suppliers`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to create supplier');
-  return response.json();
-};
-
-export const updateSupplier = async (id: number, data: Partial<Supplier>): Promise<Supplier> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/suppliers/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to update supplier');
-  return response.json();
-};
-
-// --- PROCUREMENT: SHIPMENTS ---
-
-export interface InboundShipment {
-  shipment_id: number;
-  logistics_name: string | null;
-  logistics_doc_id: string | null;
-  van_number: string | null;
-  date_loaded: string | null;
-  date_sealed: string | null;
-  date_arrived: string | null;
-  collected_by_id: number | null;
-  status: string; 
-  collected_by?: User;
-  goods_receipts?: any[]; 
+export interface SalePostRequest {
+  tenders: SaleTenderIn[]
+  receipt_grand_total?: number | null
+  transaction_date?: string
 }
 
-export const fetchShipments = async (): Promise<InboundShipment[]> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/shipments`); 
-  if (!response.ok) throw new Error('Failed to fetch shipments');
-  return response.json();
-};
-
-export const createShipment = async (data: Partial<InboundShipment>): Promise<InboundShipment> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/shipments`, { 
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to create shipment');
-  return response.json();
-};
-
-export const updateShipmentStatus = async (id: number, status: string): Promise<InboundShipment> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/shipments/${id}/status`, { 
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status }),
-  });
-  if (!response.ok) throw new Error('Failed to update status');
-  return response.json();
-};
-
-// --- PROCUREMENT: GOODS RECEIPTS (GRNs) ---
-
-export interface GRNItem {
-  grn_item_id?: number;
-  product_id: number;
-  bundling: string | null;
-  expected_qty: number;
-  received_qty: number;
-  unit_gross_cost: number;
-  discount: number;
-  net_cost?: number;
-  product?: Product;
+export interface SaleItemOut {
+  sale_item_id: number
+  sale_id: number
+  variant_id: number
+  cost_layer_id: number | null
+  quantity: number
+  unit_price: number
+  discount_pct: number | null
+  discount_flat: number | null
+  line_total: number
+  gross_cost: number | null
+  supplier_discount: number | null
+  net_unit_cost: number | null
+  cost_source: string | null
+  variant?: { variant_id: number; PID: string; variant_name: string; product_brand?: string | null; product_type?: string | null }
+  already_returned?: number  // set by /sale/:id/items-for-return
 }
 
-export interface GoodsReceipt {
-  grn_id: number;
-  shipment_id: number;
-  supplier_id: number;
-  rcv_document_id: string | null;
-  date_collected: string;
-  checked_by_id: number | null;
-  status: string;
-  has_discrepancy: boolean;
-  supplier?: Supplier;
-  shipment?: InboundShipment;
-  checked_by?: User;
-  items?: GRNItem[];
+export interface CustomerPaymentOut {
+  payment_id: number
+  customer_id: number | null
+  payment_mode_id: number
+  amount: number
+  payment_date: string | null
+  reference_number: string | null
+  notes: string | null
+  unapplied_amount: number
+  applications: { apply_id: number; payment_id: number; sale_id: number; amount_applied: number; applied_at: string }[]
+  payment_mode_name: string | null
+  payment_mode_is_physical: boolean | null
 }
 
-export const fetchGRNs = async (): Promise<GoodsReceipt[]> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/receipts`);
-  if (!response.ok) throw new Error('Failed to fetch GRNs');
-  return response.json();
-};
-
-export const createGRN = async (data: Partial<GoodsReceipt>): Promise<GoodsReceipt> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/receipts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to create GRN');
-  return response.json();
-};
-
-export const updateGRNStatus = async (id: number, status: string): Promise<GoodsReceipt> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/receipts/${id}/status`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status }),
-  });
-  if (!response.ok) throw new Error('Failed to update GRN status');
-  return response.json();
-};
-
-// --- PROCUREMENT: PURCHASE ORDERS (Tier 2) ---
-
-export interface POItem {
-  po_item_id?: number;
-  product_id: number;
-  requested_qty: number; 
-  unit_gross_cost: number;
-  discount: number;      
-  net_cost?: number;     
-  product?: Product;
+export interface ArLedgerOut {
+  ar_ledger_id: number
+  customer_id: number | null
+  amount_change: number
+  reason: string
+  reference_type: string | null
+  reference_id: string | null
+  notes: string | null
+  occurred_at: string | null
 }
 
-export interface PurchaseOrder {
-  po_id: number;
-  document_id: string | null; 
-  supplier_id: number;
-  status: string;
-  date_drafted: string;       
-  payment_terms: string | null; 
-  total_value: number;        
-  
-  supplier?: Supplier;
-  items?: POItem[];
+export interface CustomerAgingOut {
+  customer_id: number
+  customer_name: string
+  terms_days: number
+  current: number
+  days_1_30: number
+  days_31_60: number
+  days_61_90: number
+  days_90_plus: number
+  total_outstanding: number
 }
 
-export const fetchPurchaseOrders = async (): Promise<PurchaseOrder[]> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/orders`);
-  if (!response.ok) throw new Error('Failed to fetch POs');
-  return response.json();
-};
+export interface CustomerOut {
+  customer_id: number
+  customer_name: string
+  credit_limit: number | null
+  terms_days: number
+  outstanding_balance: number
+  is_deleted: boolean
+  is_overdue: boolean
+}
 
-export const createPurchaseOrder = async (data: any): Promise<PurchaseOrder> => {
-  const response = await fetch(`${API_BASE_URL}/procurement/orders`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) throw new Error('Failed to create PO');
-  return response.json();
-};
+export interface SaleOut {
+  sale_id: number
+  sale_pid: string | null
+  transaction_date: string | null
+  posted_at: string | null
+  location_id: number
+  register_id: number | null
+  customer_id: number | null
+  employee_id: number | null
+  shift_id: number | null
+  origin_sale_id: number | null
+  created_by_user_id: number | null
+  subtotal_amount: number
+  cart_discount_pct: number | null
+  cart_discount_flat: number | null
+  discount_amount: number
+  tax_amount: number
+  grand_total: number
+  receipt_grand_total: number | null
+  audit_variance: number | null
+  due_date: string | null
+  payment_status: string
+  balance_due: number
+  status: string
+  voided_at: string | null
+  void_reason: string | null
+  idempotency_key: string | null
+  items: SaleItemOut[]
+  payments: CustomerPaymentOut[]
+  row_type: string          // 'sale' | 'return'
+  return_id: number | null  // set when row_type === 'return'
+}
 
+export interface SaleTotals {
+  count: number
+  subtotal: number
+  discount: number
+  grand_total: number
+  receipt_total: number | null
+  variance: number | null
+}
 
-// --- SALES & POS API ---
-export const createSale = async (payload: any) => {
-  try {
-    // FIX: Replaced literal string with correct variable template
-    const response = await fetch(`${API_BASE_URL}/sales`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+export interface CollectionEntry {
+  payment_mode: string
+  amount:       number
+  is_physical:  boolean
+}
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      if (Array.isArray(errorData.detail)) {
-        const messages = errorData.detail.map((e: any) => `${e.loc.join(' -> ')}: ${e.msg}`);
-        throw new Error(`Validation Error:\n${messages.join('\n')}`);
-      }
-      throw new Error(errorData.detail || "Failed to create sale");
-    }
+export interface SalesSummaryResponse {
+  merchandise_gross:       number
+  cart_discounts:          number
+  non_merchandise_revenue: number
+  variances:               number
+  returns_total:           number
+  total_revenue:           number
+  gross_profit:            number
+  uncosted_revenue:        number
+  collections:             CollectionEntry[]
+  total_physical:          number
+  total_virtual:           number
+  total_collected:         number
+}
 
-    return await response.json();
-  } catch (error) {
-    console.error("Error creating sale:", error);
-    throw error;
-  }
-};
+export interface SalesListResponse {
+  items: SaleOut[]
+  totals: SaleTotals
+  next_cursor: number | null
+}
 
-export const fetchSalesDashboard = async (params: { start_date?: string, end_date?: string, search?: string }) => {
-  const query = new URLSearchParams();
-  if (params.start_date) query.append('start_date', params.start_date);
-  if (params.end_date) query.append('end_date', params.end_date);
-  if (params.search) query.append('search', params.search);
+// ── SETTINGS CRUD TYPES ───────────────────────────────────────────────────────
 
-  // FIX: Replaced literal string with correct variable template
-  const response = await fetch(`${API_BASE_URL}/sales?${query.toString()}`);
-  if (!response.ok) throw new Error("Failed to fetch sales data");
-  return await response.json();
-};
+export interface LocationCreate {
+  location_name: string
+  location_type: string
+  parent_location_id?: number | null
+  address?: string | null
+}
 
-export const exportSalesToExcel = async (params: { start_date?: string, end_date?: string, search?: string }) => {
-  const query = new URLSearchParams();
-  if (params.start_date) query.append('start_date', params.start_date);
-  if (params.end_date) query.append('end_date', params.end_date);
-  if (params.search) query.append('search', params.search);
+export interface LocationUpdate {
+  location_name?: string
+  location_type?: string
+  status?: string
+  address?: string | null
+  parent_location_id?: number | null
+}
 
-  // FIX: Replaced literal string with correct variable template
-  window.open(`${API_BASE_URL}/sales/export?${query.toString()}`, '_blank');
-};
+export interface ShiftCreate  { shift_name: string; is_active?: boolean }
+export interface ShiftPatch   { shift_name?: string; is_active?: boolean }
 
-export const fetchPosSettings = async () => {
-  // FIX: Replaced literal string with correct variable template
-  const response = await fetch(`${API_BASE_URL}/sales/settings`);
-  if (!response.ok) {
-    return { is_vat_enabled: false, vat_rate: 0.12 };
-  }
-  return await response.json();
-};
+export interface RegisterCreate { name: string; location_id: number; is_active?: boolean }
+export interface RegisterPatch  { name?: string; location_id?: number; is_active?: boolean }
 
-export const fetchSaleDetails = async (sales_id: number) => {
-  // FIX: Replaced literal string with correct variable template
-  const response = await fetch(`${API_BASE_URL}/sales/detail/${sales_id}`);
-  if (!response.ok) throw new Error("Failed to fetch sale details");
-  return await response.json();
-};
+export interface PaymentModeCreate { name: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean }
+export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean }
+
+// ── SALES API ─────────────────────────────────────────────────────────────────
+
+export const salesApi = {
+  shifts: {
+    list:   ()                                  => get<Shift[]>('/sales/shifts'),
+    create: (p: ShiftCreate)                    => post<Shift>('/sales/shifts', p),
+    patch:  (id: number, p: ShiftPatch)         => patch<Shift>(`/sales/shifts/${id}`, p),
+  },
+  paymentModes: {
+    list:   ()                                  => get<PaymentMode[]>('/sales/payment-modes'),
+    create: (p: PaymentModeCreate)              => post<PaymentMode>('/sales/payment-modes', p),
+    patch:  (id: number, p: PaymentModePatch)   => patch<PaymentMode>(`/sales/payment-modes/${id}`, p),
+  },
+  registers: {
+    list:   ()                                  => get<CashRegister[]>('/sales/registers'),
+    create: (p: RegisterCreate)                 => post<CashRegister>('/sales/registers', p),
+    patch:  (id: number, p: RegisterPatch)      => patch<CashRegister>(`/sales/registers/${id}`, p),
+  },
+  drafts: {
+    create:  (payload: SaleCreate)            => post<SaleOut>('/sales/drafts', payload),
+    list:    (locationId?: number)            => get<SaleOut[]>(`/sales/drafts${locationId ? `?location_id=${locationId}` : ''}`),
+    get:     (id: number)                     => get<SaleOut>(`/sales/drafts/${id}`),
+    patch:   (id: number, payload: SalePatch) => patch<SaleOut>(`/sales/drafts/${id}`, payload),
+    delete:  (id: number)                     => del<void>(`/sales/drafts/${id}`),
+    post:    (id: number, payload: SalePostRequest) => post<SaleOut>(`/sales/drafts/${id}/post`, payload),
+  },
+  sales: {
+    list: (params?: {
+      search?: string
+      date_from?: string
+      date_to?: string
+      location_id?: number
+      shift_id?: number
+      register_id?: number
+      employee_id?: number
+      customer_id?: number
+      payment_status?: string
+      status?: string
+      has_variance?: boolean
+      has_uncosted?: boolean
+      cursor?: number
+      limit?: number
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.search)         q.set('search',          params.search)
+      if (params?.date_from)      q.set('date_from',       params.date_from)
+      if (params?.date_to)        q.set('date_to',         params.date_to)
+      if (params?.location_id)    q.set('location_id',     String(params.location_id))
+      if (params?.shift_id)       q.set('shift_id',        String(params.shift_id))
+      if (params?.register_id)    q.set('register_id',     String(params.register_id))
+      if (params?.employee_id)    q.set('employee_id',     String(params.employee_id))
+      if (params?.customer_id)    q.set('customer_id',     String(params.customer_id))
+      if (params?.payment_status) q.set('payment_status',  params.payment_status)
+      if (params?.status)         q.set('status',          params.status)
+      if (params?.has_variance)   q.set('has_variance',    'true')
+      if (params?.has_uncosted)   q.set('has_uncosted',    'true')
+      if (params?.cursor)         q.set('cursor',          String(params.cursor))
+      if (params?.limit)          q.set('limit',           String(params.limit))
+      const qs = q.toString()
+      return get<SalesListResponse>(`/sales/${qs ? '?' + qs : ''}`)
+    },
+    get:     (id: number)                              => get<SaleOut>(`/sales/${id}`),
+    items:   (id: number)                              => get<SaleItemOut[]>(`/sales/${id}/items`),
+    void:    (id: number, void_reason: string)         => post<SaleOut>(`/sales/${id}/void`, { void_reason }),
+    nextPid: ()                                        => get<{ next_pid: string }>('/sales/next-pid'),
+    summary: (params?: {
+      date_from?: string; date_to?: string
+      location_id?: number; shift_id?: number; register_id?: number
+      employee_id?: number; customer_id?: number; status?: string
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.date_from)    q.set('date_from',   params.date_from)
+      if (params?.date_to)      q.set('date_to',     params.date_to)
+      if (params?.location_id)  q.set('location_id', String(params.location_id))
+      if (params?.shift_id)     q.set('shift_id',    String(params.shift_id))
+      if (params?.register_id)  q.set('register_id', String(params.register_id))
+      if (params?.employee_id)  q.set('employee_id', String(params.employee_id))
+      if (params?.customer_id)  q.set('customer_id', String(params.customer_id))
+      if (params?.status)       q.set('status',      params.status)
+      const qs = q.toString()
+      return get<SalesSummaryResponse>(`/sales/summary${qs ? '?' + qs : ''}`)
+    },
+  },
+  customers: {
+    list:    (params?: { search?: string; include_deleted?: boolean }) => {
+      const q = new URLSearchParams()
+      if (params?.search)           q.set('search',          params.search)
+      if (params?.include_deleted)  q.set('include_deleted', 'true')
+      const qs = q.toString()
+      return get<CustomerOut[]>(`/sales/customers${qs ? '?' + qs : ''}`)
+    },
+    get:     (id: number)                                         => get<CustomerOut>(`/sales/customers/${id}`),
+    create:  (p: { customer_name: string; credit_limit?: number | null; terms_days?: number }) =>
+               post<CustomerOut>('/sales/customers', p),
+    patch:   (id: number, p: { customer_name?: string; credit_limit?: number | null; terms_days?: number }) =>
+               patch<CustomerOut>(`/sales/customers/${id}`, p),
+    delete:  (id: number)                                         => del<void>(`/sales/customers/${id}`),
+    arLedger: (id: number, params?: { date_from?: string; date_to?: string; reason?: string; limit?: number; cursor?: number }) => {
+      const q = new URLSearchParams()
+      if (params?.date_from) q.set('date_from', params.date_from)
+      if (params?.date_to)   q.set('date_to',   params.date_to)
+      if (params?.reason)    q.set('reason',     params.reason)
+      if (params?.limit)     q.set('limit',      String(params.limit))
+      if (params?.cursor)    q.set('cursor',     String(params.cursor))
+      const qs = q.toString()
+      return get<ArLedgerOut[]>(`/sales/customers/${id}/ar-ledger${qs ? '?' + qs : ''}`)
+    },
+    sales:    (id: number, cursor?: number, limit?: number) => {
+      const q = new URLSearchParams()
+      if (cursor) q.set('cursor', String(cursor))
+      if (limit)  q.set('limit',  String(limit))
+      const qs = q.toString()
+      return get<SaleOut[]>(`/sales/customers/${id}/sales${qs ? '?' + qs : ''}`)
+    },
+    payments: (id: number, cursor?: number, limit?: number) => {
+      const q = new URLSearchParams()
+      if (cursor) q.set('cursor', String(cursor))
+      if (limit)  q.set('limit',  String(limit))
+      const qs = q.toString()
+      return get<CustomerPaymentOut[]>(`/sales/customers/${id}/payments${qs ? '?' + qs : ''}`)
+    },
+    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string }) =>
+                     post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
+    aging: (params?: { search?: string; include_zero_balance?: boolean }) => {
+      const q = new URLSearchParams()
+      if (params?.search)               q.set('search', params.search)
+      if (params?.include_zero_balance) q.set('include_zero_balance', 'true')
+      const qs = q.toString()
+      return get<CustomerAgingOut[]>(`/sales/customers/aging${qs ? '?' + qs : ''}`)
+    },
+  },
+  returns: {
+    list: (params?: {
+      search?: string; date_from?: string; date_to?: string
+      location_id?: number; customer_id?: number; sale_id?: number
+      has_exchange?: boolean; cursor?: number; limit?: number
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.search)       q.set('search',       params.search)
+      if (params?.date_from)    q.set('date_from',    params.date_from)
+      if (params?.date_to)      q.set('date_to',      params.date_to)
+      if (params?.location_id)  q.set('location_id',  String(params.location_id))
+      if (params?.customer_id)  q.set('customer_id',  String(params.customer_id))
+      if (params?.sale_id)      q.set('sale_id',      String(params.sale_id))
+      if (params?.has_exchange) q.set('has_exchange', 'true')
+      if (params?.cursor)       q.set('cursor',       String(params.cursor))
+      if (params?.limit)        q.set('limit',        String(params.limit))
+      const qs = q.toString()
+      return get<SalesReturnOut[]>(`/sales/returns${qs ? '?' + qs : ''}`)
+    },
+    get:     (id: number)                               => get<SalesReturnOut>(`/sales/returns/${id}`),
+    create:  (p: {
+      sale_id?: number | null; location_id?: number | null
+      customer_id?: number | null; disposition?: string
+      reason?: string; items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[]
+    }) => post<SalesReturnOut>('/sales/returns', p),
+    exchange: (
+      p: { sale_id: number; location_id?: number | null; reason?: string
+           items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[] },
+      opts?: { register_id?: number | null; shift_id?: number | null; employee_id?: number | null }
+    ) => {
+      const q = new URLSearchParams()
+      if (opts?.register_id) q.set('register_id', String(opts.register_id))
+      if (opts?.shift_id)    q.set('shift_id',    String(opts.shift_id))
+      if (opts?.employee_id) q.set('employee_id', String(opts.employee_id))
+      const qs = q.toString()
+      return post<ExchangeResult>(`/sales/returns/exchange${qs ? '?' + qs : ''}`, p)
+    },
+    itemsForReturn: (sale_id: number) => get<SaleItemOut[]>(`/sales/sale/${sale_id}/items-for-return`),
+  },
+  arLedger: {
+    list: (params?: { customer_id?: number; reason?: string; date_from?: string; date_to?: string; cursor?: number }) => {
+      const q = new URLSearchParams()
+      if (params?.customer_id) q.set('customer_id', String(params.customer_id))
+      if (params?.reason)      q.set('reason',      params.reason)
+      if (params?.date_from)   q.set('date_from',   params.date_from)
+      if (params?.date_to)     q.set('date_to',     params.date_to)
+      if (params?.cursor)      q.set('cursor',      String(params.cursor))
+      const qs = q.toString()
+      return get<ArLedgerOut[]>(`/sales/ar-ledger${qs ? '?' + qs : ''}`)
+    },
+  },
+}
+
+// ── INVENTORY API ─────────────────────────────────────────────────────────────
+
+export const inventoryApi = {
+  locations: {
+    all:    ()                                          => get<Location[]>('/transfers/locations/all'),
+    create: (p: LocationCreate)                        => post<Location>('/transfers/locations', p),
+    update: (id: number, p: LocationUpdate)            => request<Location>('PUT', `/transfers/locations/${id}`, p),
+  },
+  posCatalog: () => get<POSCatalogItem[]>('/products/pos-catalog'),
+}
+
+// ── CATALOGUE TYPES ───────────────────────────────────────────────────────────
+
+export interface UOM { uom_id: number; uom_code: string; uom_name: string | null; is_deleted: boolean }
+export interface Category { category_id: number; category_name: string; parent_category_id: number | null; is_deleted: boolean }
+export interface InvSupplier {
+  supplier_id: number
+  supplier_code: string
+  supplier_name: string
+  bank_account_name: string | null
+  terms: number
+  is_deleted: boolean
+}
+
+export interface SupplierCreate {
+  supplier_code: string
+  supplier_name: string
+  bank_account_name?: string | null
+  terms: number
+}
+
+export interface SupplierUpdate {
+  supplier_name?: string
+  bank_account_name?: string | null
+  terms?: number
+}
+
+export interface SupplierPatch {
+  supplier_name?: string
+  bank_account_name?: string | null
+  terms?: number
+  is_deleted?: boolean
+}
+
+export interface StockEntry {
+  quantity: number
+  location: { location_id: number; location_name: string; location_type: string; status: string }
+}
+export interface CostLayerEntry {
+  layer_id: number; gross_cost: number; supplier_discount: number; net_unit_cost: number
+  original_quantity: number; quantity_remaining: number; location_id: number; created_at: string
+}
+export interface InvBarcode { barcode_id: number; variant_id: number; barcode: string; uom_id: number | null; is_primary: boolean }
+export interface InvUomConversion {
+  variant_id: number
+  from_uom_id: number
+  to_uom_id: number
+  factor: number
+  is_warehouse_bundle: boolean
+  price: number | null
+  promo_price: number | null
+}
+export interface InvVariantSupplier {
+  id: number; supplier_sku: string | null; gross_cost: number | null; supplier_discount: number; is_primary: boolean
+  supplier: { supplier_id: number; supplier_code: string; supplier_name: string }
+}
+export interface BundleComp {
+  bundle_variant_id: number
+  component_variant_id: number
+  quantity: number
+  component_variant?: { variant_id: number; PID: string; variant_name: string } | null
+}
+
+export interface BundleAvailableStock {
+  location_id:   number
+  location_name: string
+  available:     number
+}
+
+export interface InvVariant {
+  variant_id: number
+  product_id: number
+  PID: string
+  variant_name: string
+  sku: string | null
+  price: number | null
+  promo_price: number | null
+  is_default: boolean
+  is_deleted: boolean
+  attributes: Record<string, unknown> | null
+  current_stock: StockEntry[]
+  suppliers: InvVariantSupplier[]
+  cost_layers: CostLayerEntry[]
+  barcodes: InvBarcode[]
+  uom_conversions: InvUomConversion[]
+  bundle_components: BundleComp[]
+  bundle_available_stock: BundleAvailableStock[]
+}
+
+export interface InvProduct {
+  product_id: number
+  brand: string
+  product_type: string
+  description: string | null
+  status: string
+  is_deleted: boolean
+  base_uom_id: number | null
+  base_uom: UOM | null
+  categories: Category[]
+  variants: InvVariant[]
+}
+
+export interface PriceHistoryItem {
+  history_id: number; variant_id: number
+  old_price: number | null; new_price: number | null
+  old_promo_price: number | null; new_promo_price: number | null
+  changed_by_user_id: number | null; changed_by_username: string | null; changed_at: string
+}
+export interface CostHistoryItem {
+  history_id: number; variant_id: number; supplier_id: number; supplier_name: string | null
+  old_gross_cost: number | null; new_gross_cost: number | null
+  old_supplier_discount: number | null; new_supplier_discount: number | null
+  changed_by_user_id: number | null; changed_by_username: string | null; changed_at: string
+}
+export interface SalesHistoryItem {
+  sale_pid: string | null; transaction_date: string | null; cashier: string | null
+  quantity: number; unit_price: number; line_total: number; sale_status: string
+}
+export interface PurchaseHistoryItem {
+  shipment_pid: string | null; received_at: string | null; supplier_name: string | null
+  quantity_received: number; net_unit_cost: number | null; qc_status: string | null
+}
+
+// ── CATALOGUE API ─────────────────────────────────────────────────────────────
+
+export const catalogueApi = {
+  products: {
+    list:   ()                                    => get<InvProduct[]>('/products/'),
+    get:    (id: number)                          => get<InvProduct>(`/products/${id}`),
+    create: (p: Record<string, unknown>)          => post<InvProduct>('/products/', p),
+    update: (id: number, p: Record<string, unknown>) => request<InvProduct>('PUT', `/products/${id}`, p),
+  },
+  variants: {
+    get:    (id: number)                          => get<InvVariant>(`/products/variants/${id}`),
+    update: (id: number, p: Record<string, unknown>) => request<InvVariant>('PUT', `/products/variants/${id}`, p),
+    delete: (id: number)                          => del<void>(`/products/variants/${id}`),
+    addToProduct: (productId: number, p: Record<string, unknown>) =>
+      post<InvProduct>(`/products/${productId}/variants`, p),
+    priceHistory:    (id: number, limit=10, offset=0) =>
+      get<PriceHistoryItem[]>(`/products/variants/${id}/price-history?limit=${limit}&offset=${offset}`),
+    costHistory:     (id: number, limit=10, offset=0) =>
+      get<CostHistoryItem[]>(`/products/variants/${id}/cost-history?limit=${limit}&offset=${offset}`),
+    salesHistory:    (id: number, limit=10, offset=0) =>
+      get<SalesHistoryItem[]>(`/products/variants/${id}/sales-history?limit=${limit}&offset=${offset}`),
+    purchaseHistory: (id: number, limit=10, offset=0) =>
+      get<PurchaseHistoryItem[]>(`/products/variants/${id}/purchase-history?limit=${limit}&offset=${offset}`),
+  },
+  barcodes: {
+    create: (vid: number, p: Record<string, unknown>) => post<InvBarcode>(`/products/variants/${vid}/barcodes`, p),
+    update: (vid: number, bid: number, p: Record<string, unknown>) => request<InvBarcode>('PUT', `/products/variants/${vid}/barcodes/${bid}`, p),
+    delete: (vid: number, bid: number) => del<void>(`/products/variants/${vid}/barcodes/${bid}`),
+  },
+  uomConversions: {
+    create: (vid: number, p: Record<string, unknown>) => post<InvUomConversion>(`/products/variants/${vid}/uom-conversions`, p),
+    update: (vid: number, fromId: number, toId: number, p: Record<string, unknown>) =>
+      request<InvUomConversion>('PUT', `/products/variants/${vid}/uom-conversions/${fromId}/${toId}`, p),
+    delete: (vid: number, fromId: number, toId: number) => del<void>(`/products/variants/${vid}/uom-conversions/${fromId}/${toId}`),
+  },
+  bundleComponents: {
+    create: (vid: number, p: Record<string, unknown>) => post<BundleComp>(`/products/variants/${vid}/bundle-components`, p),
+    update: (vid: number, compId: number, p: Record<string, unknown>) => request<BundleComp>('PUT', `/products/variants/${vid}/bundle-components/${compId}`, p),
+    delete: (vid: number, compId: number) => del<void>(`/products/variants/${vid}/bundle-components/${compId}`),
+  },
+  supplierLinks: {
+    create: (vid: number, p: Record<string, unknown>) => post<InvVariantSupplier>(`/products/variants/${vid}/suppliers`, p),
+    update: (vid: number, sid: number, p: Record<string, unknown>) => request<InvVariantSupplier>('PUT', `/products/variants/${vid}/suppliers/${sid}`, p),
+    delete: (vid: number, sid: number) => del<void>(`/products/variants/${vid}/suppliers/${sid}`),
+  },
+  uoms: {
+    list:   ()                                          => get<UOM[]>('/products/uoms'),
+    create: (p: { uom_code: string; uom_name?: string }) => post<UOM>('/products/uoms', p),
+    patch:  (id: number, p: { uom_name?: string })       => patch<UOM>(`/products/uoms/${id}`, p),
+    delete: (id: number)                                => del<void>(`/products/uoms/${id}`),
+  },
+  categories: {
+    list:   ()                                                   => get<Category[]>('/products/categories'),
+    create: (p: { category_name: string; parent_category_id?: number | null }) =>
+      post<Category>('/products/categories', p),
+    patch:  (id: number, p: { category_name?: string; parent_category_id?: number | null }) =>
+      patch<Category>(`/products/categories/${id}`, p),
+    delete: (id: number)                                         => del<void>(`/products/categories/${id}`),
+  },
+  suppliers: {
+    list:        (includeDeleted = false) =>
+      get<InvSupplier[]>(`/products/suppliers/all${includeDeleted ? '?include_deleted=true' : ''}`),
+    get:         (id: number)             => get<InvSupplier>(`/products/suppliers/${id}`),
+    create:      (p: SupplierCreate)      => post<InvSupplier>('/products/suppliers', p),
+    update:      (id: number, p: SupplierUpdate) =>
+      request<InvSupplier>('PUT', `/products/suppliers/${id}`, p),
+    patch:       (id: number, p: SupplierPatch) =>
+      request<InvSupplier>('PATCH', `/products/suppliers/${id}`, p),
+    deactivate:  (id: number) =>
+      request<InvSupplier>('PATCH', `/products/suppliers/${id}`, { is_deleted: true }),
+    reactivate:  (id: number) =>
+      request<InvSupplier>('PATCH', `/products/suppliers/${id}`, { is_deleted: false }),
+  },
+  importOps: {
+    preview: (rows: unknown[]) => post<{ rows: unknown[] }>('/products/import/preview', rows),
+    confirm: (rows: unknown[], confirmedPids: string[]) =>
+      post<InvProduct[]>('/products/import/confirm', { rows, confirmed_pids: confirmedPids }),
+  },
+}
+
+// ── SALES RETURNS ─────────────────────────────────────────────────────────────
+
+export interface SalesReturnItemOut {
+  return_item_id: number
+  return_id:      number
+  sale_item_id:   number | null
+  variant_id:     number
+  cost_layer_id:  number | null
+  quantity:       number
+  line_total:     number
+  variant?: { variant_id: number; PID: string; variant_name: string } | null
+}
+
+export interface SalesReturnOut {
+  return_id:           number
+  return_pid:          string | null
+  sale_id:             number | null
+  location_id:         number
+  return_date:         string | null
+  reason:              string | null
+  grand_total:         number
+  disposition:         string | null
+  customer_id:         number | null
+  created_by_user_id:  number | null
+  items:               SalesReturnItemOut[]
+  exchange_sale_pid:   string | null
+  exchange_sale_id:    number | null
+}
+
+export interface ExchangeResult {
+  sales_return:   SalesReturnOut
+  exchange_draft: SaleOut
+}
+
+// ── BULK IMPORT ───────────────────────────────────────────────────────────────
+
+export interface ImportDiffRow {
+  row_number:  number
+  anchor:      string
+  mode:        'create' | 'update' | 'noop'
+  old_values:  Record<string, unknown> | null
+  new_values:  Record<string, unknown>
+  diff_fields: string[]
+}
+
+export interface ImportErrorRow {
+  row_number: number
+  anchor:     string
+  error:      string
+}
+
+export interface ImportPreviewResponse {
+  valid_rows: ImportDiffRow[]
+  error_rows: ImportErrorRow[]
+  summary: { creates: number; updates: number; noops: number; errors: number }
+}
+
+export interface ImportConfirmResponse {
+  written: number
+  skipped: number
+  errors:  ImportErrorRow[]
+}
+
+const BASE_URL = import.meta.env.VITE_API_URL ?? '/api'
+
+function authHeader(): Record<string, string> {
+  const token = localStorage.getItem('erp_token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+export const importApi = {
+  downloadTemplate: async (entity: string): Promise<void> => {
+    const resp = await fetch(`${BASE_URL}/import/${entity}/template`, { headers: authHeader() })
+    if (!resp.ok) throw new Error('Template download failed')
+    const blob = await resp.blob()
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `${entity}_import_template.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  },
+  preview: (entity: string, rows: Record<string, unknown>[]) =>
+    post<ImportPreviewResponse>(`/import/${entity}/preview`, { rows }),
+  confirm: (entity: string, confirmedAnchors: string[], rows: Record<string, unknown>[]) =>
+    post<ImportConfirmResponse>(`/import/${entity}/confirm`, { confirmed_anchors: confirmedAnchors, rows }),
+}
+
+// ── SYSTEM SETTINGS ───────────────────────────────────────────────────────────
+
+export interface InventoryPolicy {
+  allow_negative_stock:  boolean
+  updated_at:            string | null
+  updated_by_user_id:    number | null
+  updated_by_username:   string | null
+}
+
+export const settingsApi = {
+  inventoryPolicy: {
+    get:   ()                                        => get<InventoryPolicy>('/settings/inventory-policy'),
+    patch: (p: { allow_negative_stock: boolean })    => patch<InventoryPolicy>('/settings/inventory-policy', p),
+  },
+}
+
+// ── STOCK MOVEMENT TYPES ──────────────────────────────────────────────────────
+
+export interface Transfer {
+  transfer_id: number
+  transfer_pid: string | null
+  from_location_id: number
+  to_location_id: number
+  from_location?: { location_id: number; location_name: string }
+  to_location?:   { location_id: number; location_name: string }
+  released_by_user_id:  number | null
+  received_by_user_id:  number | null
+  requested_by_user_id: number | null
+  released_by_employee_id: number | null
+  received_by_employee_id: number | null
+  released_by_employee?: { employee_id: number; first_name: string; last_name: string } | null
+  received_by_employee?: { employee_id: number; first_name: string; last_name: string } | null
+  total_bundle_count: number | null
+  occurred_at: string
+  status: string
+  voided_at: string | null
+  void_reason: string | null
+  items?: TransferItem[]
+}
+
+export interface TransferItem {
+  transfer_item_id: number
+  transfer_id: number
+  variant_id: number
+  quantity_requested: number
+  quantity_released: number | null
+  quantity_received: number | null
+  variant?: { variant_id: number; PID: string; variant_name: string; sku: string | null
+              product?: { brand: string } }
+}
+
+export interface TransferCreate {
+  from_location_id: number
+  to_location_id: number
+  transfer_pid?: string | null
+  occurred_at?: string
+  requested_by_user_id?: number | null
+  released_by_employee_id?: number | null
+  received_by_employee_id?: number | null
+  total_bundle_count?: number | null
+  items: { variant_id: number; quantity_requested: number; quantity_released?: number | null }[]
+}
+
+export interface Shipment {
+  shipment_id: number
+  shipment_pid: string | null
+  supplier_id: number | null
+  po_id: number | null
+  reference_number: string | null
+  received_at: string | null
+  is_confirmed: boolean
+  received_by_user_id:      number | null
+  inspected_by_user_id:     number | null
+  received_by_employee_id:  number | null
+  inspected_by_employee_id: number | null
+  received_by_employee?:  { employee_id: number; first_name: string; last_name: string } | null
+  inspected_by_employee?: { employee_id: number; first_name: string; last_name: string } | null
+  supplier?: { supplier_id: number; supplier_name: string }
+  po?: { po_id: number; po_pid: string }
+  receiving_details?: ReceivingDetail[]
+}
+
+export interface ReceivingDetail {
+  detail_id: number
+  shipment_id: number
+  variant_id: number
+  location_id: number
+  po_item_id: number | null
+  received_at: string | null
+  inspected_at: string | null
+  quantity_ordered: number | null
+  quantity_declared: number | null
+  quantity_actual: number | null
+  quantity_rejected: number | null
+  qc_status: string | null
+  variant?: { variant_id: number; PID: string; variant_name: string; sku: string | null
+              product?: { brand: string } }
+}
+
+export interface LedgerEntry {
+  ledger_id: number
+  variant_id: number
+  location_id: number
+  qty_change: number
+  reason: string
+  reference_type: string | null
+  reference_id: string | null
+  occurred_at: string
+  document_pid: string | null
+  variant?: { variant_id: number; PID: string; variant_name: string
+              product?: { brand: string } }
+  location?: { location_id: number; location_name: string }
+}
+
+// ── STOCK MOVEMENT API ────────────────────────────────────────────────────────
+
+export const stockApi = {
+  transfers: {
+    list:   ()                        => get<Transfer[]>('/transfers/'),
+    get:    (id: number)              => get<Transfer>(`/transfers/${id}`),
+    create: (p: TransferCreate)       => post<Transfer>('/transfers/', p),
+    void:   (id: number, void_reason: string) =>
+      post<Transfer>(`/transfers/${id}/void`, { void_reason }),
+    updateHeader: (id: number, p: Record<string, unknown>) =>
+      request<Transfer>('PUT', `/transfers/${id}/header`, p),
+  },
+  shipments: {
+    list:   ()                        => get<Shipment[]>('/procurement/shipments'),
+    get:    (id: number)              => get<Shipment>(`/procurement/shipments/${id}`),
+    create: (p: Record<string, unknown>) => post<Shipment>('/procurement/shipments', p),
+    // Backend expects a LIST — always send an array, never a single object
+    addDetails: (id: number, rows: Record<string, unknown>[]) =>
+      post<Shipment>(`/procurement/shipments/${id}/details`, rows),
+    // Stage 1: write ledger entries, stock enters immediately — no cost layers
+    receive: (id: number) =>
+      post<{ shipment_id: number; ledger_entries_written: number }>(
+        `/procurement/shipments/${id}/receive`, {}
+      ),
+    // Stage 2: create cost layers with user-supplied unit costs
+    confirmCosts: (id: number, lines: { detail_id: number; unit_cost: number }[], inspected_by_employee_id?: number | null) =>
+      post<Shipment>(`/procurement/shipments/${id}/confirm-costs`, {
+        lines,
+        inspected_by_employee_id: inspected_by_employee_id ?? null,
+      }),
+    // Legacy combined confirm — kept for backward compat
+    confirm: (id: number) => post<Record<string, unknown>>(`/procurement/shipments/${id}/confirm`, {}),
+  },
+  ledger: {
+    list: (params?: {
+      reason?: string; location_id?: number; variant_id?: number
+      date_from?: string; date_to?: string; limit?: number; cursor?: number
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.reason)      q.set('reason',      params.reason)
+      if (params?.location_id) q.set('location_id', String(params.location_id))
+      if (params?.variant_id)  q.set('variant_id',  String(params.variant_id))
+      if (params?.date_from)   q.set('date_from',   params.date_from)
+      if (params?.date_to)     q.set('date_to',     params.date_to)
+      if (params?.limit)       q.set('limit',       String(params.limit))
+      if (params?.cursor)      q.set('cursor',      String(params.cursor))
+      const qs = q.toString()
+      return get<LedgerEntry[]>(`/products/ledger${qs ? '?' + qs : ''}`)
+    },
+    forVariant: (vid: number, params?: { limit?: number; offset?: number }) => {
+      const q = new URLSearchParams()
+      if (params?.limit)  q.set('limit',  String(params.limit))
+      if (params?.offset) q.set('offset', String(params.offset))
+      const qs = q.toString()
+      return get<LedgerEntry[]>(`/products/variants/${vid}/ledger${qs ? '?' + qs : ''}`)
+    },
+  },
+}
+
+// ── re-export helpers ─────────────────────────────────────────────────────────
+export { get, post, patch, del }

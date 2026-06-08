@@ -1,4 +1,3 @@
-# auth/schemas.py
 from __future__ import annotations
 from typing import List, Optional
 from pydantic import BaseModel
@@ -15,13 +14,40 @@ class RoleOut(BaseModel):
         from_attributes = True
 
 
+class RoleDetailOut(BaseModel):
+    """Role with assigned-user count — used by the Settings roles tab."""
+    role_id: int
+    role_name: str
+    user_count: int
+
+
+class RoleCreate(BaseModel):
+    role_name: str
+
+
+class RolePatch(BaseModel):
+    role_name: str
+
+
 # ==========================================
 # EMPLOYEES
 # ==========================================
+class EmployeeCreate(BaseModel):
+    first_name: str
+    last_name: str
+
+
+class EmployeePatch(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class EmployeeOut(BaseModel):
     employee_id: int
     first_name: str
     last_name: str
+    is_active: bool
 
     class Config:
         from_attributes = True
@@ -36,7 +62,7 @@ class UserCreate(BaseModel):
     last_name: str
     username: str
     password: str
-    role_names: List[str] = []   # e.g. ["ADMIN", "WAREHOUSE_MANAGER"]
+    role_names: List[str] = []
 
 
 class UserLogin(BaseModel):
@@ -65,3 +91,16 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+# ==========================================
+# USER MANAGEMENT
+# ==========================================
+class UserActiveUpdate(BaseModel):
+    is_active: bool
+
+class UserRolesUpdate(BaseModel):
+    role_names: List[str]
+
+class UserPasswordChange(BaseModel):
+    new_password: str

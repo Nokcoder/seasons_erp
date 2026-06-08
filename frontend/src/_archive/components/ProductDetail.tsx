@@ -2,8 +2,16 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-import { fetchProduct, fetchProducts, createProduct, updateProduct } from '../services/api';
+import { fetchProduct, fetchProducts, createProduct, updateProduct, updateVariant } from '../services/api';
 import type { Product } from '../services/api';
+
+
+
+const strictNum = (val: any): number => {
+  if (val === null || val === undefined || val === '') return 0;
+  const n = Number(val);
+  return isNaN(n) ? 0 : n;
+};
 
 export default function ProductDetail() {
   const { id } = useParams<{ id: string }>();
@@ -18,7 +26,10 @@ export default function ProductDetail() {
 
   const [formData, setFormData] = useState({
     pid: '', name: '', sku: '', brand: '', variant: '', description: '', categories: '',
-    units_per_bundle: 1, is_active: true,
+    units_per_carton: 1, is_active: true, 
+    
+    // --- THE NEW FLAG ---
+    is_inventory: true, 
     
     // Costing
     gross_cost: '', cost_discount: '0', 
@@ -40,34 +51,38 @@ export default function ProductDetail() {
   useEffect(() => {
     if (isNew) {
       fetchProducts().then(data => setAllProducts(data)).catch(console.error);
-    } else if (id) {
+} else if (id) {
       fetchProduct(Number(id)).then(data => {
         setFullProduct(data);
         
-        const grossCost = data.gross_cost || 0;
-        const costDiscPct = (data.cost_discount || 0) * 100; 
+        // --- DECOUPLING FIX: Read from the first (default) variant ---
+        const primaryVariant = data.variants && data.variants.length > 0 ? data.variants[0] : {} as any;
+        
+        const grossCost = primaryVariant.gross_cost || 0;
+        const costDiscPct = (primaryVariant.cost_discount || 0) * 100; 
         const liveNetCost = grossCost * (1 - (costDiscPct / 100));
 
-        // TypeScript Safe String Conversion
-        const initTag = data.tag_price !== null && data.tag_price !== undefined ? String(data.tag_price) : '';
-        const initNet = data.net_price !== null && data.net_price !== undefined ? String(data.net_price) : '';
-        const initGross = data.gross_cost !== null && data.gross_cost !== undefined ? String(data.gross_cost) : '';
+        const initTag = primaryVariant.tag_price !== null && primaryVariant.tag_price !== undefined ? String(primaryVariant.tag_price) : '';
+        const initNet = primaryVariant.net_price !== null && primaryVariant.net_price !== undefined ? String(primaryVariant.net_price) : '';
+        const initGross = primaryVariant.gross_cost !== null && primaryVariant.gross_cost !== undefined ? String(primaryVariant.gross_cost) : '';
 
-        const numTag = parseFloat(initTag) || 0;
-        const numNet = parseFloat(initNet) || 0;
+        const numTag = strictNum(initTag);
+        const numNet = strictNum(initNet);
 
         setFormData({
           pid: data.pid,
           name: data.name,
-          sku: data.sku || '',
+          sku: primaryVariant.manufacturer_sku || '',
           brand: data.brand || '',
-          variant: data.variant || '',
+          variant: primaryVariant.variant_name !== 'Default' ? (primaryVariant.variant_name || '') : '',
           description: data.description || '',
           categories: Array.isArray(data.categories) 
               ? data.categories.map((c: any) => c.category_name).join(', ') 
               : '',
-          units_per_bundle: data.units_per_bundle || 1,
+          units_per_carton: data.units_per_carton || 1,
           is_active: data.is_active !== false,
+          
+          is_inventory: primaryVariant.is_inventory !== false, 
           
           gross_cost: initGross,
           cost_discount: costDiscPct ? costDiscPct.toString() : '0',
@@ -88,43 +103,41 @@ export default function ProductDetail() {
     }
   }, [id, isNew]);
 
-  // --- STANDARD HANDLERS ---
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+
+ const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  // --- THE BIDIRECTIONAL PRICING ENGINE ---
   const handlePricingChange = (field: string, val: string) => {
-    let next = { ...formData, [field]: val };
+    let next: Record<string, any> = { ...formData, [field]: val };
 
-    const parse = (v: string) => parseFloat(v) || 0;
-    const format = (n: number) => Number.isFinite(n) ? parseFloat(n.toFixed(2)).toString() : '';
+    const format = (n: number) => Number.isFinite(n) ? Number(n.toFixed(2)).toString() : '';
 
-    const gross = parse(next.gross_cost);
-    const costDiscPct = parse(next.cost_discount); 
+    const gross = strictNum(next.gross_cost);
+    const costDiscPct = strictNum(next.cost_discount); 
     const netCost = Math.max(0, gross * (1 - (costDiscPct / 100)));
 
     const syncRow = (prefix: 'tag' | 'net') => {
-      const priceKey = `${prefix}_price` as keyof typeof next;
-      const markupKey = `${prefix}_markup` as keyof typeof next;
-      const marginKey = `${prefix}_margin` as keyof typeof next;
+      const priceKey = `${prefix}_price`;
+      const markupKey = `${prefix}_markup`;
+      const marginKey = `${prefix}_margin`;
 
       if (field === priceKey) {
-        const price = parse(next[priceKey] as string);
+        const price = strictNum(next[priceKey]);
         next[markupKey] = netCost > 0 && price > 0 ? format(((price - netCost) / netCost) * 100) : '';
         next[marginKey] = price > 0 ? format(((price - netCost) / price) * 100) : '';
       } else if (field === markupKey) {
-        const markup = parse(next[markupKey] as string);
+        const markup = strictNum(next[markupKey]);
         const price = netCost * (1 + (markup / 100));
         next[priceKey] = price > 0 ? format(price) : '';
         next[marginKey] = price > 0 ? format(((price - netCost) / price) * 100) : '';
       } else if (field === marginKey) {
-        const margin = parse(next[marginKey] as string);
+        const margin = strictNum(next[marginKey]);
         const price = margin < 100 ? netCost / (1 - (margin / 100)) : 0;
         next[priceKey] = price > 0 ? format(price) : '';
         next[markupKey] = netCost > 0 && price > 0 ? format(((price - netCost) / netCost) * 100) : '';
       } else {
-        const price = parse(next[priceKey] as string);
+        const price = strictNum(next[priceKey]);
         if (price > 0) {
           next[markupKey] = netCost > 0 ? format(((price - netCost) / netCost) * 100) : '';
           next[marginKey] = format(((price - netCost) / price) * 100);
@@ -134,47 +147,86 @@ export default function ProductDetail() {
 
     syncRow('tag');
     syncRow('net');
-    setFormData(next);
+    
+    // Cast it back to the strict formData type for React state
+    setFormData(next as typeof formData);
   };
 
-  const liveNetCost = Math.max(0, (parseFloat(formData.gross_cost) || 0) * (1 - ((parseFloat(formData.cost_discount) || 0) / 100)));
+const liveNetCost = Math.max(0, strictNum(formData.gross_cost) * (1 - (strictNum(formData.cost_discount) / 100)));
 
   // --- SUBMIT HANDLER ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
-      const parsedTag = formData.tag_price !== '' ? parseFloat(formData.tag_price) : null;
-      const parsedNet = formData.net_price !== '' ? parseFloat(formData.net_price) : null;
+      const parsedTag = formData.tag_price !== '' ? strictNum(formData.tag_price) : null;
+      const parsedNet = formData.net_price !== '' ? strictNum(formData.net_price) : null;
       
-      // TypeScript Math Fix: Ensure no math is done on a null value
-      const safeTag = parsedTag || 0;
+      const safeTag = parsedTag !== null ? parsedTag : 0;
       const safeNet = parsedNet !== null ? parsedNet : safeTag;
+      
       const priceDiscountFraction = safeTag > 0 ? ((safeTag - safeNet) / safeTag) : 0;
-      const costDiscountFraction = (parseFloat(formData.cost_discount) || 0) / 100;
+      const costDiscountFraction = strictNum(formData.cost_discount) / 100;
 
-      const submitData = {
-        pid: formData.pid,
-        name: formData.name,
-        brand: formData.brand || null,
-        variant: formData.variant || null,
-        description: formData.description || null,
+   if (isNew) {
+        // --- PHASE 3: CREATE DECOUPLED PAYLOAD ---
+        const createPayload = {
+          pid: formData.pid,
+          name: formData.name,
+          brand: formData.brand || null,
+          description: formData.description || null,
+          category_text: typeof formData.categories === 'string' && formData.categories.trim() !== '' ? formData.categories : null,
+          units_per_carton: strictNum(formData.units_per_carton) > 0 ? strictNum(formData.units_per_carton) : 1, 
+          is_bundle: false,
+          
+          variants: [
+            {
+              variant_name: formData.variant || "Default",
+              manufacturer_sku: formData.sku || null,
+              is_inventory: Boolean(formData.is_inventory),
+              tag_price: parsedTag,
+              net_price: parsedNet,
+              price_discount: strictNum(priceDiscountFraction.toFixed(4)),
+              gross_cost: formData.gross_cost !== '' ? strictNum(formData.gross_cost) : null,
+              cost_discount: strictNum(costDiscountFraction.toFixed(4)),
+            }
+          ]
+        };
+        await createProduct(createPayload);
+} else {
+        // --- PHASE 2: DECOUPLED DUAL-UPDATE ---
         
-        category_text: typeof formData.categories === 'string' && formData.categories.trim() !== '' ? formData.categories : null,
-        
-        tag_price: parsedTag,
-        net_price: parsedNet,
-        price_discount: parseFloat(priceDiscountFraction.toFixed(4)),
-        
-        gross_cost: formData.gross_cost !== '' ? parseFloat(formData.gross_cost) : null,
-        cost_discount: parseFloat(costDiscountFraction.toFixed(4)),
-        units_per_bundle: formData.units_per_bundle ? Number(formData.units_per_bundle) : 1, 
-      };
+        // 1. Update Parent Metadata
+        const updatePayload = {
+          name: formData.name,
+          brand: formData.brand || null,
+          description: formData.description || null,
+          category_text: typeof formData.categories === 'string' && formData.categories.trim() !== '' ? formData.categories : null,
+          units_per_carton: strictNum(formData.units_per_carton) > 0 ? strictNum(formData.units_per_carton) : 1,
+          is_active: formData.is_active
+        };
 
-      if (isNew) {
-        await createProduct({ ...submitData, sku: formData.sku || null });
-      } else {
-        await updateProduct(Number(id), { ...submitData, sku: formData.sku || null });
+        const promises = [updateProduct(strictNum(id), updatePayload)];
+
+        // 2. Update Child Variant Data (Financials & Inventory Flag)
+        const primaryVariantId = fullProduct?.variants?.[0]?.variant_id;
+        if (primaryVariantId) {
+          const variantPayload = {
+            variant_name: formData.variant || "Default",
+            manufacturer_sku: formData.sku || null,
+            is_inventory: Boolean(formData.is_inventory),
+            tag_price: parsedTag,
+            net_price: parsedNet,
+            gross_cost: formData.gross_cost !== '' ? strictNum(formData.gross_cost) : null,
+            cost_discount: strictNum(costDiscountFraction.toFixed(4))
+          };
+          
+          // Import `updateVariant` from '../services/api' at the top of your file!
+          promises.push(updateVariant(primaryVariantId, variantPayload));
+        }
+
+        // Execute both requests concurrently
+        await Promise.all(promises);
       }
       
       navigate('/products');
@@ -191,7 +243,7 @@ export default function ProductDetail() {
     if (!window.confirm("Are you sure you want to archive this product?")) return;
     setSaving(true);
     try {
-      await updateProduct(Number(id), { is_active: false });
+      await updateProduct(strictNum(id), { is_active: false });
       alert("Product archived successfully.");
       navigate('/products');
     } catch (error) {
@@ -225,8 +277,8 @@ export default function ProductDetail() {
 
           const existingProduct = allProducts.find(p => p.pid.toLowerCase() === rawPid.toLowerCase());
 
-          const rowTagPrice = Number(row['Tag Price'] || 0);
-          const rowNetPrice = Number(row['Promo Price'] || row['Net Price'] || rowTagPrice);
+          const rowTagPrice = strictNum(row['Tag Price']);
+          const rowNetPrice = row['Promo Price'] !== undefined ? strictNum(row['Promo Price']) : (row['Net Price'] !== undefined ? strictNum(row['Net Price']) : rowTagPrice);
           const rowDiscountFraction = rowTagPrice > 0 ? ((rowTagPrice - rowNetPrice) / rowTagPrice) : 0;
 
           if (!existingProduct) {
@@ -237,62 +289,75 @@ export default function ProductDetail() {
               variant: String(row.Variant || ''),
               sku: String(row.SKU || ''),
               tag_price: rowTagPrice,
-              price_discount: parseFloat(rowDiscountFraction.toFixed(4)), 
-              gross_cost: Number(row['Gross Cost'] || 0),
-              category_text: String(row.Categories || ''), // <-- FIXED payload field
-              units_per_bundle: Number(row['Bundle Count'] || 1),
-              _ui_net_price: rowNetPrice 
+              net_price: rowNetPrice,
+              price_discount: strictNum(rowDiscountFraction.toFixed(4)), 
+              gross_cost: strictNum(row['Gross Cost']),
+              category_text: String(row.Categories || ''), 
+              units_per_carton: strictNum(row['Carton Count']) > 0 ? strictNum(row['Carton Count']) : 1,
+              is_inventory: true, 
             });
           } else {
             const changes: Record<string, { old: any, new: any }> = {};
             const payload: Record<string, any> = {};
+            
+            const primaryVariant = existingProduct.variants && existingProduct.variants.length > 0 
+                  ? existingProduct.variants[0] 
+                  : ({} as any);
 
-            const checkField = (fieldKey: keyof Product, excelKey: string, isNumeric: boolean = false) => {
+            const checkField = (fieldKey: string, excelKey: string, isNumeric: boolean = false, isVariantField: boolean = false) => {
               const rawVal = row[excelKey];
               if (rawVal === undefined || rawVal === null || rawVal === '') return;
 
               const strVal = String(rawVal).trim();
+              
+              let actualKey = fieldKey;
+              if (isVariantField) {
+                 if (fieldKey === 'sku') actualKey = 'manufacturer_sku';
+                 if (fieldKey === 'variant') actualKey = 'variant_name';
+              }
+              
+              const targetObj = isVariantField ? primaryVariant : existingProduct;
+
               if (strVal === '-') {
-                if (existingProduct[fieldKey]) {
-                  changes[fieldKey] = { old: existingProduct[fieldKey], new: 'Cleared' };
-                  const payloadKey = fieldKey === 'categories' ? 'category_text' : fieldKey;
+                if (targetObj[actualKey]) {
+                  changes[fieldKey] = { old: targetObj[actualKey], new: 'Cleared' };
+                  const payloadKey = fieldKey === 'categories' ? 'category_text' : actualKey;
                   payload[payloadKey] = isNumeric ? null : ''; 
                 }
                 return;
               }
 
-              const newVal = isNumeric ? Number(rawVal) : strVal;
-              // Compare visually. The DB sends back categories as an array, so we must be careful.
+              const newVal = isNumeric ? strictNum(rawVal) : strVal;
               const oldVal = fieldKey === 'categories' && Array.isArray(existingProduct.categories) 
                     ? existingProduct.categories.map((c: any) => c.category_name).join(', ')
-                    : existingProduct[fieldKey];
+                    : targetObj[actualKey];
 
               if (newVal !== oldVal) {
                 changes[fieldKey] = { old: oldVal || 'None', new: newVal };
-                // Send category_text to FastAPI!
-                const payloadKey = fieldKey === 'categories' ? 'category_text' : fieldKey;
+                const payloadKey = fieldKey === 'categories' ? 'category_text' : actualKey;
                 payload[payloadKey] = newVal;
               }
             };
 
             checkField('name', 'Name');
             checkField('brand', 'Brand');
-            checkField('variant', 'Variant');
-            checkField('sku', 'SKU');
-            checkField('categories', 'Categories'); // Safely translates to category_text above
-            checkField('tag_price', 'Tag Price', true);
-            checkField('gross_cost', 'Gross Cost', true); 
-            checkField('units_per_bundle', 'Bundle Count', true);
+            checkField('categories', 'Categories'); 
+            checkField('units_per_carton', 'Carton Count', true);
+
+            checkField('variant', 'Variant', false, true);
+            checkField('sku', 'SKU', false, true);
+            checkField('tag_price', 'Tag Price', true, true);
+            checkField('gross_cost', 'Gross Cost', true, true); 
 
             const excelNetKey = row['Promo Price'] !== undefined ? 'Promo Price' : 'Net Price';
             if (row[excelNetKey] !== undefined && row[excelNetKey] !== '') {
-               const newNet = Number(row[excelNetKey]);
-               if (newNet !== existingProduct.net_price) {
-                 changes['net_price'] = { old: existingProduct.net_price, new: newNet };
+               const newNet = strictNum(row[excelNetKey]);
+               if (newNet !== primaryVariant.net_price) {
+                 changes['net_price'] = { old: primaryVariant.net_price, new: newNet };
                  payload['net_price'] = newNet;
-                 const tagToUse = payload['tag_price'] || existingProduct.tag_price || 0;
+                 const tagToUse = payload['tag_price'] || primaryVariant.tag_price || 0;
                  const newDiscountFrac = tagToUse > 0 ? ((tagToUse - newNet) / tagToUse) : 0;
-                 payload['price_discount'] = parseFloat(newDiscountFrac.toFixed(4));
+                 payload['price_discount'] = strictNum(newDiscountFrac.toFixed(4));
                }
             }
 
@@ -321,9 +386,29 @@ export default function ProductDetail() {
     
     try {
       const createPromises = previewData.new_items.map(prod => {
-         const { _ui_net_price, ...dbPayload } = prod; 
-         return createProduct(dbPayload);
+         const nestedPayload = {
+            pid: prod.pid,
+            name: prod.name,
+            brand: prod.brand || null,
+            category_text: prod.category_text || null,
+            units_per_carton: prod.units_per_carton,
+            is_bundle: false,
+            variants: [
+              {
+                 variant_name: prod.variant || "Default",
+                 manufacturer_sku: prod.sku || null,
+                 is_inventory: Boolean(prod.is_inventory),
+                 tag_price: prod.tag_price,
+                 net_price: prod.net_price,
+                 price_discount: prod.price_discount,
+                 gross_cost: prod.gross_cost,
+                 cost_discount: 0
+              }
+            ]
+         };
+         return createProduct(nestedPayload);
       });
+      
       const updatePromises = previewData.updates.map(update => updateProduct(update.product_id, update.payload));
 
       await Promise.all([...createPromises, ...updatePromises]);
@@ -351,7 +436,8 @@ export default function ProductDetail() {
 
   if (loading) return <div className="p-8 text-center text-gray-500 font-medium">Loading Product Data...</div>;
 
-  return (
+
+return (
     <div className="max-w-5xl mx-auto mt-8 space-y-6 px-4 mb-20">
       
       {isNew && (
@@ -408,10 +494,10 @@ export default function ProductDetail() {
                       <li key={idx} className="bg-white p-3 border border-gray-200 rounded shadow-sm">
                         <div className="flex justify-between border-b pb-1 mb-1">
                           <span className="font-mono font-bold text-gray-700">{item.pid}</span>
-                          <span className="font-bold text-green-700">₱{item.tag_price.toFixed(2)}</span>
+                          <span className="font-bold text-green-700">{Number(item.tag_price).toFixed(2)}</span>
                         </div>
                         <div className="truncate font-medium text-gray-800">{item.name} <span className="text-gray-400 font-normal">{item.variant}</span></div>
-                        <div className="text-xs text-gray-500 mt-1">Promo Price: ₱{item._ui_net_price.toFixed(2)} | UPB: {item.units_per_bundle}</div>
+                        <div className="text-xs text-gray-500 mt-1">Promo Price: {Number(item._ui_net_price).toFixed(2)} | UPC: {item.units_per_carton}</div>
                       </li>
                     ))}
                   </ul>
@@ -481,7 +567,30 @@ export default function ProductDetail() {
                   <input name="name" value={formData.name} onChange={handleChange} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border transition focus:ring-blue-500 focus:border-blue-500"/>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
+                {/* --- NON-MERCHANDISE FLAGS --- */}
+                <div className="flex items-start gap-3 mt-2 bg-purple-50 p-4 rounded-md border border-purple-100 shadow-sm">
+                  <div className="pt-0.5">
+                    <input 
+                      type="checkbox" 
+                      id="is_inventory"
+                      name="is_inventory"
+                      checked={formData.is_inventory}
+                      onChange={(e) => setFormData({ ...formData, is_inventory: e.target.checked })}
+                      className="w-5 h-5 text-purple-600 rounded border-gray-300 focus:ring-purple-500 cursor-pointer"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="is_inventory" className="text-sm font-black text-purple-900 cursor-pointer block uppercase tracking-wide">
+                      Track as Physical Merchandise
+                    </label>
+                    <p className="text-xs text-purple-700 mt-1">
+                      Uncheck this for items like "Delivery Fees", "Labor", or "Service Charges". Non-merchandise items are automatically exempted from Cost-of-Goods and Margin tracking on the Sales Ledger.
+                    </p>
+                  </div>
+                </div>
+                {/* ---------------------------------------------------- */}
+
+                <div className="grid grid-cols-3 gap-4 pt-2">
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Brand</label>
                     <input name="brand" value={formData.brand} onChange={handleChange} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border transition focus:ring-blue-500 focus:border-blue-500"/>
@@ -491,8 +600,8 @@ export default function ProductDetail() {
                     <input name="variant" value={formData.variant} onChange={handleChange} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border transition focus:ring-blue-500 focus:border-blue-500"/>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Units / Bundle</label>
-                    <input type="number" min="1" name="units_per_bundle" value={formData.units_per_bundle} onChange={handleChange} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border bg-yellow-50 focus:ring-blue-500 focus:border-blue-500" placeholder="e.g. 12"/>
+                    <label className="block text-sm font-medium text-gray-700">Units / Carton</label>
+                    <input type="number" min="1" name="units_per_carton" value={formData.units_per_carton} onChange={handleChange} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border bg-yellow-50 focus:ring-blue-500 focus:border-blue-500" placeholder="e.g. 12"/>
                   </div>
                 </div>
 
@@ -527,7 +636,7 @@ export default function ProductDetail() {
                 </div>
                 <div className="flex justify-between items-center text-sm text-green-800 bg-green-100 p-2.5 rounded border border-green-200">
                     <span className="font-bold">Live Net Cost:</span> 
-                    <span className="font-bold text-base tabular-nums">₱{liveNetCost.toFixed(2)}</span>
+                    <span className="font-bold text-base tabular-nums">{Number(liveNetCost).toFixed(2)}</span>
                 </div>
 
                 <h3 className="font-bold text-gray-800 border-b border-gray-300 pb-2 mt-6">Customer Pricing</h3>
@@ -605,13 +714,15 @@ export default function ProductDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {fullProduct.price_history.length === 0 ? (
+                  {/* PHASE 2 FIX: Read Price History strictly from the Default Variant */}
+                  {!(fullProduct.variants?.[0]?.price_history?.length > 0) ? (
                     <tr><td colSpan={6} className="p-8 text-center text-gray-400 italic bg-gray-50">No price changes recorded yet.</td></tr>
                   ) : (
-                    fullProduct.price_history.map(log => {
-                      const tagPrice = log.new_tag_price || 0;
-                      const promoPrice = log.new_net_price || tagPrice; 
-                      const cost = log.new_net_cost || 0;
+                    fullProduct.variants[0].price_history.map(log => {
+                      // STRICT NUMBER COERCION FIX
+                      const tagPrice = Number(log.new_tag_price) || 0;
+                      const promoPrice = log.new_net_price !== null ? Number(log.new_net_price) : tagPrice; 
+                      const cost = Number(log.new_net_cost) || 0;
                       
                       const markupPercent = cost > 0 ? (((tagPrice - cost) / cost) * 100).toFixed(2) : 'N/A';
                       const marginPercent = tagPrice > 0 ? (((tagPrice - cost) / tagPrice) * 100).toFixed(2) : 'N/A';
@@ -619,9 +730,9 @@ export default function ProductDetail() {
                       return (
                         <tr key={log.history_id} className="border-b hover:bg-gray-50 transition">
                           <td className="px-4 py-3 text-gray-600">{new Date(log.changed_at).toLocaleString()}</td>
-                          <td className="px-4 py-3 font-bold text-blue-700 text-right tabular-nums">{Number(tagPrice).toFixed(2)}</td>
-                          <td className="px-4 py-3 font-bold text-orange-600 text-right tabular-nums">{Number(promoPrice).toFixed(2)}</td>
-                          <td className="px-4 py-3 font-medium text-gray-800 text-right tabular-nums">{Number(cost).toFixed(2)}</td>
+                          <td className="px-4 py-3 font-bold text-blue-700 text-right tabular-nums">{tagPrice.toFixed(2)}</td>
+                          <td className="px-4 py-3 font-bold text-orange-600 text-right tabular-nums">{promoPrice.toFixed(2)}</td>
+                          <td className="px-4 py-3 font-medium text-gray-800 text-right tabular-nums">{cost.toFixed(2)}</td>
                           <td className="px-4 py-3 text-center border-l border-gray-100 font-mono text-gray-600 bg-gray-50">{markupPercent}%</td>
                           <td className={`px-4 py-3 text-center font-mono font-bold bg-gray-50 ${Number(marginPercent) > 0 ? 'text-green-600' : 'text-red-600'}`}>{marginPercent}%</td>
                         </tr>
@@ -639,4 +750,8 @@ export default function ProductDetail() {
       )}
     </div>
   );
+
 }
+
+
+

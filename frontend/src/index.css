@@ -1,4 +1,103 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 @import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME VARIABLES
+   Three themes: dark (default), light, carbon
+   Applied via data-theme attribute on <html>.
+═══════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="dark"] {
+  --row-alt:     rgba(255,255,255,0.025);
+  --bg-base:     #030712;  /* gray-950  */
+  --bg-surface:  #111827;  /* gray-900  */
+  --bg-elevated: #1f2937;  /* gray-800  */
+  --bg-input:    #1f2937;  /* gray-800  */
+  --bd:          #1f2937;  /* gray-800  */
+  --bd-strong:   #374151;  /* gray-700  */
+  --tx-1:        #f3f4f6;  /* gray-100  */
+  --tx-2:        #9ca3af;  /* gray-400  */
+  --tx-3:        #4b5563;  /* gray-600  */
+  --tx-4:        #374151;  /* gray-700  */
+  --nav-bg:      #111827;  /* gray-900  */
+  --nav-bd:      #1f2937;  /* gray-800  */
+  --nav-tx:      #9ca3af;  /* gray-400  */
+  --accent:      #2563eb;  /* blue-600  */
+  --accent-h:    #3b82f6;  /* blue-500  */
+  --accent-tx:   #ffffff;
+  --success:     #34d399;  /* emerald-400 */
+  --danger:      #f87171;  /* red-400   */
+}
+
+[data-theme="light"] {
+  --row-alt:     rgba(0,0,0,0.025);
+  --bg-base:     #f9fafb;  /* gray-50   */
+  --bg-surface:  #ffffff;
+  --bg-elevated: #f3f4f6;  /* gray-100  */
+  --bg-input:    #ffffff;
+  --bd:          #e5e7eb;  /* gray-200  */
+  --bd-strong:   #d1d5db;  /* gray-300  */
+  --tx-1:        #111827;  /* gray-900  */
+  --tx-2:        #6b7280;  /* gray-500  */
+  --tx-3:        #9ca3af;  /* gray-400  */
+  --tx-4:        #d1d5db;  /* gray-300  */
+  --nav-bg:      #1e293b;  /* slate-800 — keep nav dark for contrast */
+  --nav-bd:      #334155;  /* slate-700 */
+  --nav-tx:      #94a3b8;  /* slate-400 */
+  --accent:      #2563eb;  /* blue-600  */
+  --accent-h:    #1d4ed8;  /* blue-700  */
+  --accent-tx:   #ffffff;
+  --success:     #059669;  /* emerald-600 */
+  --danger:      #dc2626;  /* red-600   */
+}
+
+/* Carbon — pitch-black zinc base with teal accents */
+[data-theme="carbon"] {
+  --row-alt:     rgba(255,255,255,0.03);
+  --bg-base:     #09090b;  /* zinc-950  */
+  --bg-surface:  #18181b;  /* zinc-900  */
+  --bg-elevated: #27272a;  /* zinc-800  */
+  --bg-input:    #27272a;  /* zinc-800  */
+  --bd:          #3f3f46;  /* zinc-700  */
+  --bd-strong:   #52525b;  /* zinc-600  */
+  --tx-1:        #fafafa;  /* zinc-50   */
+  --tx-2:        #a1a1aa;  /* zinc-400  */
+  --tx-3:        #52525b;  /* zinc-600  */
+  --tx-4:        #3f3f46;  /* zinc-700  */
+  --nav-bg:      #18181b;  /* zinc-900  */
+  --nav-bd:      #3f3f46;  /* zinc-700  */
+  --nav-tx:      #a1a1aa;  /* zinc-400  */
+  --accent:      #14b8a6;  /* teal-500  */
+  --accent-h:    #2dd4bf;  /* teal-400  */
+  --accent-tx:   #09090b;  /* zinc-950  */
+  --success:     #2dd4bf;  /* teal-400  */
+  --danger:      #fb7185;  /* rose-400  */
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SEMANTIC UTILITY LAYER
+   Used in Settings + AppShell — other pages migrate incrementally.
+═══════════════════════════════════════════════════════════════ */
+
+/* Alternating rows — applied globally via data-alt-rows on <html> */
+[data-alt-rows="true"] tbody tr:nth-child(even) {
+  background-color: var(--row-alt);
+}
+
+@layer utilities {
+  .t-bg-base      { background-color: var(--bg-base); }
+  .t-bg-surface   { background-color: var(--bg-surface); }
+  .t-bg-elevated  { background-color: var(--bg-elevated); }
+  .t-bg-input     { background-color: var(--bg-input); }
+  .t-border       { border-color: var(--bd); }
+  .t-border-strong { border-color: var(--bd-strong); }
+  .t-text-1       { color: var(--tx-1); }
+  .t-text-2       { color: var(--tx-2); }
+  .t-text-3       { color: var(--tx-3); }
+  .t-text-4       { color: var(--tx-4); }
+  .t-nav-bg       { background-color: var(--nav-bg); }
+  .t-nav-bd       { border-color: var(--nav-bd); }
+  .t-nav-tx       { color: var(--nav-tx); }
+  .t-accent-bg    { background-color: var(--accent); }
+  .t-accent-text  { color: var(--accent); }
+}

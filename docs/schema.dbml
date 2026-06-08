@@ -1,6 +1,6 @@
-// Schema v1.0 — Inventory, Procurement, AP
-// Sales module pending. Do not implement sales-related
-// logic until schema v2 is issued.
+// Schema v2.0 — Inventory, Procurement, AP, Sales
+// Extends v1.0. All v1 tables are unchanged.
+// Sales module is now approved for implementation.
 
 // ==========================================
 // 1. ACCESS & SECURITY
@@ -9,6 +9,7 @@ Table employees {
   employee_id int [pk, increment]
   first_name varchar
   last_name varchar
+  is_active boolean [default: true]
 }
 
 Table users {
@@ -54,13 +55,13 @@ Table audit_log {
   action enum('INSERT','UPDATE','DELETE','LOGIN','LOGOUT')
   actor_user_id int [ref: > users.user_id]
   actor_employee_id int [ref: > employees.employee_id]
-  old_values jsonb 
+  old_values jsonb
   new_values jsonb
   occurred_at datetime
 }
 
 // ==========================================
-// 3. MASTER DATA & REFERENCE (New Basis)
+// 3. MASTER DATA & REFERENCE
 // ==========================================
 Table locations {
   location_id int [pk, increment]
@@ -70,6 +71,7 @@ Table locations {
   address text
   status enum('Active', 'Inactive')
   is_deleted boolean
+  is_system boolean [default: false, note: 'True for Quarantine and Adjustment — not deletable']
 }
 
 Table uoms {
@@ -95,13 +97,13 @@ Table product_category_links {
 }
 
 // ==========================================
-// 4. THE MASTER SHELL & SKUS (New Basis)
+// 4. THE MASTER SHELL & SKUS
 // ==========================================
 Table products {
   product_id int [pk, increment]
-  name varchar
-  product_type enum('Inventory', 'Non-Inventory', 'Service') 
-  description text 
+  brand varchar
+  product_type enum('Inventory', 'Non-Inventory', 'Service')
+  description text
   base_uom_id int [ref: > uoms.uom_id]
   status enum('Active','Inactive')
   is_deleted boolean
@@ -113,10 +115,10 @@ Table variants {
   PID varchar [unique]
   variant_name varchar
   sku varchar
-  is_default boolean 
-  attributes jsonb 
-  price decimal(15,2) 
-  promo_price decimal(15,2) 
+  is_default boolean
+  attributes jsonb
+  price decimal(15,2)
+  promo_price decimal(15,2)
   is_deleted boolean
 }
 
@@ -133,6 +135,9 @@ Table variant_uom_conversions {
   from_uom_id int [ref: > uoms.uom_id]
   to_uom_id int [ref: > uoms.uom_id]
   factor decimal(15,4)
+  is_warehouse_bundle boolean [default: false, note: 'exactly one per variant should be true']
+  price decimal(15,2) [note: 'selling price for this UOM; null = variant base price × factor']
+  promo_price decimal(15,2) [note: 'promo price for this UOM; null = no promo']
   indexes {
     (variant_id, from_uom_id, to_uom_id) [pk]
   }
@@ -148,13 +153,14 @@ Table bundle_components {
 }
 
 // ==========================================
-// 5. PROCUREMENT CATALOG (New Basis)
+// 5. PROCUREMENT CATALOG
 // ==========================================
 Table suppliers {
   supplier_id int [pk, increment]
+  supplier_code varchar [unique, note: 'user-assigned stable identifier e.g. SUP-001, never changes']
   supplier_name varchar
   bank_account_name varchar
-  terms int 
+  terms int
   is_deleted boolean
 }
 
@@ -162,24 +168,24 @@ Table variant_suppliers {
   id int [pk, increment]
   variant_id int [ref: > variants.variant_id]
   supplier_id int [ref: > suppliers.supplier_id]
-  supplier_sku varchar 
-  gross_cost decimal(15,2) 
-  supplier_discount decimal(5,2) 
-  is_primary boolean 
+  supplier_sku varchar
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  is_primary boolean
   indexes {
     (variant_id, supplier_id) [unique]
   }
 }
 
 // ==========================================
-// 6. PURCHASE ORDERS 
+// 6. PURCHASE ORDERS
 // ==========================================
 Table purchase_orders {
   po_id int [pk, increment]
   po_pid varchar [unique, not null]
   supplier_id int [ref: > suppliers.supplier_id]
   location_id int [ref: > locations.location_id]
-  order_date datetime 
+  order_date datetime
   expected_arrival_date date
   status enum('Draft', 'Open', 'Partially_Received', 'Closed', 'Cancelled')
   total_amount decimal(15,2)
@@ -191,9 +197,9 @@ Table purchase_orders {
 Table purchase_order_items {
   po_item_id int [pk, increment]
   po_id int [ref: > purchase_orders.po_id]
-  variant_id int [ref: > variants.variant_id] 
-  ordered_quantity decimal(15,4) 
-  received_quantity decimal(15,4) 
+  variant_id int [ref: > variants.variant_id]
+  ordered_quantity decimal(15,4)
+  received_quantity decimal(15,4)
   unit_cost decimal(15,2)
 }
 
@@ -202,26 +208,32 @@ Table purchase_order_items {
 // ==========================================
 Table inventory_shipments {
   shipment_id int [pk, increment]
-  shipment_pid varchar
+  shipment_pid varchar [unique]
   supplier_id int [ref: > suppliers.supplier_id]
-  po_id int [ref: > purchase_orders.po_id] // Added link back to PO
-  reference_number varchar 
+  po_id int [ref: > purchase_orders.po_id]
+  reference_number varchar
   received_at datetime
+  received_by_user_id int [ref: > users.user_id]
+  inspected_by_user_id int [ref: > users.user_id]
+  received_by_employee_id int [ref: > employees.employee_id]
+  inspected_by_employee_id int [ref: > employees.employee_id]
+  is_confirmed boolean [default: false, note: 'true after Stage 2 confirm-costs is complete']
 }
 
 Table receiving_details {
   detail_id int [pk, increment]
   shipment_id int [ref: > inventory_shipments.shipment_id]
-  variant_id int [ref: > variants.variant_id] 
+  variant_id int [ref: > variants.variant_id]
   location_id int [ref: > locations.location_id]
   po_item_id int [ref: > purchase_order_items.po_item_id]
   received_at datetime
   inspected_at datetime
-  quantity_ordered decimal(15,4) 
-  quantity_declared decimal(15,4) 
-  quantity_actual decimal(15,4) 
-  quantity_rejected decimal(15,4) 
+  quantity_ordered decimal(15,4)
+  quantity_declared decimal(15,4)
+  quantity_actual decimal(15,4)
+  quantity_rejected decimal(15,4)
   qc_status enum('Pending', 'Passed', 'Failed', 'Partially_Passed')
+  is_deleted boolean
 }
 
 Table inventory_transfers {
@@ -232,8 +244,13 @@ Table inventory_transfers {
   released_by_user_id int [ref: > users.user_id]
   received_by_user_id int [ref: > users.user_id]
   requested_by_user_id int [ref: > users.user_id]
+  released_by_employee_id int [ref: > employees.employee_id]
+  received_by_employee_id int [ref: > employees.employee_id]
   total_bundle_count int [note: 'Total number of physical boxes/bundles in this transfer']
   occurred_at datetime
+  status varchar [default: 'Posted', note: 'Posted | Voided']
+  voided_at datetime
+  void_reason varchar
 }
 
 Table inventory_transfer_items {
@@ -248,11 +265,11 @@ Table inventory_transfer_items {
 Table inventory_ledger {
   ledger_id bigint [pk, increment]
   variant_id int [ref: > variants.variant_id]
-  location_id int [ref: > locations.location_id] 
-  qty_change decimal(15,4) 
-  reason enum('RECEIVE','SALE','RETURN_IN','RETURN_OUT','TRANSFER_IN','TRANSFER_OUT','ADJUST') // Restored full enum
-  reference_type varchar 
-  reference_id varchar 
+  location_id int [ref: > locations.location_id]
+  qty_change decimal(15,4)
+  reason enum('RECEIVE','SALE','RETURN_IN','RETURN_OUT','TRANSFER_IN','TRANSFER_OUT','ADJUST')
+  reference_type varchar
+  reference_id varchar
   occurred_at datetime
 }
 
@@ -273,10 +290,10 @@ Table cost_layers {
   shipment_id int [ref: > inventory_shipments.shipment_id]
   location_id int [ref: > locations.location_id]
   original_quantity decimal(15,4)
-  quantity_remaining decimal(15,4) 
-  gross_cost decimal(15,2) 
-  supplier_discount decimal(5,2) 
-  net_unit_cost decimal(15,2) 
+  quantity_remaining decimal(15,4)
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  net_unit_cost decimal(15,2)
   created_at datetime
 }
 
@@ -287,9 +304,9 @@ Table supplier_invoices {
   invoice_id int [pk, increment]
   supplier_id int [ref: > suppliers.supplier_id]
   shipment_id int [ref: > inventory_shipments.shipment_id]
-  invoice_number varchar 
+  invoice_number varchar
   invoice_date date
-  due_date date 
+  due_date date
   total_amount decimal(15,2)
   amended_amount decimal(15,2)
   amendment_notes text
@@ -302,17 +319,17 @@ Table supplier_payments {
   supplier_id int [ref: > suppliers.supplier_id]
   amount decimal(15,2)
   payment_date datetime
-  reference_number varchar 
+  reference_number varchar
   payment_method varchar
 }
 
 Table ap_ledger {
   ap_ledger_id bigint [pk, increment]
   supplier_id int [ref: > suppliers.supplier_id]
-  amount_change decimal(15,2) 
+  amount_change decimal(15,2)
   reason enum('INVOICE', 'PAYMENT', 'CREDIT_MEMO', 'ADJUSTMENT')
-  reference_type varchar 
-  reference_id varchar 
+  reference_type varchar
+  reference_id varchar
   occurred_at datetime
 }
 
@@ -323,4 +340,219 @@ Table invoice_payments {
   indexes {
     (invoice_id, payment_id) [pk]
   }
+}
+
+// ==========================================
+// 9. SALES SETTINGS
+// ==========================================
+Table payment_modes {
+  payment_mode_id int [pk, increment]
+  name varchar [not null, note: 'e.g., Cash, GCash, Maya, Visa']
+  is_physical boolean [default: true, note: 'True for cash/checks; false for digital/card']
+  is_active boolean [default: true]
+  is_ar_charge boolean [default: false, note: 'posts amount as AR debit — customer owes more']
+  is_ar_credit boolean [default: false, note: 'draws from customer AR credit balance']
+}
+
+Table cash_registers {
+  register_id int [pk, increment]
+  name varchar [not null, note: 'e.g., Register 1, Main Terminal']
+  location_id int [ref: > locations.location_id]
+  is_active boolean [default: true]
+}
+
+// ==========================================
+// 10. CUSTOMERS & ACCOUNTS RECEIVABLE
+// ==========================================
+Table customers {
+  customer_id int [pk, increment]
+  customer_name varchar
+  credit_limit decimal(15,2)
+  terms_days int [default: 0, note: '0 = COD, 15 = Net 15, 30 = Net 30']
+  outstanding_balance decimal(15,2) [note: 'Cached running total. Updated transactionally on every sale, return, and payment. Never queried standalone — always verified against ar_ledger on reports.']
+  is_deleted boolean
+}
+
+Table ar_ledger {
+  ar_ledger_id bigint [pk, increment]
+  customer_id int [ref: > customers.customer_id]
+  amount_change decimal(15,2) [note: 'Positive = new debt (sale). Negative = debt reduced (payment, return).']
+  reason enum [note: 'SALE, PAYMENT, RETURN, ADJUSTMENT, AR_CHARGE, AR_CREDIT']
+  notes varchar [note: 'optional auditor context for this ledger entry']
+  reference_type varchar
+  reference_id varchar
+  occurred_at datetime
+}
+
+// ==========================================
+// 11. SALES
+// ==========================================
+Table sales {
+  sale_id int [pk, increment]
+  sale_pid varchar [unique, not null, note: 'Human-friendly reference e.g. SALE-00123']
+  transaction_date date [not null, default: `CURRENT_DATE`, note: 'Calendar date the sale occurred. User-supplied at posting time, defaults to today.']
+  posted_at datetime [note: 'Timestamp when the sale was finalised (status set to Posted).']
+  location_id int [ref: > locations.location_id, note: 'Where the sale occurred. Drives stock deduction.']
+  register_id int [ref: > cash_registers.register_id]
+  customer_id int [ref: > customers.customer_id, note: 'Nullable — walk-in sales allowed']
+  employee_id int [ref: > employees.employee_id, note: 'Cashier or salesperson']
+  created_by_user_id int [ref: > users.user_id]
+
+  subtotal_amount decimal(15,2) [note: 'Sum of all line_totals before discounts and tax']
+  cart_discount_pct decimal(5,2) [note: 'cart-level percent discount applied first; null = none']
+  cart_discount_flat decimal(15,2) [note: 'cart-level flat discount applied after pct; null = none']
+  discount_amount decimal(15,2) [default: 0]
+  tax_amount decimal(15,2) [default: 0]
+  grand_total decimal(15,2) [note: 'subtotal - discount + tax. System-calculated.']
+
+  receipt_grand_total decimal(15,2) [note: 'The total printed on the physical receipt. Input by cashier.']
+  audit_variance decimal(15,2) [note: 'Backend-calculated: receipt_grand_total - grand_total. Flags discrepancies.']
+
+  due_date date [note: 'Calculated as transaction_date + customer.terms_days. NULL for COD.']
+  payment_status enum('Unpaid', 'Partial', 'Paid') [default: 'Paid']
+  balance_due decimal(15,2) [note: 'grand_total minus total applied payments. Updated transactionally.']
+  shift_id int [ref: > shifts.shift_id, note: 'Which shift this sale was made in. Nullable for historical records.']
+
+  status enum('Draft', 'Posted', 'Voided') [default: 'Posted']
+  voided_at datetime
+  void_reason varchar
+
+  idempotency_key varchar [unique, note: 'Prevents double-posting on network retries. Set by client.']
+  origin_sale_id int [ref: > sales.sale_id, note: 'If this sale originated from another transaction (e.g. exchange), links back to the original. Nullable for normal sales.']
+  created_by_user_id int [ref: > users.user_id]
+}
+
+Table sale_items {
+  sale_item_id int [pk, increment]
+  sale_id int [ref: > sales.sale_id]
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The exact FIFO layer this unit was consumed from. One row per layer split.']
+
+  quantity decimal(15,4)
+  unit_price decimal(15,2)
+  discount_pct decimal(5,2) [note: 'Line-level percent discount; null = none']
+  discount_flat decimal(15,2) [note: 'Line-level flat discount; null = none']
+  line_total decimal(15,2) [note: 'unit_price × quantity']
+
+  // Cost snapshot — locked at time of sale from the cost layer
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  net_unit_cost decimal(15,2)
+  cost_source varchar(20) [note: 'fifo | supplier_list | none | null (pre-policy rows)']
+
+  indexes {
+    (sale_id, variant_id, cost_layer_id) [unique, note: 'One row per variant-layer combination per sale']
+  }
+}
+
+// ==========================================
+// 12. CUSTOMER PAYMENTS (AR)
+// ==========================================
+Table customer_payments {
+  payment_id int [pk, increment]
+  customer_id int [ref: > customers.customer_id]
+  payment_mode_id int [ref: > payment_modes.payment_mode_id]
+  amount decimal(15,2)
+  payment_date datetime
+  reference_number varchar [note: 'Check number, transfer ID, etc.']
+  notes varchar [note: 'optional auditor context for this payment']
+  unapplied_amount decimal(15,2) [default: 0, note: 'Remainder after application. Used for overpayments and advance payments.']
+}
+
+Table customer_payment_applied {
+  apply_id int [pk, increment]
+  payment_id int [ref: > customer_payments.payment_id]
+  sale_id int [ref: > sales.sale_id]
+  amount_applied decimal(15,2)
+  applied_at datetime
+}
+
+// ==========================================
+// 13. SALES RETURNS
+// ==========================================
+Table sales_returns {
+  return_id int [pk, increment]
+  return_pid varchar [unique, not null, note: 'Human-friendly reference e.g. RET-00045']
+  sale_id int [ref: > sales.sale_id]
+  location_id int [ref: > locations.location_id, note: 'Where stock is returned to. Defaults to original sale location. 
+  disposition varchar [note: 'cash_refund or credit_to_account']
+  customer_id int [ref: > customers.customer_id, note: 'nullable — for blind returns with known customer']
+Cashier may override.']
+  return_date datetime
+  reason varchar
+  grand_total decimal(15,2) [note: 'Total value being credited back']
+  created_by_user_id int [ref: > users.user_id]
+}
+
+Table sales_return_items {
+  return_item_id int [pk, increment]
+  return_id int [ref: > sales_returns.return_id]
+  sale_item_id int [ref: > sale_items.sale_item_id, note: 'Links to the exact split row for precise FIFO reversal']
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The layer being reversed']
+  quantity decimal(15,4)
+  line_total decimal(15,2)
+}
+
+// ==========================================
+// 14. SUPPLIER RETURNS
+// ==========================================
+Table supplier_returns {
+  return_id int [pk, increment]
+  return_pid varchar [unique, not null]
+  supplier_id int [ref: > suppliers.supplier_id]
+  location_id int [ref: > locations.location_id, note: 'Source location — stock is pulled from here (typically Quarantine)']
+  status enum('Draft', 'Shipped', 'Credit_Received')
+  total_credit_amount decimal(15,2)
+  created_by_user_id int [ref: > users.user_id]
+  created_at datetime
+}
+
+Table supplier_return_items {
+  return_item_id int [pk, increment]
+  return_id int [ref: > supplier_returns.return_id]
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The exact layer being reversed for accurate COGS credit']
+  quantity decimal(15,4)
+  unit_credit_expected decimal(15,2)
+}
+
+Table shifts {
+  shift_id int [pk, increment]
+  shift_name varchar [not null, note: 'e.g. AM, PM, Shift 1, Graveyard']
+  is_active boolean [default: true]
+}
+
+
+Table variant_price_history {
+  history_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id, not null]
+  old_price decimal(15,2)
+  new_price decimal(15,2)
+  old_promo_price decimal(15,2)
+  new_promo_price decimal(15,2)
+  changed_by_user_id int [ref: > users.user_id]
+  changed_at timestamp [not null]
+  note: 'Immutable — records are never updated or deleted'
+}
+
+Table variant_cost_history {
+  history_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id, not null]
+  supplier_id int [ref: > suppliers.supplier_id, not null]
+  old_gross_cost decimal(15,2)
+  new_gross_cost decimal(15,2)
+  old_supplier_discount decimal(5,2)
+  new_supplier_discount decimal(5,2)
+  changed_by_user_id int [ref: > users.user_id]
+  changed_at timestamp [not null]
+  note: 'Immutable — records are never updated or deleted'
+}
+
+
+Table system_settings {
+  key varchar [pk, note: 'e.g. allow_negative_stock']
+  value varchar [note: 'stored as string, parsed by type']
+  updated_at timestamp
+  updated_by_user_id int [ref: > users.user_id]
 }

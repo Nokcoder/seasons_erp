@@ -1,0 +1,517 @@
+# sales/schemas.py
+from __future__ import annotations
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from decimal import Decimal
+from datetime import datetime, date, timezone, timedelta
+
+
+# ==========================================
+# SHARED REFS
+# ==========================================
+
+class LocationRefOut(BaseModel):
+    location_id: int
+    location_name: str
+    class Config: from_attributes = True
+
+
+class VariantRefOut(BaseModel):
+    variant_id:    int
+    PID:           str
+    variant_name:  str
+    product_brand: Optional[str] = None
+    product_type:  Optional[str] = None
+    class Config: from_attributes = True
+
+
+# ==========================================
+# SHIFTS
+# ==========================================
+
+class ShiftCreate(BaseModel):
+    shift_name: str
+    is_active: bool = True
+
+
+class ShiftPatch(BaseModel):
+    shift_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ShiftOut(BaseModel):
+    shift_id: int
+    shift_name: str
+    is_active: bool
+    class Config: from_attributes = True
+
+
+# ==========================================
+# PAYMENT MODES
+# ==========================================
+
+class PaymentModeCreate(BaseModel):
+    name: str
+    is_physical: bool = True
+    is_active: bool = True
+    is_ar_charge: bool = False
+    is_ar_credit: bool = False
+
+
+class PaymentModePatch(BaseModel):
+    name: Optional[str] = None
+    is_physical: Optional[bool] = None
+    is_active: Optional[bool] = None
+    is_ar_charge: Optional[bool] = None
+    is_ar_credit: Optional[bool] = None
+
+
+class PaymentModeOut(BaseModel):
+    payment_mode_id: int
+    name: str
+    is_physical: bool
+    is_active: bool
+    is_ar_charge: bool
+    is_ar_credit: bool
+    class Config: from_attributes = True
+
+
+# ==========================================
+# CASH REGISTERS
+# ==========================================
+
+class CashRegisterCreate(BaseModel):
+    name: str
+    location_id: int
+    is_active: bool = True
+
+
+class CashRegisterPatch(BaseModel):
+    name: Optional[str] = None
+    location_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class CashRegisterOut(BaseModel):
+    register_id: int
+    name: str
+    location_id: int
+    is_active: bool
+    location: Optional[LocationRefOut] = None
+    class Config: from_attributes = True
+
+
+# ==========================================
+# CUSTOMERS
+# ==========================================
+
+class CustomerCreate(BaseModel):
+    customer_name: str
+    credit_limit: Optional[Decimal] = None
+    terms_days: int = 0
+
+
+class CustomerPatch(BaseModel):
+    customer_name: Optional[str] = None
+    credit_limit: Optional[Decimal] = None
+    terms_days: Optional[int] = None
+
+
+class CustomerOut(BaseModel):
+    customer_id: int
+    customer_name: str
+    credit_limit: Optional[Decimal] = None
+    terms_days: int
+    outstanding_balance: Decimal
+    is_deleted: bool
+    is_overdue: bool = False
+    class Config: from_attributes = True
+
+
+# ==========================================
+# AR AGING REPORT  (read-only; computed server-side)
+# ==========================================
+
+class CustomerAgingOut(BaseModel):
+    customer_id: int
+    customer_name: str
+    terms_days: int
+    current: Decimal
+    days_1_30: Decimal
+    days_31_60: Decimal
+    days_61_90: Decimal
+    days_90_plus: Decimal
+    total_outstanding: Decimal
+
+
+# ==========================================
+# AR LEDGER  (read-only; written programmatically)
+# ==========================================
+
+class ArLedgerOut(BaseModel):
+    ar_ledger_id: int
+    customer_id: Optional[int] = None
+    amount_change: Decimal
+    reason: str
+    reference_type: Optional[str] = None
+    reference_id: Optional[str] = None
+    occurred_at: datetime
+    class Config: from_attributes = True
+
+
+# ==========================================
+# SALE LINE ITEMS  (input / output)
+# ==========================================
+
+class SaleLineItemIn(BaseModel):
+    """One line sent by the frontend when creating or updating a draft.
+
+    uom_id / uom_factor: present when selling in a non-base UOM (e.g. BOX).
+    quantity is always in the selected UOM.  The backend converts to base units
+    before writing sale_items and consuming FIFO layers.
+    """
+    variant_id: int
+    quantity: Decimal
+    unit_price: Decimal
+    discount_pct: Optional[Decimal] = None
+    discount_flat: Optional[Decimal] = None
+    uom_id: Optional[int] = None
+    uom_factor: Optional[Decimal] = None
+
+
+class SaleItemOut(BaseModel):
+    """Raw sale_items row — one per FIFO layer split. Router collapses these for display."""
+    sale_item_id: int
+    sale_id: int
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    unit_price: Decimal
+    discount_pct: Optional[Decimal] = None
+    discount_flat: Optional[Decimal] = None
+    line_total: Decimal
+    gross_cost: Optional[Decimal] = None
+    supplier_discount: Optional[Decimal] = None
+    net_unit_cost: Optional[Decimal] = None
+    cost_source:      Optional[str]     = None
+    already_returned: Optional[Decimal] = None  # set by /sale/:id/items-for-return
+    variant: Optional[VariantRefOut] = None
+    class Config: from_attributes = True
+
+
+# ==========================================
+# SALES (header)
+# ==========================================
+
+class SaleCreate(BaseModel):
+    """Payload for POST /sales/drafts — creates a draft sale."""
+    location_id: int
+    register_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    employee_id: Optional[int] = None
+    shift_id: Optional[int] = None
+    origin_sale_id: Optional[int] = None
+    sale_pid: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    cart_discount_pct: Optional[Decimal] = None
+    cart_discount_flat: Optional[Decimal] = None
+    discount_amount: Decimal = Decimal("0")
+    tax_amount: Decimal = Decimal("0")
+    receipt_grand_total: Optional[Decimal] = None
+    items: List[SaleLineItemIn] = []
+
+
+class SalePatch(BaseModel):
+    """Payload for PATCH /sales/drafts/{id} — update a draft's header or line items."""
+    register_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    employee_id: Optional[int] = None
+    shift_id: Optional[int] = None
+    cart_discount_pct: Optional[Decimal] = None
+    cart_discount_flat: Optional[Decimal] = None
+    discount_amount: Optional[Decimal] = None
+    tax_amount: Optional[Decimal] = None
+    receipt_grand_total: Optional[Decimal] = None
+    items: Optional[List[SaleLineItemIn]] = None
+
+
+class SaleOut(BaseModel):
+    sale_id: int
+    sale_pid: Optional[str] = None
+    transaction_date: Optional[date] = None
+    posted_at: Optional[datetime] = None
+    location_id: int
+    register_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    employee_id: Optional[int] = None
+    shift_id: Optional[int] = None
+    origin_sale_id: Optional[int] = None
+    created_by_user_id: Optional[int] = None
+    subtotal_amount: Decimal
+    cart_discount_pct: Optional[Decimal] = None
+    cart_discount_flat: Optional[Decimal] = None
+    discount_amount: Decimal
+    tax_amount: Decimal
+    grand_total: Decimal
+    receipt_grand_total: Optional[Decimal] = None
+    audit_variance: Optional[Decimal] = None
+    due_date: Optional[date] = None
+    payment_status: str
+    balance_due: Decimal
+    status: str
+    voided_at: Optional[datetime] = None
+    void_reason: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    items: List[SaleItemOut] = []
+    payments: List["CustomerPaymentOut"] = []
+    row_type: str = 'sale'          # 'sale' or 'return'
+    return_id: Optional[int] = None  # set when row_type == 'return'
+    class Config: from_attributes = True
+
+
+class SaleTotals(BaseModel):
+    count: int
+    subtotal: Decimal
+    discount: Decimal
+    grand_total: Decimal
+    receipt_total: Optional[Decimal] = None
+    variance: Optional[Decimal] = None
+
+
+class SalesListResponse(BaseModel):
+    items: List[SaleOut]
+    totals: SaleTotals
+    next_cursor: Optional[int] = None
+
+
+class CollectionEntry(BaseModel):
+    payment_mode: str
+    amount:       Decimal
+    is_physical:  bool
+
+
+class SalesSummaryResponse(BaseModel):
+    merchandise_gross:       Decimal
+    cart_discounts:          Decimal
+    non_merchandise_revenue: Decimal
+    variances:               Decimal
+    returns_total:           Decimal
+    total_revenue:           Decimal
+    gross_profit:            Decimal
+    uncosted_revenue:        Decimal
+    collections:             List[CollectionEntry]
+    total_physical:          Decimal
+    total_virtual:           Decimal
+    total_collected:         Decimal
+
+
+# ==========================================
+# VOID REQUEST
+# ==========================================
+
+class SaleVoidRequest(BaseModel):
+    void_reason: str
+
+
+# ==========================================
+# POST SALE REQUEST
+# ==========================================
+
+_PH_TZ = timezone(timedelta(hours=8))
+
+
+def _ph_today() -> date:
+    """Today's calendar date in Manila local time (UTC+8).
+
+    The container runs in UTC, so naive `date.today()` misclassifies the
+    ~00:00-08:00 PHT window as "yesterday". Used as the default
+    `transaction_date` when a posting payload omits it.
+    """
+    return datetime.now(_PH_TZ).date()
+
+
+class SaleTenderIn(BaseModel):
+    """One payment tender submitted at the point of sale."""
+    payment_mode_id: int
+    amount: Decimal
+    reference_number: Optional[str] = None
+
+
+class SalePostRequest(BaseModel):
+    """Payload for POST /sales/drafts/{id}/post."""
+    tenders: List[SaleTenderIn] = []
+    receipt_grand_total: Optional[Decimal] = None
+    transaction_date: date = Field(default_factory=_ph_today)
+
+
+# ==========================================
+# CUSTOMER PAYMENTS
+# ==========================================
+
+class PaymentApplicationIn(BaseModel):
+    """One sale to apply part of a payment against."""
+    sale_id: int
+    amount_applied: Decimal
+
+
+class CustomerPaymentCreate(BaseModel):
+    customer_id: Optional[int] = None
+    payment_mode_id: int
+    amount: Decimal
+    reference_number: Optional[str] = None
+    applications: List[PaymentApplicationIn] = []
+
+
+class CustomerPaymentAppliedOut(BaseModel):
+    apply_id: int
+    payment_id: int
+    sale_id: int
+    amount_applied: Decimal
+    applied_at: datetime
+    class Config: from_attributes = True
+
+
+class CustomerPaymentOut(BaseModel):
+    payment_id: int
+    customer_id: Optional[int] = None
+    payment_mode_id: int
+    amount: Decimal
+    payment_date: Optional[datetime] = None
+    reference_number: Optional[str] = None
+    notes: Optional[str] = None
+    unapplied_amount: Decimal
+    applications: List[CustomerPaymentAppliedOut] = []
+    # Populated when payment_mode relationship is eagerly loaded
+    payment_mode_name:        Optional[str]  = None
+    payment_mode_is_physical: Optional[bool] = None
+    class Config: from_attributes = True
+
+
+class ManualPaymentApplyIn(BaseModel):
+    """Payload for POST /sales/payments/{id}/apply — manually apply unapplied credit."""
+    sale_id: int
+    amount_applied: Decimal
+
+
+class RecordPaymentIn(BaseModel):
+    """Standalone payment against a customer balance — no sale application required."""
+    payment_mode_id: int
+    amount: Decimal
+    payment_date: Optional[datetime] = None
+    reference_number: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ArLedgerOut(BaseModel):
+    ar_ledger_id: int
+    customer_id: Optional[int] = None
+    amount_change: Decimal
+    reason: str
+    reference_type: Optional[str] = None
+    reference_id: Optional[str] = None
+    notes: Optional[str] = None
+    occurred_at: Optional[datetime] = None
+    class Config: from_attributes = True
+
+
+# ==========================================
+# SALES RETURNS
+# ==========================================
+
+class SalesReturnItemIn(BaseModel):
+    """One item line for a return. sale_item_id may be omitted for blind returns."""
+    sale_item_id: Optional[int] = None
+    variant_id: int
+    quantity: Decimal
+    unit_price: Decimal
+
+
+class SalesReturnCreate(BaseModel):
+    sale_id: Optional[int] = None       # Omitted for blind returns
+    location_id: Optional[int] = None   # Defaults to original sale's location if sale_id given
+    customer_id: Optional[int] = None   # For blind returns with a registered customer
+    disposition: Optional[str] = None   # 'cash_refund' or 'credit_to_account'
+    reason: Optional[str] = None
+    items: List[SalesReturnItemIn]
+
+
+class SalesReturnItemOut(BaseModel):
+    return_item_id: int
+    return_id: int
+    sale_item_id: Optional[int] = None
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    line_total: Decimal
+    variant: Optional[VariantRefOut] = None
+    class Config: from_attributes = True
+
+
+class SalesReturnOut(BaseModel):
+    return_id: int
+    return_pid: Optional[str] = None
+    sale_id: Optional[int] = None
+    location_id: int
+    return_date: Optional[datetime] = None
+    reason: Optional[str] = None
+    grand_total: Decimal
+    disposition: Optional[str] = None
+    customer_id: Optional[int] = None
+    created_by_user_id: Optional[int] = None
+    items: List[SalesReturnItemOut] = []
+    exchange_sale_pid: Optional[str] = None  # set if an exchange was created
+    exchange_sale_id:  Optional[int] = None  # set if an exchange was created
+    class Config: from_attributes = True
+
+
+class ExchangeResult(BaseModel):
+    """Response from POST /sales/returns/exchange."""
+    sales_return:    SalesReturnOut
+    exchange_draft:  "SaleOut"
+
+
+# ==========================================
+# SUPPLIER RETURNS
+# ==========================================
+
+class SupplierReturnItemIn(BaseModel):
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    unit_credit_expected: Optional[Decimal] = None
+
+
+class SupplierReturnCreate(BaseModel):
+    supplier_id: int
+    location_id: int
+    items: List[SupplierReturnItemIn]
+    total_credit_amount: Optional[Decimal] = None
+
+
+class SupplierReturnStatusPatch(BaseModel):
+    """Payload for PATCH /procurement/supplier-returns/{id}/status"""
+    status: str   # Draft | Shipped | Credit_Received
+
+
+class SupplierReturnItemOut(BaseModel):
+    return_item_id: int
+    return_id: int
+    variant_id: int
+    cost_layer_id: Optional[int] = None
+    quantity: Decimal
+    unit_credit_expected: Optional[Decimal] = None
+    variant: Optional[VariantRefOut] = None
+    class Config: from_attributes = True
+
+
+class SupplierReturnOut(BaseModel):
+    return_id: int
+    return_pid: Optional[str] = None
+    supplier_id: int
+    location_id: int
+    status: str
+    total_credit_amount: Decimal
+    created_by_user_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    items: List[SupplierReturnItemOut] = []
+    class Config: from_attributes = True

@@ -1,0 +1,486 @@
+// Schema v2.0 — Inventory, Procurement, AP, Sales
+// Extends v1.0. All v1 tables are unchanged.
+// Sales module is now approved for implementation.
+
+// ==========================================
+// 1. ACCESS & SECURITY
+// ==========================================
+Table employees {
+  employee_id int [pk, increment]
+  first_name varchar
+  last_name varchar
+}
+
+Table users {
+  user_id int [pk, increment]
+  employee_id int [ref: - employees.employee_id, not null]
+  username varchar [unique, not null]
+  password_hash varchar [not null]
+  is_active boolean [default: true]
+  last_login_at datetime
+  created_at timestamp
+}
+
+Table roles {
+  role_id int [pk, increment]
+  role_name varchar [unique, not null]
+}
+
+Table user_roles {
+  user_id int [ref: > users.user_id]
+  role_id int [ref: > roles.role_id]
+  indexes {
+    (user_id, role_id) [pk]
+  }
+}
+
+Table login_attempts {
+  attempt_id bigint [pk, increment]
+  user_id int [ref: > users.user_id]
+  username varchar
+  success boolean
+  ip_address varchar
+  user_agent varchar
+  occurred_at datetime
+}
+
+// ==========================================
+// 2. LOGGING & AUDIT
+// ==========================================
+Table audit_log {
+  audit_id bigint [pk, increment]
+  table_name varchar [not null]
+  record_pk varchar [not null]
+  action enum('INSERT','UPDATE','DELETE','LOGIN','LOGOUT')
+  actor_user_id int [ref: > users.user_id]
+  actor_employee_id int [ref: > employees.employee_id]
+  old_values jsonb
+  new_values jsonb
+  occurred_at datetime
+}
+
+// ==========================================
+// 3. MASTER DATA & REFERENCE
+// ==========================================
+Table locations {
+  location_id int [pk, increment]
+  location_name varchar [unique]
+  location_type enum('Warehouse', 'Store', 'Bin', 'Virtual')
+  parent_location_id int [ref: > locations.location_id]
+  address text
+  status enum('Active', 'Inactive')
+  is_deleted boolean
+  is_system boolean [default: false, note: 'True for Quarantine and Adjustment — not deletable']
+}
+
+Table uoms {
+  uom_id int [pk, increment]
+  uom_code varchar [unique, note: 'PC, BOX, CASE, KG']
+  uom_name varchar
+  is_deleted boolean
+}
+
+Table product_categories {
+  category_id int [pk, increment]
+  category_name varchar [unique]
+  parent_category_id int [ref: > product_categories.category_id]
+  is_deleted boolean
+}
+
+Table product_category_links {
+  product_id int [ref: > products.product_id]
+  category_id int [ref: > product_categories.category_id]
+  indexes {
+    (product_id, category_id) [pk]
+  }
+}
+
+// ==========================================
+// 4. THE MASTER SHELL & SKUS
+// ==========================================
+Table products {
+  product_id int [pk, increment]
+  name varchar
+  product_type enum('Inventory', 'Non-Inventory', 'Service')
+  description text
+  base_uom_id int [ref: > uoms.uom_id]
+  status enum('Active','Inactive')
+  is_deleted boolean
+}
+
+Table variants {
+  variant_id int [pk, increment]
+  product_id int [ref: > products.product_id]
+  PID varchar [unique]
+  variant_name varchar
+  sku varchar
+  is_default boolean
+  attributes jsonb
+  price decimal(15,2)
+  promo_price decimal(15,2)
+  is_deleted boolean
+}
+
+Table variant_barcodes {
+  barcode_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id]
+  barcode varchar [unique]
+  uom_id int [ref: > uoms.uom_id]
+  is_primary boolean
+}
+
+Table variant_uom_conversions {
+  variant_id int [ref: > variants.variant_id]
+  from_uom_id int [ref: > uoms.uom_id]
+  to_uom_id int [ref: > uoms.uom_id]
+  factor decimal(15,4)
+  indexes {
+    (variant_id, from_uom_id, to_uom_id) [pk]
+  }
+}
+
+Table bundle_components {
+  bundle_variant_id int [ref: > variants.variant_id]
+  component_variant_id int [ref: > variants.variant_id]
+  quantity decimal(15,4)
+  indexes {
+    (bundle_variant_id, component_variant_id) [pk]
+  }
+}
+
+// ==========================================
+// 5. PROCUREMENT CATALOG
+// ==========================================
+Table suppliers {
+  supplier_id int [pk, increment]
+  supplier_name varchar
+  bank_account_name varchar
+  terms int
+  is_deleted boolean
+}
+
+Table variant_suppliers {
+  id int [pk, increment]
+  variant_id int [ref: > variants.variant_id]
+  supplier_id int [ref: > suppliers.supplier_id]
+  supplier_sku varchar
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  is_primary boolean
+  indexes {
+    (variant_id, supplier_id) [unique]
+  }
+}
+
+// ==========================================
+// 6. PURCHASE ORDERS
+// ==========================================
+Table purchase_orders {
+  po_id int [pk, increment]
+  po_pid varchar [unique, not null]
+  supplier_id int [ref: > suppliers.supplier_id]
+  location_id int [ref: > locations.location_id]
+  order_date datetime
+  expected_arrival_date date
+  status enum('Draft', 'Open', 'Partially_Received', 'Closed', 'Cancelled')
+  total_amount decimal(15,2)
+  created_by_user_id int [ref: > users.user_id]
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table purchase_order_items {
+  po_item_id int [pk, increment]
+  po_id int [ref: > purchase_orders.po_id]
+  variant_id int [ref: > variants.variant_id]
+  ordered_quantity decimal(15,4)
+  received_quantity decimal(15,4)
+  unit_cost decimal(15,2)
+}
+
+// ==========================================
+// 7. INVENTORY MOVEMENTS, COSTING & LEDGER
+// ==========================================
+Table inventory_shipments {
+  shipment_id int [pk, increment]
+  shipment_pid varchar
+  supplier_id int [ref: > suppliers.supplier_id]
+  po_id int [ref: > purchase_orders.po_id]
+  reference_number varchar
+  received_at datetime
+}
+
+Table receiving_details {
+  detail_id int [pk, increment]
+  shipment_id int [ref: > inventory_shipments.shipment_id]
+  variant_id int [ref: > variants.variant_id]
+  location_id int [ref: > locations.location_id]
+  po_item_id int [ref: > purchase_order_items.po_item_id]
+  received_at datetime
+  inspected_at datetime
+  quantity_ordered decimal(15,4)
+  quantity_declared decimal(15,4)
+  quantity_actual decimal(15,4)
+  quantity_rejected decimal(15,4)
+  qc_status enum('Pending', 'Passed', 'Failed', 'Partially_Passed')
+}
+
+Table inventory_transfers {
+  transfer_id int [pk, increment]
+  transfer_pid varchar [unique, note: 'Human-friendly reference number']
+  from_location_id int [ref: > locations.location_id]
+  to_location_id int [ref: > locations.location_id]
+  released_by_user_id int [ref: > users.user_id]
+  received_by_user_id int [ref: > users.user_id]
+  requested_by_user_id int [ref: > users.user_id]
+  total_bundle_count int [note: 'Total number of physical boxes/bundles in this transfer']
+  occurred_at datetime
+}
+
+Table inventory_transfer_items {
+  transfer_item_id int [pk, increment]
+  transfer_id int [ref: > inventory_transfers.transfer_id]
+  variant_id int [ref: > variants.variant_id]
+  quantity_requested decimal(15,4)
+  quantity_released decimal(15,4)
+  quantity_received decimal(15,4)
+}
+
+Table inventory_ledger {
+  ledger_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id]
+  location_id int [ref: > locations.location_id]
+  qty_change decimal(15,4)
+  reason enum('RECEIVE','SALE','RETURN_IN','RETURN_OUT','TRANSFER_IN','TRANSFER_OUT','ADJUST')
+  reference_type varchar
+  reference_id varchar
+  occurred_at datetime
+}
+
+Table current_stocks {
+  stock_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id]
+  location_id int [ref: > locations.location_id]
+  quantity decimal(15,4)
+  last_updated datetime
+  indexes {
+    (variant_id, location_id) [unique]
+  }
+}
+
+Table cost_layers {
+  layer_id bigint [pk, increment]
+  variant_id int [ref: > variants.variant_id]
+  shipment_id int [ref: > inventory_shipments.shipment_id]
+  location_id int [ref: > locations.location_id]
+  original_quantity decimal(15,4)
+  quantity_remaining decimal(15,4)
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  net_unit_cost decimal(15,2)
+  created_at datetime
+}
+
+// ==========================================
+// 8. ACCOUNTS PAYABLE
+// ==========================================
+Table supplier_invoices {
+  invoice_id int [pk, increment]
+  supplier_id int [ref: > suppliers.supplier_id]
+  shipment_id int [ref: > inventory_shipments.shipment_id]
+  invoice_number varchar
+  invoice_date date
+  due_date date
+  total_amount decimal(15,2)
+  amended_amount decimal(15,2)
+  amendment_notes text
+  status enum('Unpaid', 'Partial', 'Paid')
+  created_at datetime
+}
+
+Table supplier_payments {
+  payment_id int [pk, increment]
+  supplier_id int [ref: > suppliers.supplier_id]
+  amount decimal(15,2)
+  payment_date datetime
+  reference_number varchar
+  payment_method varchar
+}
+
+Table ap_ledger {
+  ap_ledger_id bigint [pk, increment]
+  supplier_id int [ref: > suppliers.supplier_id]
+  amount_change decimal(15,2)
+  reason enum('INVOICE', 'PAYMENT', 'CREDIT_MEMO', 'ADJUSTMENT')
+  reference_type varchar
+  reference_id varchar
+  occurred_at datetime
+}
+
+Table invoice_payments {
+  invoice_id int [ref: > supplier_invoices.invoice_id]
+  payment_id int [ref: > supplier_payments.payment_id]
+  amount_applied decimal(15,2)
+  indexes {
+    (invoice_id, payment_id) [pk]
+  }
+}
+
+// ==========================================
+// 9. SALES SETTINGS
+// ==========================================
+Table payment_modes {
+  payment_mode_id int [pk, increment]
+  name varchar [not null, note: 'e.g., Cash, GCash, Maya, Visa']
+  is_physical boolean [default: true, note: 'True for cash/checks; false for digital/card']
+  is_active boolean [default: true]
+}
+
+Table cash_registers {
+  register_id int [pk, increment]
+  name varchar [not null, note: 'e.g., Register 1, Main Terminal']
+  location_id int [ref: > locations.location_id]
+  is_active boolean [default: true]
+}
+
+// ==========================================
+// 10. CUSTOMERS & ACCOUNTS RECEIVABLE
+// ==========================================
+Table customers {
+  customer_id int [pk, increment]
+  customer_name varchar
+  credit_limit decimal(15,2)
+  terms_days int [default: 0, note: '0 = COD, 15 = Net 15, 30 = Net 30']
+  outstanding_balance decimal(15,2) [note: 'Cached running total. Updated transactionally on every sale, return, and payment. Never queried standalone — always verified against ar_ledger on reports.']
+  is_deleted boolean
+}
+
+Table ar_ledger {
+  ar_ledger_id bigint [pk, increment]
+  customer_id int [ref: > customers.customer_id]
+  amount_change decimal(15,2) [note: 'Positive = new debt (sale). Negative = debt reduced (payment, return).']
+  reason enum('SALE', 'PAYMENT', 'RETURN', 'ADJUSTMENT')
+  reference_type varchar
+  reference_id varchar
+  occurred_at datetime
+}
+
+// ==========================================
+// 11. SALES
+// ==========================================
+Table sales {
+  sale_id int [pk, increment]
+  sale_pid varchar [unique, not null, note: 'Human-friendly reference e.g. SALE-00123']
+  sale_date datetime [default: `now()`]
+  location_id int [ref: > locations.location_id, note: 'Where the sale occurred. Drives stock deduction.']
+  register_id int [ref: > cash_registers.register_id]
+  customer_id int [ref: > customers.customer_id, note: 'Nullable — walk-in sales allowed']
+  employee_id int [ref: > employees.employee_id, note: 'Cashier or salesperson']
+  created_by_user_id int [ref: > users.user_id]
+
+  subtotal_amount decimal(15,2) [note: 'Sum of all line_totals before discounts and tax']
+  discount_amount decimal(15,2) [default: 0]
+  tax_amount decimal(15,2) [default: 0]
+  grand_total decimal(15,2) [note: 'subtotal - discount + tax. System-calculated.']
+
+  receipt_grand_total decimal(15,2) [note: 'The total printed on the physical receipt. Input by cashier.']
+  audit_variance decimal(15,2) [note: 'Backend-calculated: receipt_grand_total - grand_total. Flags discrepancies.']
+
+  due_date date [note: 'Calculated as sale_date + customer.terms_days. NULL for COD.']
+  payment_status enum('Unpaid', 'Partial', 'Paid') [default: 'Paid']
+  balance_due decimal(15,2) [note: 'grand_total minus total applied payments. Updated transactionally.']
+
+  status enum('Draft', 'Posted', 'Voided') [default: 'Posted']
+  voided_at datetime
+  void_reason varchar
+
+  idempotency_key varchar [unique, note: 'Prevents double-posting on network retries. Set by client.']
+}
+
+Table sale_items {
+  sale_item_id int [pk, increment]
+  sale_id int [ref: > sales.sale_id]
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The exact FIFO layer this unit was consumed from. One row per layer split.']
+
+  quantity decimal(15,4)
+  unit_price decimal(15,2)
+  line_total decimal(15,2) [note: 'unit_price × quantity']
+
+  // Cost snapshot — locked at time of sale from the cost layer
+  gross_cost decimal(15,2)
+  supplier_discount decimal(5,2)
+  net_unit_cost decimal(15,2)
+
+  indexes {
+    (sale_id, variant_id, cost_layer_id) [unique, note: 'One row per variant-layer combination per sale']
+  }
+}
+
+// ==========================================
+// 12. CUSTOMER PAYMENTS (AR)
+// ==========================================
+Table customer_payments {
+  payment_id int [pk, increment]
+  customer_id int [ref: > customers.customer_id]
+  payment_mode_id int [ref: > payment_modes.payment_mode_id]
+  amount decimal(15,2)
+  payment_date datetime
+  reference_number varchar [note: 'Check number, transfer ID, etc.']
+  unapplied_amount decimal(15,2) [default: 0, note: 'Remainder after application. Used for overpayments and advance payments.']
+}
+
+Table customer_payment_applied {
+  apply_id int [pk, increment]
+  payment_id int [ref: > customer_payments.payment_id]
+  sale_id int [ref: > sales.sale_id]
+  amount_applied decimal(15,2)
+  applied_at datetime
+}
+
+// ==========================================
+// 13. SALES RETURNS
+// ==========================================
+Table sales_returns {
+  return_id int [pk, increment]
+  return_pid varchar [unique, not null, note: 'Human-friendly reference e.g. RET-00045']
+  sale_id int [ref: > sales.sale_id]
+  location_id int [ref: > locations.location_id, note: 'Where stock is returned to. Defaults to original sale location. Cashier may override.']
+  return_date datetime
+  reason varchar
+  grand_total decimal(15,2) [note: 'Total value being credited back']
+  created_by_user_id int [ref: > users.user_id]
+}
+
+Table sales_return_items {
+  return_item_id int [pk, increment]
+  return_id int [ref: > sales_returns.return_id]
+  sale_item_id int [ref: > sale_items.sale_item_id, note: 'Links to the exact split row for precise FIFO reversal']
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The layer being reversed']
+  quantity decimal(15,4)
+  line_total decimal(15,2)
+}
+
+// ==========================================
+// 14. SUPPLIER RETURNS
+// ==========================================
+Table supplier_returns {
+  return_id int [pk, increment]
+  return_pid varchar [unique, not null]
+  supplier_id int [ref: > suppliers.supplier_id]
+  location_id int [ref: > locations.location_id, note: 'Source location — stock is pulled from here (typically Quarantine)']
+  status enum('Draft', 'Shipped', 'Credit_Received')
+  total_credit_amount decimal(15,2)
+  created_by_user_id int [ref: > users.user_id]
+  created_at datetime
+}
+
+Table supplier_return_items {
+  return_item_id int [pk, increment]
+  return_id int [ref: > supplier_returns.return_id]
+  variant_id int [ref: > variants.variant_id]
+  cost_layer_id bigint [ref: > cost_layers.layer_id, note: 'The exact layer being reversed for accurate COGS credit']
+  quantity decimal(15,4)
+  unit_credit_expected decimal(15,2)
+}

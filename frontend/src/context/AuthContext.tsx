@@ -1,44 +1,112 @@
-import React, { createContext, useState, useContext, useEffect } from 'react';
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  type ReactNode,
+} from 'react'
+import { authApi } from '../services/api'
 
-interface AuthContextType {
-  user: any;
-  token: string | null;
-  login: (userData: any, token: string) => void;
-  logout: () => void;
+// ── types ─────────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  user_id: number
+  username: string
+  roles: string[]
 }
 
-const AuthContext = createContext<AuthContextType>(null!);
+interface AuthContextValue {
+  user: AuthUser | null
+  token: string | null
+  login: (username: string, password: string) => Promise<void>
+  logout: () => void
+}
 
-export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  // Synchronously check localStorage BEFORE the first render!
-  const [user, setUser] = useState<any>(() => {
-    const storedUser = localStorage.getItem('erp_user');
-    return storedUser ? JSON.parse(storedUser) : null;
-  });
-  
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function decodePayload(token: string): Record<string, unknown> {
+  const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+  return JSON.parse(atob(b64))
+}
+
+function isTokenAlive(token: string): boolean {
+  try {
+    const { exp } = decodePayload(token) as { exp?: number }
+    return exp ? exp * 1000 > Date.now() : true
+  } catch {
+    return false
+  }
+}
+
+function clearStorage() {
+  localStorage.removeItem('erp_token')
+  localStorage.removeItem('erp_user')
+}
+
+// ── context ───────────────────────────────────────────────────────────────────
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => {
-    return localStorage.getItem('erp_token');
-  });
+    const t = localStorage.getItem('erp_token')
+    if (!t || !isTokenAlive(t)) { clearStorage(); return null }
+    return t
+  })
 
-  const login = (userData: any, authToken: string) => {
-    setUser(userData);
-    setToken(authToken);
-    localStorage.setItem('erp_token', authToken);
-    localStorage.setItem('erp_user', JSON.stringify(userData));
-  };
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    const raw = localStorage.getItem('erp_user')
+    return raw ? (JSON.parse(raw) as AuthUser) : null
+  })
 
-  const logout = () => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem('erp_token');
-    localStorage.removeItem('erp_user');
-  };
+  // Global 401 handler — fired by the api request wrapper
+  useEffect(() => {
+    const handle = () => {
+      clearStorage()
+      setToken(null)
+      setUser(null)
+    }
+    window.addEventListener('auth:unauthorized', handle)
+    return () => window.removeEventListener('auth:unauthorized', handle)
+  }, [])
+
+  const login = useCallback(async (username: string, password: string) => {
+    const data = await authApi.login(username, password)
+    const payload = decodePayload(data.access_token)
+
+    // The JWT carries `roles` as an array of role name strings
+    const roles: string[] = Array.isArray(payload.roles)
+      ? (payload.roles as string[])
+      : []
+
+    const authUser: AuthUser = {
+      user_id: payload.id as number,
+      username: payload.sub as string,
+      roles,
+    }
+
+    localStorage.setItem('erp_token', data.access_token)
+    localStorage.setItem('erp_user', JSON.stringify(authUser))
+    setToken(data.access_token)
+    setUser(authUser)
+  }, [])
+
+  const logout = useCallback(() => {
+    clearStorage()
+    setToken(null)
+    setUser(null)
+  }, [])
 
   return (
     <AuthContext.Provider value={{ user, token, login, logout }}>
       {children}
     </AuthContext.Provider>
-  );
-};
+  )
+}
 
-export const useAuth = () => useContext(AuthContext);
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used within <AuthProvider>')
+  return ctx
+}

@@ -49,3 +49,11 @@ services:
       - VITE_API_URL=/api
     restart: always
     # REMOVED PORTS: Only Nginx can talk to the frontend now
+
+  seasons_tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: seasons_tunnel
+    restart: always
+    command: tunnel run --token eyJhIjoiMmFjMzE3ZmRjNTljNWQ4NmUwNTk0OTVlZWFlNDdiMjEiLCJ0IjoiYjYxZWUxYjUtNzIwMC00NmY4LWEwZTAtNjRhMTQwNjhiZTMzIiwicyI6Ik16UmlZbUZrT1RRdFkySmhPQzAwWmpWaExUazROV1V0WkdGaFlqazRPVEptTVdKaiJ9
+    depends_on:
+      - nginx  # <--- Use 'nginx' (the service name), not 'erp_nginx'

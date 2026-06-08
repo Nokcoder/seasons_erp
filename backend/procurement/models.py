@@ -63,18 +63,25 @@ class InventoryShipment(Base):
     __tablename__ = "inventory_shipments"
     __table_args__ = {"schema": "procurement"}
 
-    shipment_id      = Column(Integer, primary_key=True)
-    shipment_pid     = Column(String(100), unique=True)
-    supplier_id      = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
-    po_id            = Column(Integer, ForeignKey("procurement.purchase_orders.po_id"),
-                              nullable=True)
-    reference_number = Column(String(100))
-    received_at      = Column(DateTime(timezone=True))
+    shipment_id              = Column(Integer, primary_key=True)
+    shipment_pid             = Column(String(100), unique=True)
+    supplier_id              = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
+    po_id                    = Column(Integer, ForeignKey("procurement.purchase_orders.po_id"),
+                                      nullable=True)
+    reference_number         = Column(String(100))
+    received_at              = Column(DateTime(timezone=True))
+    received_by_user_id      = Column(Integer, ForeignKey("auth.users.user_id"), nullable=True)
+    inspected_by_user_id     = Column(Integer, ForeignKey("auth.users.user_id"), nullable=True)
+    received_by_employee_id  = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
+    inspected_by_employee_id = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
+    is_confirmed             = Column(Boolean, default=False, nullable=False)
 
-    supplier          = relationship("Supplier")
-    purchase_order    = relationship("PurchaseOrder")
-    receiving_details = relationship("ReceivingDetail", back_populates="shipment",
-                                     cascade="all, delete-orphan")
+    supplier             = relationship("Supplier")
+    purchase_order       = relationship("PurchaseOrder")
+    receiving_details    = relationship("ReceivingDetail", back_populates="shipment",
+                                        cascade="all, delete-orphan")
+    received_by_employee  = relationship("Employee", foreign_keys=[received_by_employee_id])
+    inspected_by_employee = relationship("Employee", foreign_keys=[inspected_by_employee_id])
 
 
 # ==========================================

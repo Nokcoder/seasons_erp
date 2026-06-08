@@ -7,7 +7,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from core.database import Base
-from auth.models import User
+from auth.models import User, Employee
 
 
 # ==========================================
@@ -93,7 +93,7 @@ class Product(Base):
     __table_args__ = {"schema": "inventory"}
 
     product_id   = Column(Integer, primary_key=True, index=True)
-    name         = Column(String(255), nullable=False)
+    brand        = Column(String(255), nullable=False)
     product_type = Column(
         SAEnum("Inventory", "Non-Inventory", "Service",
                name="product_type", schema="inventory"),
@@ -173,11 +173,14 @@ class VariantUomConversion(Base):
     __tablename__ = "variant_uom_conversions"
     __table_args__ = {"schema": "inventory"}
 
-    variant_id  = Column(Integer, ForeignKey("inventory.variants.variant_id",
-                          ondelete="CASCADE"), primary_key=True)
-    from_uom_id = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
-    to_uom_id   = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
-    factor      = Column(Numeric(15, 4), nullable=False)
+    variant_id           = Column(Integer, ForeignKey("inventory.variants.variant_id",
+                                   ondelete="CASCADE"), primary_key=True)
+    from_uom_id          = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
+    to_uom_id            = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
+    factor               = Column(Numeric(15, 4), nullable=False)
+    is_warehouse_bundle  = Column(Boolean, default=False, nullable=False)
+    price                = Column(Numeric(15, 2), nullable=True)
+    promo_price          = Column(Numeric(15, 2), nullable=True)
 
     variant  = relationship("Variant", back_populates="uom_conversions")
     from_uom = relationship("UOM", foreign_keys=[from_uom_id])
@@ -210,6 +213,7 @@ class Supplier(Base):
     __table_args__ = {"schema": "inventory"}
 
     supplier_id       = Column(Integer, primary_key=True)
+    supplier_code     = Column(String(100), unique=True, nullable=False)
     supplier_name     = Column(String(255), nullable=False)
     bank_account_name = Column(String(255))
     terms             = Column(Integer, default=0)   # payment terms in days
@@ -255,23 +259,30 @@ class InventoryTransfer(Base):
     __tablename__ = "inventory_transfers"
     __table_args__ = {"schema": "inventory"}
 
-    transfer_id           = Column(Integer, primary_key=True)
-    transfer_pid          = Column(String(100), unique=True)
-    from_location_id      = Column(Integer, ForeignKey("inventory.locations.location_id"))
-    to_location_id        = Column(Integer, ForeignKey("inventory.locations.location_id"))
-    released_by_user_id   = Column(Integer, ForeignKey("auth.users.user_id"))
-    received_by_user_id   = Column(Integer, ForeignKey("auth.users.user_id"))
-    requested_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"))
-    total_bundle_count    = Column(Integer, default=0)
-    occurred_at           = Column(DateTime(timezone=True), server_default=func.now())
+    transfer_id                = Column(Integer, primary_key=True)
+    transfer_pid               = Column(String(100), unique=True)
+    from_location_id           = Column(Integer, ForeignKey("inventory.locations.location_id"))
+    to_location_id             = Column(Integer, ForeignKey("inventory.locations.location_id"))
+    released_by_user_id        = Column(Integer, ForeignKey("auth.users.user_id"))
+    received_by_user_id        = Column(Integer, ForeignKey("auth.users.user_id"))
+    requested_by_user_id       = Column(Integer, ForeignKey("auth.users.user_id"))
+    released_by_employee_id    = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
+    received_by_employee_id    = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
+    total_bundle_count         = Column(Integer, default=0)
+    occurred_at                = Column(DateTime(timezone=True), server_default=func.now())
+    status                     = Column(String(20), default="Posted", nullable=False)
+    voided_at                  = Column(DateTime(timezone=True), nullable=True)
+    void_reason                = Column(String(500), nullable=True)
 
-    from_location  = relationship("Location", foreign_keys=[from_location_id])
-    to_location    = relationship("Location", foreign_keys=[to_location_id])
-    released_by    = relationship("User", foreign_keys=[released_by_user_id])
-    received_by    = relationship("User", foreign_keys=[received_by_user_id])
-    requested_by   = relationship("User", foreign_keys=[requested_by_user_id])
-    items          = relationship("InventoryTransferItem", back_populates="transfer",
-                                  cascade="all, delete-orphan")
+    from_location           = relationship("Location", foreign_keys=[from_location_id])
+    to_location             = relationship("Location", foreign_keys=[to_location_id])
+    released_by             = relationship("User", foreign_keys=[released_by_user_id])
+    received_by             = relationship("User", foreign_keys=[received_by_user_id])
+    requested_by            = relationship("User", foreign_keys=[requested_by_user_id])
+    released_by_employee    = relationship("Employee", foreign_keys=[released_by_employee_id])
+    received_by_employee    = relationship("Employee", foreign_keys=[received_by_employee_id])
+    items                   = relationship("InventoryTransferItem", back_populates="transfer",
+                                           cascade="all, delete-orphan")
 
 
 # ==========================================
@@ -291,7 +302,7 @@ class InventoryTransferItem(Base):
     quantity_received  = Column(Numeric(15, 4), nullable=True)
 
     transfer = relationship("InventoryTransfer", back_populates="items")
-    variant  = relationship("Variant")
+    variant  = relationship("Variant", lazy="select")
 
 
 # ==========================================
@@ -312,6 +323,9 @@ class InventoryLedger(Base):
     reference_type = Column(String(100))
     reference_id   = Column(String(100))
     occurred_at    = Column(DateTime(timezone=True), server_default=func.now())
+
+    variant  = relationship("Variant",  foreign_keys=[variant_id],  lazy="joined")
+    location = relationship("Location", foreign_keys=[location_id], lazy="joined")
 
 
 # ==========================================
@@ -366,3 +380,50 @@ class CostLayer(Base):
     # InventoryShipment relationship resolved by string — requires procurement
     # models to be imported before any query is made (handled in main.py)
     shipment = relationship("InventoryShipment")
+
+
+# ==========================================
+# 17. VARIANT PRICE HISTORY  (immutable)
+# ==========================================
+class VariantPriceHistory(Base):
+    __tablename__ = "variant_price_history"
+    __table_args__ = {"schema": "inventory"}
+
+    history_id         = Column(BigInteger, primary_key=True)
+    variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                                nullable=False)
+    old_price          = Column(Numeric(15, 2), nullable=True)
+    new_price          = Column(Numeric(15, 2), nullable=True)
+    old_promo_price    = Column(Numeric(15, 2), nullable=True)
+    new_promo_price    = Column(Numeric(15, 2), nullable=True)
+    changed_by_user_id = Column(Integer, ForeignKey("auth.users.user_id"), nullable=True)
+    changed_at         = Column(DateTime(timezone=True), server_default=func.now(),
+                                nullable=False)
+
+    variant    = relationship("Variant")
+    changed_by = relationship("User")
+
+
+# ==========================================
+# 18. VARIANT COST HISTORY  (immutable)
+# ==========================================
+class VariantCostHistory(Base):
+    __tablename__ = "variant_cost_history"
+    __table_args__ = {"schema": "inventory"}
+
+    history_id             = Column(BigInteger, primary_key=True)
+    variant_id             = Column(Integer, ForeignKey("inventory.variants.variant_id"),
+                                    nullable=False)
+    supplier_id            = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"),
+                                    nullable=False)
+    old_gross_cost         = Column(Numeric(15, 2), nullable=True)
+    new_gross_cost         = Column(Numeric(15, 2), nullable=True)
+    old_supplier_discount  = Column(Numeric(5, 2), nullable=True)
+    new_supplier_discount  = Column(Numeric(5, 2), nullable=True)
+    changed_by_user_id     = Column(Integer, ForeignKey("auth.users.user_id"), nullable=True)
+    changed_at             = Column(DateTime(timezone=True), server_default=func.now(),
+                                    nullable=False)
+
+    variant    = relationship("Variant")
+    supplier   = relationship("Supplier")
+    changed_by = relationship("User")

@@ -8,10 +8,22 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.database import get_db
+from core.audit import write_audit, _serialize
+from auth.dependencies import get_current_user, require_permission
+from auth.models import User
 from inventory import models, schemas
-from auth.dependencies import require_permission
+from settings.models import SystemSetting
 
-router = APIRouter(prefix="/transfers", tags=["Transfers"])
+
+def _get_allow_negative_stock(db: Session) -> bool:
+    row = db.query(SystemSetting).filter_by(key="allow_negative_stock").first()
+    return row.value == "true" if row else False
+
+router = APIRouter(
+    prefix="/transfers",
+    tags=["Transfers"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -25,7 +37,11 @@ def _load_transfer(transfer_id: int, db: Session) -> models.InventoryTransfer:
             selectinload(models.InventoryTransfer.released_by),
             selectinload(models.InventoryTransfer.received_by),
             selectinload(models.InventoryTransfer.requested_by),
-            selectinload(models.InventoryTransfer.items),
+            selectinload(models.InventoryTransfer.released_by_employee),
+            selectinload(models.InventoryTransfer.received_by_employee),
+            selectinload(models.InventoryTransfer.items)
+                .selectinload(models.InventoryTransferItem.variant)
+                .selectinload(models.Variant.product),
         )
         .filter(models.InventoryTransfer.transfer_id == transfer_id)
         .first()
@@ -82,23 +98,20 @@ def _consume_fifo(
     variant_id: int,
     location_id: int,
     qty: Decimal,
+    allow_negative: bool = False,
 ) -> list[tuple[Decimal, Decimal]]:
     """
     Deduct qty from cost layers FIFO oldest-first (row-locks layers for concurrency safety).
     Returns [(units_taken, net_unit_cost), ...].
-    Raises 400 if available layers are insufficient to cover qty.
+    Raises 400 on insufficient stock (skipped when allow_negative is True) or insufficient layers.
     """
-    # Pre-flight: check current_stocks before touching cost layers.
-    # If current_stocks and layers have drifted out of sync (e.g. due to a
-    # failed partial transaction), this catches the discrepancy early and
-    # prevents stock from going negative.
     stock = (
         db.query(models.CurrentStock)
         .filter_by(variant_id=variant_id, location_id=location_id)
         .first()
     )
     available_stock = stock.quantity if stock else Decimal("0")
-    if available_stock < qty:
+    if not allow_negative and available_stock < qty:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -120,7 +133,7 @@ def _consume_fifo(
     )
 
     available = sum(l.quantity_remaining for l in layers)
-    if available < qty:
+    if available < qty and not allow_negative:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -138,6 +151,11 @@ def _consume_fifo(
         layer.quantity_remaining -= take
         consumed.append((take, layer.net_unit_cost))
         remaining -= take
+
+    # When allow_negative and layers were depleted, cover remainder at zero cost
+    # so the destination always receives matching FIFO layers.
+    if remaining > 0 and allow_negative:
+        consumed.append((remaining, Decimal("0")))
 
     return consumed
 
@@ -195,17 +213,22 @@ def _move_variant(
     actual_out: Decimal,
     actual_in: Decimal,
     ref_id: str,
+    out_reason: models.LedgerReason = models.LedgerReason.TRANSFER_OUT,
+    in_reason: models.LedgerReason = models.LedgerReason.TRANSFER_IN,
+    allow_negative: bool = False,
 ) -> None:
     """
     Write ledger entries, consume FIFO layers at source, create matching layers
     at destination, and update current_stocks — all for a single (non-bundle) variant.
+    Pass out_reason=ADJUST / in_reason=ADJUST for stock adjustment movements.
     """
     _write_ledger(db, variant_id, from_location_id, -actual_out,
-                  models.LedgerReason.TRANSFER_OUT, "inventory_transfer", ref_id)
+                  out_reason, "inventory_transfer", ref_id)
     _write_ledger(db, variant_id, to_location_id, actual_in,
-                  models.LedgerReason.TRANSFER_IN, "inventory_transfer", ref_id)
+                  in_reason, "inventory_transfer", ref_id)
 
-    consumed = _consume_fifo(db, variant_id, from_location_id, actual_out)
+    consumed = _consume_fifo(db, variant_id, from_location_id, actual_out,
+                             allow_negative=allow_negative)
     _create_transfer_layers(db, variant_id, to_location_id, consumed, actual_in, actual_out)
 
     _upsert_stock(db, variant_id, from_location_id, -actual_out)
@@ -225,8 +248,23 @@ def list_locations(db: Session = Depends(get_db)):
     )
 
 
+@router.get("/locations/{location_id}", response_model=schemas.LocationOut)
+def get_location(location_id: int, db: Session = Depends(get_db)):
+    loc = db.query(models.Location).filter(
+        models.Location.location_id == location_id,
+        models.Location.is_deleted == False,
+    ).first()
+    if not loc:
+        raise HTTPException(status_code=404, detail="Location not found")
+    return loc
+
+
 @router.post("/locations", response_model=schemas.LocationOut, status_code=201)
-def create_location(payload: schemas.LocationCreate, db: Session = Depends(get_db)):
+def create_location(
+    payload: schemas.LocationCreate,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("manage_locations")),
+):
     loc = models.Location(
         location_name=payload.location_name,
         location_type=payload.location_type,
@@ -236,6 +274,9 @@ def create_location(payload: schemas.LocationCreate, db: Session = Depends(get_d
     db.add(loc)
     db.commit()
     db.refresh(loc)
+    write_audit(db, "inventory.locations", str(loc.location_id), "INSERT",
+                actor_user_id=_actor.user_id, new_values=_serialize(loc))
+    db.commit()
     return loc
 
 
@@ -280,7 +321,11 @@ def list_transfers(db: Session = Depends(get_db)):
             selectinload(models.InventoryTransfer.released_by),
             selectinload(models.InventoryTransfer.received_by),
             selectinload(models.InventoryTransfer.requested_by),
-            selectinload(models.InventoryTransfer.items),
+            selectinload(models.InventoryTransfer.released_by_employee),
+            selectinload(models.InventoryTransfer.received_by_employee),
+            selectinload(models.InventoryTransfer.items)
+                .selectinload(models.InventoryTransferItem.variant)
+                .selectinload(models.Variant.product),
         )
         .order_by(models.InventoryTransfer.occurred_at.desc())
         .all()
@@ -293,7 +338,11 @@ def get_transfer(transfer_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=schemas.TransferOut, status_code=201)
-def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_db)):
+def create_transfer(
+    payload: schemas.TransferCreate,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("create_transfer")),
+):
     """
     Record a completed stock transfer.
 
@@ -307,7 +356,11 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
     if not payload.items:
         raise HTTPException(status_code=400, detail="Transfer must have at least one item")
 
-    # validate both locations exist, are not deleted, and are active
+    allow_negative = _get_allow_negative_stock(db)
+
+    # validate both locations exist, are not deleted, and are active;
+    # capture them so we can detect Adjustment movements below
+    _validated_locs: dict[int, models.Location] = {}
     for loc_id, label in [
         (payload.from_location_id, "Source"),
         (payload.to_location_id,   "Destination"),
@@ -323,6 +376,17 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
                 status_code=400,
                 detail=f"{label} location '{loc.location_name}' is inactive",
             )
+        _validated_locs[loc_id] = loc
+
+    # use ADJUST reason when either end of the transfer is the Adjustment location
+    _from_loc = _validated_locs[payload.from_location_id]
+    _to_loc   = _validated_locs[payload.to_location_id]
+    _is_adjustment = (
+        _from_loc.location_name == "Adjustment" or
+        _to_loc.location_name   == "Adjustment"
+    )
+    _out_reason = models.LedgerReason.ADJUST if _is_adjustment else models.LedgerReason.TRANSFER_OUT
+    _in_reason  = models.LedgerReason.ADJUST if _is_adjustment else models.LedgerReason.TRANSFER_IN
 
     transfer = models.InventoryTransfer(
         transfer_pid=payload.transfer_pid,
@@ -331,8 +395,10 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
         released_by_user_id=payload.released_by_user_id,
         received_by_user_id=payload.received_by_user_id,
         requested_by_user_id=payload.requested_by_user_id,
+        released_by_employee_id=payload.released_by_employee_id,
+        received_by_employee_id=payload.received_by_employee_id,
         total_bundle_count=payload.total_bundle_count,
-        occurred_at=datetime.now(timezone.utc),
+        occurred_at=payload.occurred_at or datetime.now(timezone.utc),
     )
     db.add(transfer)
     db.flush()  # get transfer_id for PID and ledger reference
@@ -386,11 +452,15 @@ def create_transfer(payload: schemas.TransferCreate, db: Session = Depends(get_d
                 comp_in  = actual_in  * comp.quantity
                 _move_variant(db, comp.component_variant_id,
                               payload.from_location_id, payload.to_location_id,
-                              comp_out, comp_in, ref_id)
+                              comp_out, comp_in, ref_id,
+                              out_reason=_out_reason, in_reason=_in_reason,
+                              allow_negative=allow_negative)
         else:
             _move_variant(db, item_in.variant_id,
                           payload.from_location_id, payload.to_location_id,
-                          actual_out, actual_in, ref_id)
+                          actual_out, actual_in, ref_id,
+                          out_reason=_out_reason, in_reason=_in_reason,
+                          allow_negative=allow_negative)
 
     db.commit()
     return _load_transfer(transfer.transfer_id, db)
@@ -423,6 +493,83 @@ def update_transfer_header(
 
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(transfer, key, value)
+
+    db.commit()
+    return _load_transfer(transfer_id, db)
+
+
+# ── Void transfer ─────────────────────────────────────────────────────────────
+
+class _VoidRequest(schemas.BaseModel):
+    void_reason: str
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/{transfer_id}/void", response_model=schemas.TransferOut)
+def void_transfer(
+    transfer_id: int,
+    payload: _VoidRequest,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("create_transfer")),
+):
+    """Void a Posted transfer, reversing all ledger entries and stock movements.
+
+    Only Posted transfers can be voided. A Voided transfer is terminal.
+    For each item, the reversal writes:
+      - TRANSFER_IN  at the source location  (+qty back to source)
+      - TRANSFER_OUT at the destination location (-qty removed from destination)
+    FIFO layers transferred to the destination are consumed; source layers are restored.
+    """
+    transfer = _load_transfer(transfer_id, db)
+
+    if transfer.status != "Posted":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot void a transfer with status '{transfer.status}'",
+        )
+
+    ref_id = str(transfer.transfer_id)
+
+    for item in transfer.items:
+        actual_out = item.quantity_released or item.quantity_requested
+        actual_in  = item.quantity_received or actual_out
+
+        variant_obj = (
+            db.query(models.Variant)
+            .options(selectinload(models.Variant.product))
+            .filter_by(variant_id=item.variant_id)
+            .first()
+        )
+        if not variant_obj or variant_obj.product.product_type in ("Non-Inventory", "Service"):
+            continue
+
+        # Reversal: move stock BACK from destination to source
+        components = _get_bundle_components(db, item.variant_id)
+        if components:
+            for comp in components:
+                comp_variant = (
+                    db.query(models.Variant)
+                    .options(selectinload(models.Variant.product))
+                    .filter_by(variant_id=comp.component_variant_id)
+                    .first()
+                )
+                if not comp_variant or comp_variant.product.product_type in ("Non-Inventory", "Service"):
+                    continue
+                comp_out = actual_in  * comp.quantity   # take back what was sent to destination
+                comp_in  = actual_out * comp.quantity   # return to source
+                _move_variant(db, comp.component_variant_id,
+                              transfer.to_location_id, transfer.from_location_id,
+                              comp_out, comp_in, ref_id)
+        else:
+            _move_variant(db, item.variant_id,
+                          transfer.to_location_id, transfer.from_location_id,
+                          actual_in, actual_out, ref_id)
+
+    transfer.status      = "Voided"
+    transfer.voided_at   = datetime.now(timezone.utc)
+    transfer.void_reason = payload.void_reason
 
     db.commit()
     return _load_transfer(transfer_id, db)
