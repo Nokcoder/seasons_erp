@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-06-08 — AR Aging Report: rebuilt on the AR-ledger bridge-table approach
+
+Fixed a bug where AR-charge sales never appeared in the AR Aging Report (`GET /sales/customers/aging`).
+
+**Root cause**: `post_draft` applies every tender — including `is_ar_charge` payment-mode tenders — toward `total_applied`, so a fully AR-charged sale ends up with `balance_due = 0` and `payment_status = 'Paid'` even though no money was actually collected and the customer's `ar_ledger`/`outstanding_balance` carry the full obligation forward (the `pass` branch at `post_draft` step 10 deliberately skips writing an offsetting ledger entry for AR-charge tenders, so the receivable stays open). The old aging query filtered on `Sale.payment_status != 'Paid'` and bucketed `Sale.balance_due`, so these sales were silently excluded — directly violating the "reports always derive the balance from `ar_ledger`, never `sales.balance_due`/`payment_status` in isolation" rule in `requirements.md` §3.8/§12.1.
+
+**Fix** (`sales/router.py`, `get_ar_aging`) — replaced the `Sale.balance_due`/`payment_status` query with a ledger-derived bridge-table computation:
+- AR-exposed sales are identified via `ar_ledger` rows with `reason='SALE'`, `reference_type='sales'` (written only for customer-linked Posted sales — see `post_draft` step 9), using `amount_change` as the principal. Voided sales are excluded.
+- Offsets are computed as `non_ar_charge_payments + return_credits`:
+  - `non_ar_charge_payments` = `SUM(customer_payment_applied.amount_applied)` joined through `customer_payments` → `payment_modes`, **excluding** `is_ar_charge` tenders (an AR-charge tender defers the obligation rather than settling it). `is_ar_credit` tenders are kept as legitimate offsets — they genuinely draw down the account.
+  - `return_credits` = `SUM(sales_returns.grand_total)` for returns linked to the sale via `sale_id`.
+- `outstanding_for_sale = principal − non_ar_charge_payments − return_credits`; only sales with `outstanding_for_sale > 0` age into the report.
+- `due_date`/bucket assignment unchanged: `transaction_date + customer.terms_days`, bucketed by `days_overdue = today − due_date` into `current` / `days_1_30` / `days_31_60` / `days_61_90` / `days_90_plus`.
+
+**Side effect**: this also resolves the "Open observation" logged in the 2026-06-07 AR Aging entry below — a sale partially offset by a `RETURN` (which doesn't touch that sale's own `balance_due`) is now correctly netted down via `return_credits`, so the report no longer diverges from the customer's ledger-derived balance for that case.
+
+The customer-level pre-filter (`outstanding_balance > 0` when `include_zero_balance` is false) is unchanged — `post_draft` correctly adds the full `grand_total` (including AR-charge amounts) to `customer.outstanding_balance` at post time, so that cached field remains a sound pre-filter even though the per-sale `balance_due`/`payment_status` fields are not.
+
+---
+
 ## 2026-06-08 — Sales: split `sale_date` into `transaction_date` + `posted_at`
 
 The `sales.sales` schema replaced the single `sale_date` column with two distinct fields: `transaction_date` (a plain `date` — the calendar date the sale occurred, user-supplied at posting time, defaults to today) and `posted_at` (a UTC `datetime` — the timestamp when the sale was finalised). Swept the entire codebase to replace every `sale_date` reference with the correct one of the two, per this rule: occurrences meaning "when the transaction occurred" → `transaction_date`; occurrences meaning "when it was posted/stamped" → `posted_at`.

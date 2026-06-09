@@ -1,14 +1,15 @@
+name: ${INSTANCE_NAME}
+
 version: '3.8'
 
 services:
   nginx:
     image: nginx:alpine
-    container_name: erp_nginx
     restart: always
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
     ports:
-      - "80:80"
+      - "${NGINX_HOST_PORT}:80"
     depends_on:
       - frontend
       - backend
@@ -20,7 +21,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    container_name: seasons_db
     restart: always
     env_file:
       - .env
@@ -33,27 +33,20 @@ services:
 
   backend:
     build: ./backend
-    container_name: seasons_backend
     restart: always
     env_file:
       - .env
     depends_on:
       db:
         condition: service_healthy
-    # REMOVED PORTS: Only Nginx can talk to the backend now
 
   frontend:
     build: ./frontend
-    container_name: seasons_frontend
-    environment:
-      - VITE_API_URL=/api
     restart: always
-    # REMOVED PORTS: Only Nginx can talk to the frontend now
 
   seasons_tunnel:
     image: cloudflare/cloudflared:latest
-    container_name: seasons_tunnel
     restart: always
-    command: tunnel run --token eyJhIjoiMmFjMzE3ZmRjNTljNWQ4NmUwNTk0OTVlZWFlNDdiMjEiLCJ0IjoiYjYxZWUxYjUtNzIwMC00NmY4LWEwZTAtNjRhMTQwNjhiZTMzIiwicyI6Ik16UmlZbUZrT1RRdFkySmhPQzAwWmpWaExUazROV1V0WkdGaFlqazRPVEptTVdKaiJ9
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      - nginx  # <--- Use 'nginx' (the service name), not 'erp_nginx'
+      - nginx

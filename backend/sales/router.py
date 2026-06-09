@@ -335,14 +335,27 @@ def get_ar_aging(
     db: Session = Depends(get_db),
     _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
-    """AR Aging Report (per docs/customers_aging.md) — buckets each active
-    customer's unpaid/partial Posted sales by days past due.
+    """AR Aging Report — buckets each active customer's outstanding AR-exposed
+    sales by days past due.
 
-    due_date = transaction_date + customer.terms_days (computed fresh — the stored
-    Sale.due_date is left null for COD/terms_days==0, but an unpaid COD sale
-    is due the day it was made, so it must still age normally).
-    days_overdue = today - due_date; bucket amount = sale.balance_due
-    (the unpaid remainder only, never grand_total).
+    Bridge-table approach (never reads sales.balance_due / sales.payment_status —
+    an AR-charge tender marks a sale "Paid" at post time even though the
+    customer still owes the full amount on credit):
+
+      - AR-exposed sales = ar_ledger rows with reason='SALE', reference_type='sales'
+        (written only for customer-linked posted sales — see post_draft step 9).
+      - principal = ar_ledger.amount_change for that entry (== grand_total at post).
+      - non_ar_charge_payments = SUM(customer_payment_applied.amount_applied)
+        joined through customer_payments -> payment_modes, excluding is_ar_charge
+        tenders (an AR-charge tender defers the obligation rather than settling it;
+        is_ar_credit tenders genuinely draw down the account and are kept as offsets).
+      - return_credits = SUM(sales_returns.grand_total) for returns linked to the sale.
+      - outstanding_for_sale = principal - non_ar_charge_payments - return_credits;
+        only rows with outstanding_for_sale > 0 age into the report.
+      - due_date = transaction_date + customer.terms_days (computed fresh — the
+        stored Sale.due_date is left null for COD/terms_days==0, but an unpaid
+        COD sale is due the day it was made, so it must still age normally).
+      - days_overdue = today - due_date.
     """
     today = datetime.now(timezone.utc).date()
 
@@ -352,44 +365,105 @@ def get_ar_aging(
     if not include_zero_balance:
         q = q.filter(models.Customer.outstanding_balance > 0)
     customers = q.order_by(models.Customer.customer_name).all()
+    print(f"[AGING DEBUG] customers passing pre-filter: {len(customers)} "
+          f"({[c.customer_name for c in customers]})")
     if not customers:
         return []
 
     customer_ids = [c.customer_id for c in customers]
     terms_by_id  = {c.customer_id: c.terms_days for c in customers}
 
-    sales = (
-        db.query(models.Sale.customer_id, models.Sale.transaction_date, models.Sale.balance_due)
-        .filter(
-            models.Sale.customer_id.in_(customer_ids),
-            models.Sale.status == "Posted",
-            models.Sale.payment_status != "Paid",
-        )
-        .all()
-    )
-
     zero = Decimal("0")
     buckets = {
         cid: {"current": zero, "days_1_30": zero, "days_31_60": zero, "days_61_90": zero, "days_90_plus": zero}
         for cid in customer_ids
     }
-    for customer_id, transaction_date, balance_due in sales:
-        amount = balance_due or zero
-        if amount == 0 or transaction_date is None:
-            continue
-        due_date = transaction_date + timedelta(days=terms_by_id[customer_id])
-        days_overdue = (today - due_date).days
-        b = buckets[customer_id]
-        if days_overdue <= 0:
-            b["current"] += amount
-        elif days_overdue <= 30:
-            b["days_1_30"] += amount
-        elif days_overdue <= 60:
-            b["days_31_60"] += amount
-        elif days_overdue <= 90:
-            b["days_61_90"] += amount
-        else:
-            b["days_90_plus"] += amount
+
+    # ── 1. AR-exposed sales: SALE entries written to ar_ledger ─────────────────
+    ar_sale_rows = (
+        db.query(models.ArLedger.reference_id, models.ArLedger.amount_change)
+        .filter(models.ArLedger.reason == "SALE", models.ArLedger.reference_type == "sales")
+        .all()
+    )
+    principal_by_sale_id = {
+        int(reference_id): amount_change
+        for reference_id, amount_change in ar_sale_rows
+        if reference_id and reference_id.isdigit()
+    }
+    print(f"[AGING DEBUG] ar_sale_rows found: {len(ar_sale_rows)} raw, "
+          f"{len(principal_by_sale_id)} parsed into principal_by_sale_id "
+          f"(sale_ids: {sorted(principal_by_sale_id.keys())})")
+
+    sale_ids = list(principal_by_sale_id.keys())
+    sales = []
+    if sale_ids:
+        sales = (
+            db.query(models.Sale.sale_id, models.Sale.customer_id, models.Sale.transaction_date)
+            .filter(
+                models.Sale.sale_id.in_(sale_ids),
+                models.Sale.status != "Voided",
+                models.Sale.customer_id.in_(customer_ids),
+            )
+            .all()
+        )
+    print(f"[AGING DEBUG] sales after status/customer filter: {len(sales)} "
+          f"({[(s.sale_id, s.customer_id, s.transaction_date) for s in sales]})")
+
+    if sales:
+        relevant_sale_ids = [s.sale_id for s in sales]
+
+        # ── 2. Offsets — non-AR-charge payments via the bridge table ───────────
+        payment_rows = (
+            db.query(models.CustomerPaymentApplied.sale_id,
+                     func.sum(models.CustomerPaymentApplied.amount_applied))
+            .join(models.CustomerPayment,
+                  models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id)
+            .join(models.PaymentMode,
+                  models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
+            .filter(
+                models.CustomerPaymentApplied.sale_id.in_(relevant_sale_ids),
+                models.PaymentMode.is_ar_charge == False,
+            )
+            .group_by(models.CustomerPaymentApplied.sale_id)
+            .all()
+        )
+        payments_by_sale_id = dict(payment_rows)
+
+        # ── 3. Offsets — return credits ────────────────────────────────────────
+        return_rows = (
+            db.query(models.SalesReturn.sale_id, func.sum(models.SalesReturn.grand_total))
+            .filter(models.SalesReturn.sale_id.in_(relevant_sale_ids))
+            .group_by(models.SalesReturn.sale_id)
+            .all()
+        )
+        returns_by_sale_id = dict(return_rows)
+
+        # ── 4. Net outstanding per sale → bucket by days overdue ───────────────
+        for sale_id, customer_id, transaction_date in sales:
+            if transaction_date is None or customer_id not in buckets:
+                continue
+            principal = principal_by_sale_id.get(sale_id, zero)
+            outstanding_for_sale = (
+                principal
+                - payments_by_sale_id.get(sale_id, zero)
+                - returns_by_sale_id.get(sale_id, zero)
+            )
+            if outstanding_for_sale <= 0:
+                continue
+
+            due_date = transaction_date + timedelta(days=terms_by_id[customer_id])
+            days_overdue = (today - due_date).days
+            b = buckets[customer_id]
+            if days_overdue <= 0:
+                b["current"] += outstanding_for_sale
+            elif days_overdue <= 30:
+                b["days_1_30"] += outstanding_for_sale
+            elif days_overdue <= 60:
+                b["days_31_60"] += outstanding_for_sale
+            elif days_overdue <= 90:
+                b["days_61_90"] += outstanding_for_sale
+            else:
+                b["days_90_plus"] += outstanding_for_sale
 
     rows = []
     for c in customers:

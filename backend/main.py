@@ -109,6 +109,47 @@ def _seed_store_credit():
 _seed_store_credit()
 
 
+def _seed_admin_user():
+    """Idempotently create the initial ADMIN user from INIT_ADMIN_* env vars."""
+    username = os.getenv("INIT_ADMIN_USERNAME")
+    password = os.getenv("INIT_ADMIN_PASSWORD")
+    if not username or not password:
+        return
+
+    from core.database import SessionLocal
+    from auth.models import Employee, User, Role
+    from passlib.context import CryptContext
+
+    db = SessionLocal()
+    try:
+        if db.query(User).filter(User.username == username).first():
+            return
+        employee = Employee(first_name="Admin", last_name="User")
+        db.add(employee)
+        db.flush()
+        user = User(
+            employee_id=employee.employee_id,
+            username=username,
+            password_hash=CryptContext(schemes=["bcrypt"], deprecated="auto").hash(password),
+        )
+        db.add(user)
+        db.flush()
+        role = db.query(Role).filter(Role.role_name == "ADMIN").first()
+        if not role:
+            role = Role(role_name="ADMIN")
+            db.add(role)
+            db.flush()
+        user.roles.append(role)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+_seed_admin_user()
+
+
 app = FastAPI(title="Season ERP")
 
 # --- CORS ---

@@ -8,8 +8,13 @@ import jwt
 from core.database import get_db
 from auth import models
 
-SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key-change-this-in-production")
-ALGORITHM  = "HS256"
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY environment variable is not set. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+ALGORITHM = "HS256"
 
 _bearer = HTTPBearer()
 
