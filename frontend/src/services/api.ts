@@ -294,15 +294,16 @@ export interface ArLedgerOut {
 }
 
 export interface CustomerAgingOut {
-  customer_id: number
+  customer_id:   number
   customer_name: string
-  terms_days: number
-  current: number
-  days_1_30: number
-  days_31_60: number
-  days_61_90: number
-  days_90_plus: number
-  total_outstanding: number
+  invoice_id:    number
+  invoice_date:  string   // "YYYY-MM-DD"
+  due_date:      string   // "YYYY-MM-DD"
+  current_amt:   number
+  days_1_30:     number
+  days_31_60:    number
+  days_61_90:    number
+  days_91_plus:  number
 }
 
 export interface CustomerOut {
@@ -533,12 +534,9 @@ export const salesApi = {
     },
     recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
-    aging: (params?: { search?: string; include_zero_balance?: boolean }) => {
-      const q = new URLSearchParams()
-      if (params?.search)               q.set('search', params.search)
-      if (params?.include_zero_balance) q.set('include_zero_balance', 'true')
-      const qs = q.toString()
-      return get<CustomerAgingOut[]>(`/sales/customers/aging${qs ? '?' + qs : ''}`)
+    aging: (params?: { search?: string }) => {
+      const qs = params?.search ? `?search=${encodeURIComponent(params.search)}` : ''
+      return get<CustomerAgingOut[]>(`/sales/customers/aging${qs}`)
     },
   },
   returns: {
@@ -564,7 +562,8 @@ export const salesApi = {
     create:  (p: {
       sale_id?: number | null; location_id?: number | null
       customer_id?: number | null; disposition?: string
-      reason?: string; items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[]
+      reason?: string; return_date?: string
+      items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[]
     }) => post<SalesReturnOut>('/sales/returns', p),
     exchange: (
       p: { sale_id: number; location_id?: number | null; reason?: string

@@ -132,16 +132,17 @@ class CustomerOut(BaseModel):
 # AR AGING REPORT  (read-only; computed server-side)
 # ==========================================
 
-class CustomerAgingOut(BaseModel):
-    customer_id: int
+class AgingRowOut(BaseModel):
+    customer_id:   int
     customer_name: str
-    terms_days: int
-    current: Decimal
-    days_1_30: Decimal
-    days_31_60: Decimal
-    days_61_90: Decimal
-    days_90_plus: Decimal
-    total_outstanding: Decimal
+    invoice_id:    int
+    invoice_date:  date
+    due_date:      date
+    current_amt:   Decimal
+    days_1_30:     Decimal
+    days_31_60:    Decimal
+    days_61_90:    Decimal
+    days_91_plus:  Decimal
 
 
 # ==========================================
@@ -296,6 +297,7 @@ class SalesSummaryResponse(BaseModel):
     non_merchandise_revenue: Decimal
     variances:               Decimal
     returns_total:           Decimal
+    cash_refunds_total:      Decimal
     total_revenue:           Decimal
     gross_profit:            Decimal
     uncosted_revenue:        Decimal
@@ -432,6 +434,7 @@ class SalesReturnCreate(BaseModel):
     customer_id: Optional[int] = None   # For blind returns with a registered customer
     disposition: Optional[str] = None   # 'cash_refund' or 'credit_to_account'
     reason: Optional[str] = None
+    return_date: Optional[date] = None
     items: List[SalesReturnItemIn]
 
 
@@ -452,7 +455,7 @@ class SalesReturnOut(BaseModel):
     return_pid: Optional[str] = None
     sale_id: Optional[int] = None
     location_id: int
-    return_date: Optional[datetime] = None
+    return_date: Optional[date] = None
     reason: Optional[str] = None
     grand_total: Decimal
     disposition: Optional[str] = None

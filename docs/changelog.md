@@ -1,5 +1,170 @@
 # Changelog
 
+## 2026-06-11 — Docs: update sales_ledger_basic.md to reflect session changes
+
+**`docs/sales_ledger_basic.md`** — Seven targeted updates: (1) Revenue card ASCII diagram: added Returns row between Cart Discounts and Non-Merch Revenue, corrected Total Revenue example total. (2) Merchandise Gross definition: changed source field from `subtotal_amount` to `merchandise_subtotal`, added "Inventory and Bundle line items only" clause. (3) Non-Merchandise Revenue: added note that it is additive to Merchandise Gross in the formula, not a subset of it. (4) Total Revenue formula: added `- Returns` term. (5) Collections card diagram: standardised box-drawing characters, renamed "Cash Refund" row to "Cash Refunds", added three explanatory lines (conditional display, warning color, net-of-refunds totals). (6) JSON schema: added missing `returns_total` field in correct position. (7) On Post step 6 (cash_refund disposition): replaced stale "No AR entry" note with the four actual behaviors — AR ledger entry, outstanding_balance update (registered customers only), negative CustomerPayment, CustomerPaymentApplied. (8) Return Credit Policy: replaced both registered-customer and walk-in blocks with accurate current behavior including AR entry and Collections deduction for cash refunds. (9) Backend Notes: added `Sale model — merchandise_subtotal` section.
+
+---
+
+## 2026-06-11 — Migration: convert sales_returns.return_date from TIMESTAMPTZ to DATE
+
+**`backend/alembic/versions/d4e5f6a7b8c9_convert_sales_return_date_to_date.py`** — new migration (`down_revision = 'c3d4e5f6a7b8'`). Upgrades `sales.sales_returns.return_date` from `TIMESTAMP WITH TIME ZONE DEFAULT now()` to `DATE NOT NULL` with no default. The USING clause casts via `AT TIME ZONE 'Asia/Manila'` so existing timestamps are bucketed into the correct Manila business day. A defensive UPDATE fills any NULL rows before SET NOT NULL is applied. Downgrade restores TIMESTAMPTZ, drops NOT NULL, and reinstates the `now()` default.
+
+---
+
+## 2026-06-11 — Migration: backfill merchandise_subtotal for pre-migration Posted sales
+
+**`backend/alembic/versions/e5f6a7b8c9d0_backfill_merchandise_subtotal.py`** — new migration (`down_revision = 'd4e5f6a7b8c9'`). The previous `c3d4e5f6a7b8` migration added `merchandise_subtotal` with `DEFAULT 0`, leaving all existing Posted sales at zero. This migration runs a single correlated UPDATE that sets `merchandise_subtotal` on every Posted sale to the sum of `sale_items.line_total` for lines whose variant belongs to a product with `product_type = 'Inventory'`. Downgrade is a no-op.
+
+---
+
+## 2026-06-11 — Revenue card: fix double-counting of Service/Non-Inventory items
+
+**`backend/sales/models.py`** — `Sale`: added `merchandise_subtotal = Column(Numeric(15, 2), nullable=False, server_default='0')` alongside `subtotal_amount`. Stores only the sum of `Inventory`-type line items (excludes Service and Non-Inventory). `subtotal_amount` is unchanged — it is still the full transaction subtotal used for cart-discount basis and footer totals.
+
+**`backend/sales/router.py`** — `_recalculate_totals`: added `merch_subtotal` computation via lazy-loaded `item.variant.product.product_type`; writes `sale.merchandise_subtotal`. `post_draft` item loop: builds `inventory_variant_ids: set[int]` during the existing loop (no new query — `variant_obj.product` is already eager-loaded via `selectinload`); after the subtotal sum, computes `merchandise_subtotal` by filtering `new_items` against the set; writes `sale.merchandise_subtotal` alongside `sale.subtotal_amount`. `get_sales_summary` step 2: switched from `models.Sale.subtotal_amount` to `models.Sale.merchandise_subtotal` for the `merchandise_gross` aggregation — this eliminates the double-counting that previously occurred because `non_merchandise_revenue` was independently summing Service/Non-Inventory line items and then adding them on top of a `merchandise_gross` that already included them.
+
+**`backend/alembic/versions/a3b4c5d6e7f8_sales_transaction_date_default_ph_local.py`** — corrected `down_revision` from the nonexistent `'f6e5d4c3b2a1'` to `'a1b2c3d4e5f6'` (chain root), repairing the broken Alembic revision chain.
+
+**`backend/alembic/versions/c3d4e5f6a7b8_add_merchandise_subtotal_to_sales.py`** — new migration (`down_revision = 'a3b4c5d6e7f8'`): `ALTER TABLE sales.sales ADD COLUMN merchandise_subtotal NUMERIC(15, 2) NOT NULL DEFAULT 0`. Downgrade drops the column.
+
+---
+
+## 2026-06-11 — Cash refund return flow: AR entry, negative payment, Collections deduction
+
+**`backend/sales/router.py`** — `_do_return`: added `elif` branch for `disposition = 'cash_refund'` that writes an `ArLedger` RETURN entry and decrements `customer.outstanding_balance`, matching the existing `credit_to_account` logic (skipped when no customer is linked). Added a separate block that, for any cash-refund return against a linked sale, queries the largest standard (non-AR) tender on the original sale and writes a negative `CustomerPayment` + `CustomerPaymentApplied` row against that sale, so the Collections panel reflects the cash paid out. `get_sales_summary`: added `cash_refunds_total` aggregation (sum of `SalesReturn.grand_total` where `disposition = 'cash_refund'`, filtered by same date/location/customer scope as `returns_total`); included in both the early-return path and the main return.
+
+**`backend/sales/schemas.py`** — `SalesSummaryResponse`: added `cash_refunds_total: Decimal` field.
+
+**`frontend/src/pages/sales/SalesLedger.tsx`** — Collections card: added Cash Refunds row (red negative amount, Physical badge) visible only when `cash_refunds_total > 0`. Total Physical and Total Collected now display backend values adjusted by `cash_refunds_total` (display-only; backend values unchanged). Fixed Total Virtual label alignment — moved `flex-1` to the outer `span` wrapping the `Tip` component so it participates correctly in the flex layout.
+
+---
+
+## 2026-06-11 — get_sales_summary: fix early-return zeroing returns_total
+
+**`backend/sales/router.py`** — `get_sales_summary` returned early with `returns_total=zero` whenever `base_sale_ids` was empty (no Posted sales in the date window). Before the return_date fix this was harmless — returns were linked to sales, so no sales meant no returns. After the fix, returns are filtered by `return_date` independently, so a day with returns but no sales would show `returns_total=0` in the Revenue card while the table tfoot correctly deducted them. Fixed by moving the `ret_q` block above the early-return check. The early-return path now uses the computed `returns_total` and sets `total_revenue=-returns_total` (net refunds, no sales revenue).
+
+---
+
+## 2026-06-11 — list_sales: fix runtime error building SaleOut for return rows
+
+**`backend/sales/router.py`** — When constructing the `SaleOut` pseudo-row for a `SalesReturn` inside `list_sales`, `transaction_date` was assigned `r.return_date` directly. For existing rows whose `return_date` column still holds a timezone-aware `datetime` (before the Alembic migration converts the column to `Date`), this caused a type error because `SaleOut.transaction_date` expects a plain `date`. Fixed with a defensive guard: `r.return_date.date() if isinstance(r.return_date, datetime) else r.return_date`, which handles both the old `datetime` values and the new plain `date` values.
+
+---
+
+## 2026-06-11 — list_returns: fix customer filter excluding blind returns
+
+**`backend/sales/router.py`** — The `customer_id` filter in `list_returns` used a subquery through `Sale.customer_id`, which excluded blind returns (they have `sale_id = NULL` and therefore never appeared in the subquery result). Replaced with a direct `SalesReturn.customer_id == customer_id` filter, which covers both linked and blind returns.
+
+---
+
+## 2026-06-11 — Returns list: fix Customer column in table and XLSX export
+
+**`frontend/src/pages/sales/Returns.tsx`** — The "Customer" table column keyed off `r.sale_id` instead of `r.customer_id`, causing linked returns with a registered customer to always show "—" and blind returns with a registered customer to always show "Walk-in". Fixed to resolve `customerMap.get(r.customer_id)` (falling back to "Walk-in" when `customer_id` is null). The XLSX export had no Customer column at all; added `'Customer'` between "Original Sale" and "Location" using the same lookup.
+
+---
+
+## 2026-06-11 — Returns list: fix return_date display in table and XLSX export
+
+**`frontend/src/pages/sales/Returns.tsx`** — Added `fmtDateOnly` and switched `r.return_date` from `fmtDate` to `fmtDateOnly` in both the table "Date" column and the XLSX export cell. `fmtDate` uses `new Date(s).toLocaleString(...)` with `timeStyle: 'short'`, which parsed the plain date string as UTC midnight and rendered a spurious time component that shifted with the viewer's timezone. `fmtDateOnly` splits on `'-'` and constructs via `Date.UTC` so the displayed day is always the stored calendar date with no time portion.
+
+---
+
+## 2026-06-11 — ReturnDetail: fix return_date display
+
+**`frontend/src/pages/sales/ReturnDetail.tsx`** — Added `fmtDateOnly` (splits `"YYYY-MM-DD"` and constructs via `Date.UTC` to avoid timezone shifting) and switched the "Date" field from `fmtDate` to `fmtDateOnly`. Previously the date-only string was parsed by `new Date()` as UTC midnight and then rendered with a time component, which could show a wrong day or a meaningless "12:00 AM" time. Now displays the stored calendar date with no time portion.
+
+---
+
+## 2026-06-11 — User-supplied return_date on sales returns
+
+**`backend/sales/models.py`** — Changed `SalesReturn.return_date` from `DateTime(timezone=True)` with a `server_default=func.now()` to a plain `Date, nullable=False` column, matching the pattern of `Sale.transaction_date`.
+
+**`backend/sales/schemas.py`** — Added `return_date: Optional[date] = None` to `SalesReturnCreate`. Changed `SalesReturnOut.return_date` type from `Optional[datetime]` to `Optional[date]`.
+
+**`backend/sales/router.py`** — In `_do_return`: resolves `payload.return_date` against `_ph_today()` as the fallback and writes the result to the `SalesReturn` constructor. In `list_sales`: updated the returns date filter from `_ph_day_bounds` (datetime range) to plain date comparison using `txn_date_from`/`txn_date_to`, consistent with the sales filter; updated return row construction to use `r.return_date` directly (no longer needs `.date()` coercion) and sets `posted_at=None`. In `get_sales_summary`: replaced the split linked-returns (`sale_id.in_`) + blind-returns (datetime) query with a single query filtered by `SalesReturn.return_date` date range, aligning the Revenue card totals with the table rows.
+
+**`frontend/src/pages/sales/ReturnNew.tsx`** — Added `todayManila()` helper and `returnDate` state initialized to today in Manila time. Replaced the read-only static sale-date display with an editable `<input type="date">` labelled "Return Date", always visible for both linked and blind returns, with `max` capped at today and a fallback to today if cleared. Added `return_date` validation in `handleSubmit` and wired the value into the API payload.
+
+**`frontend/src/services/api.ts`** — Added `return_date?: string` to the `salesApi.returns.create` function type.
+
+---
+
+## 2026-06-11 — SaleDetail: Tender section fixes for AR Charge sales
+
+**`frontend/src/pages/sales/SaleDetail.tsx`** — Two display fixes in the Tender table.
+
+**Money Type badge**: AR Charge tenders were showing "Physical" or "Virtual" depending on the payment mode's `is_physical` flag, neither of which describes a deferred AR obligation. Added `isArCharge = fallback?.is_ar_charge ?? false` per row; when true the badge now reads **On Account** in amber instead of the physical/virtual colors.
+
+**Footer totals**: `physical` and `virtual` subtotals and the `Total Tendered` sum previously included AR Charge amounts. For a fully AR-charged sale this made `Total Tendered` equal to `Grand Total` while the header simultaneously showed the same amount as "On Account", implying the money was both collected and still owed. Added an `isAr` predicate to exclude AR Charge tenders from `physical` and `virtual`. A new **On Account** footer row (amber, conditional on `onAccount > 0`) shows the deferred portion separately. `Total Tendered` now reflects only cash and card actually collected at the register.
+
+---
+
+## 2026-06-11 — SaleDetail: balance_due display for AR Charge sales
+
+**`frontend/src/pages/sales/SaleDetail.tsx`** — After the backend fix that correctly sets `balance_due = grand_total` for AR-charged sales, the "Balance Due" field was rendering the full amount in red, which looked like a missed cash collection. Added `arChargedTotal` (sum of tenders whose payment mode has `is_ar_charge = true`) and `isArObligation` (AR charge present and `balance_due > 0`). When `isArObligation` is true, the label changes to "On Account" and the value renders in neutral color instead of red, making it clear the balance is an AR obligation already captured in the ledger, not an outstanding cash debt.
+
+---
+
+## 2026-06-11 — AR Charge payment_status and Sales Ledger return filter fixes
+
+**`backend/sales/router.py`** — Two bugs fixed.
+
+**Fix 1 — AR Charge sales incorrectly stamped as Paid (`post_draft`, step 11):**
+`balance_due` and `payment_status` were computed from `total_applied`, which accumulated every tender amount including AR Charge. AR Charge is deferred credit — no cash is collected — so a fully AR-charged sale was storing `payment_status = "Paid"` even though the full amount remained owed. Changed the basis to `standard_applied` (which already excludes AR Charge and AR Credit tenders) so that:
+- Fully AR-charged sale → `payment_status = "Unpaid"`, `balance_due = grand_total`
+- Partial AR Charge + cash → `payment_status = "Partial"`, `balance_due = grand_total minus cash portion`
+- Cash-only sale → unchanged, `payment_status = "Paid"`
+The `outstanding_balance` update logic (step 12) was not changed.
+
+**Fix 2 — Returns not filtered by customer in `list_sales`:**
+The returns sub-query inside `list_sales` filtered by date, `location_id`, and `search` but never applied `customer_id`. When `list_sales` was called with `customer_id`, sales were correctly restricted to that customer but returns from all other customers in the date range were still appended to the response. Added `rq = rq.filter(models.SalesReturn.customer_id == customer_id)` alongside the existing filters.
+
+---
+
+## 2026-06-11 — AR Aging totals row showing NaN
+
+**`frontend/src/pages/customers/CustomerAging.tsx`** — The five bucket fields in the `totals` reducer were summed with `+` directly against the raw API values. FastAPI serialises `Decimal` fields as strings in the JSON response, so `+` was string-concatenating (`"2000.00" + "500.00"` → `"2000.00500.00"`) rather than adding numerically, producing NaN in the totals row. Fixed by wrapping each field with `Number()` before addition in the reducer (`Number(r.current_amt)`, etc.).
+
+---
+
+## 2026-06-11 — AR Aging Report: per-invoice redesign and invoice-date fix
+
+### Redesign — one row per invoice (per revised `docs/customers_aging.md`)
+
+Changed the aging report from a one-row-per-customer bucket summary to a one-row-per-invoice detail view. The new shape exposes each outstanding invoice individually, which lets staff identify specific invoices to chase rather than just knowing a customer has something overdue.
+
+**`backend/sales/schemas.py`** — Replaced `CustomerAgingOut` (per-customer fields: `terms_days`, `current`, `days_90_plus`, `total_outstanding`) with `AgingRowOut` (per-invoice fields: `invoice_id`, `invoice_date`, `due_date`, `current_amt`, `days_1_30`, `days_31_60`, `days_61_90`, `days_91_plus`). Field rename `days_90_plus` → `days_91_plus` corrects the off-by-one in the old name (the bucket starts at day 91, not 90).
+
+**`backend/sales/router.py` (`get_ar_aging`)** — Rewrote response shape to emit one `AgingRowOut` per outstanding invoice, sorted `customer_name ASC, invoice_date ASC`. Additional corrections in the same pass:
+- Removed `include_zero_balance` query param (superseded by the per-invoice model — customers with no outstanding invoices simply produce no rows).
+- Removed the three `[AGING DEBUG] print()` statements that were left in production code.
+- Fixed the global `ar_ledger` table scan: the prior query loaded every SALE entry in the entire ledger before filtering. Now filtered by `customer_id.in_(customer_ids)` up front.
+- Return credit offset now explicitly filters `disposition = 'credit_to_account'`; the old query summed all `sales_returns.grand_total` regardless of disposition, incorrectly offsetting cash-refund returns against the AR balance.
+
+**`frontend/src/pages/customers/CustomerAging.tsx`** — Complete rewrite to match the new per-invoice shape:
+- Removed: balance filter toggle (Outstanding only / All active), bucket filter multi-select, column sorting controls.
+- Columns: Customer, Invoice #, Invoice Date, Due Date, Current, 1–30 Days, 31–60 Days, 61–90 Days, 90+ Days.
+- Customer name renders only on the first row of each customer group (conditional rendering, no rowspan).
+- Zero-value bucket cells render blank; dates formatted `MMM DD, YYYY`.
+- Sticky `<tfoot>` totals row labeled "Total", spanning the first four columns.
+- XLSX export reflects visible (filtered) rows plus the totals row; column headers match the table exactly.
+- Local `AgingRowOut` interface defined in the component; result cast from the stale `api.ts` type via `as unknown as Promise<AgingRowOut[]>`.
+
+**`frontend/src/services/api.ts`** — Updated `CustomerAgingOut` interface to the new per-invoice fields. Removed `include_zero_balance` from the `aging()` function signature and simplified the query-string builder accordingly.
+
+---
+
+### Bug fix — invoice date used UTC system timestamp instead of business date
+
+**Root cause**: `ar_ledger.occurred_at` is a PostgreSQL `server_default=func.now()` column — it stores the UTC wall-clock time when the INSERT executed, not the business date of the sale. The aging query was using `occurred_at.date()` as `invoice_date`. Because `transaction_date` is Manila-local (UTC+8) and `occurred_at` is UTC, sales posted between 00:00 and 07:59 Manila time could have an `occurred_at.date()` one day behind their actual `transaction_date`. Backdated sales (where the cashier explicitly supplies an earlier `transaction_date`) would age from today's timestamp rather than the stated invoice date.
+
+**Fix** (`sales/router.py`, `get_ar_aging`): replaced the `occurred_at` column in the `ar_ledger` query with a separate `Sale` query that fetches `sale.transaction_date` and excludes voided sales in a single `IN` pass. `transaction_date` is a plain `date` column (Manila-local, user-supplied at post time, defaults to `_ph_today()`), so no timezone conversion is needed. The old separate voided-sale exclusion query is eliminated — a voided sale has no entry in `transaction_date_by_id` and falls out of `invoice_rows` naturally.
+
+This fix works correctly for all existing historical rows: `sale.transaction_date` has always held the correct business date regardless of when the row was posted.
+
+---
+
 ## 2026-06-08 — AR Aging Report: rebuilt on the AR-ledger bridge-table approach
 
 Fixed a bug where AR-charge sales never appeared in the AR Aging Report (`GET /sales/customers/aging`).

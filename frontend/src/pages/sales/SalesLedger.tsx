@@ -95,6 +95,11 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
   const varColor = summary.variances > 0 ? 'text-emerald-400' : summary.variances < 0 ? 'text-red-400' : 't-text-3'
   const profitColor = summary.gross_profit >= 0 ? 'text-emerald-400' : 'text-red-400'
 
+  type SummaryWithRefunds = SalesSummaryResponse & { cash_refunds_total?: number }
+  const cashRefundsTotal = Number((summary as SummaryWithRefunds).cash_refunds_total ?? 0)
+  const adjPhysical      = Number(summary.total_physical) - cashRefundsTotal
+  const adjCollected     = adjPhysical + Number(summary.total_virtual)
+
   return (
     <div className="shrink-0 border-b t-border px-4 py-3 flex gap-3 overflow-x-auto">
 
@@ -178,22 +183,33 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
               <span className="tabular-nums t-text-1 text-right w-24 shrink-0">{php(c.amount)}</span>
             </div>
           ))}
+          {cashRefundsTotal > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="t-text-2 min-w-0 flex-1 truncate">Cash Refunds</span>
+              <span className="text-[9px] font-medium uppercase px-1 py-0.5 rounded shrink-0 bg-blue-950 text-blue-400">
+                Phys
+              </span>
+              <span className="tabular-nums text-red-400 text-right w-24 shrink-0">−{php(cashRefundsTotal)}</span>
+            </div>
+          )}
         </div>
         {summary.collections.length > 0 && (
           <div className="border-t t-border pt-1.5 space-y-1 text-xs">
             <div className="flex items-center gap-2">
               <span className="t-text-3 flex-1">Total Physical</span>
-              <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(summary.total_physical)}</span>
+              <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(adjPhysical)}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Tip tip="Digital payments collected but not physically in the cash drawer.">
-                <span className="t-text-3 cursor-help underline decoration-dotted t-border-strong underline-offset-2 flex-1">Total Virtual</span>
-              </Tip>
+              <span className="t-text-3 flex-1">
+                <Tip tip="Digital payments collected but not physically in the cash drawer.">
+                  <span className="cursor-help underline decoration-dotted t-border-strong underline-offset-2">Total Virtual</span>
+                </Tip>
+              </span>
               <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(summary.total_virtual)}</span>
             </div>
             <div className="flex items-center gap-2 font-semibold">
               <span className="t-text-2 flex-1">Total Collected</span>
-              <span className="tabular-nums t-text-1 text-right w-24 shrink-0">{php(summary.total_collected)}</span>
+              <span className="tabular-nums t-text-1 text-right w-24 shrink-0">{php(adjCollected)}</span>
             </div>
           </div>
         )}

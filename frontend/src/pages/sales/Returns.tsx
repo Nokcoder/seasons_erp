@@ -14,6 +14,11 @@ function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
   return new Date(s).toLocaleString('en-PH', { dateStyle: 'short', timeStyle: 'short' })
 }
+function fmtDateOnly(s: string | null | undefined) {
+  if (!s) return '—'
+  const [y, m, d] = s.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-PH', { dateStyle: 'medium', timeZone: 'UTC' })
+}
 function fmt(n: number | null | undefined) {
   if (n == null) return '—'
   return Number(n).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -60,8 +65,9 @@ export default function Returns() {
   function handleExport() {
     const ws = XLSX.utils.json_to_sheet((returns as SalesReturnOut[]).map(r => ({
       'Return PID':    r.return_pid ?? '',
-      'Date':          fmtDate(r.return_date),
+      'Date':          fmtDateOnly(r.return_date),
       'Original Sale': r.sale_id ?? '',
+      'Customer':      r.customer_id ? (customerMap.get(r.customer_id) ?? '') : '',
       'Location':      locationMap.get(r.location_id) ?? '',
       'Return Total':  r.grand_total,
       'Exchange Sale': r.exchange_sale_pid ?? '',
@@ -154,7 +160,7 @@ export default function Returns() {
                     onClick={() => navigate(`/sales/returns/${r.return_id}`)}
                     className="border-b t-border hover:t-bg-surface cursor-pointer transition-colors">
                     <td className="px-3 py-2 font-mono t-text-1">{r.return_pid ?? '—'}</td>
-                    <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDate(r.return_date)}</td>
+                    <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDateOnly(r.return_date)}</td>
                     <td className="px-3 py-2">
                       {r.sale_id
                         ? <button onClick={e => { e.stopPropagation(); navigate(`/sales/ledger/${r.sale_id}`) }}
@@ -164,7 +170,7 @@ export default function Returns() {
                         : <span className="t-text-4">Blind</span>}
                     </td>
                     <td className="px-3 py-2 t-text-2">
-                      {r.sale_id ? '—' : 'Walk-in'}
+                      {r.customer_id ? customerMap.get(r.customer_id) ?? '—' : 'Walk-in'}
                     </td>
                     <td className="px-3 py-2 t-text-3">{locationMap.get(r.location_id) ?? '—'}</td>
                     <td className="px-3 py-2 tabular-nums t-text-1 font-medium text-right">₱{fmt(r.grand_total)}</td>

@@ -328,159 +328,161 @@ def create_customer(
     return customer
 
 
-@router.get("/customers/aging", response_model=List[schemas.CustomerAgingOut])
+@router.get("/customers/aging", response_model=List[schemas.AgingRowOut])
 def get_ar_aging(
     search: Optional[str] = None,
-    include_zero_balance: bool = False,
     db: Session = Depends(get_db),
     _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
-    """AR Aging Report — buckets each active customer's outstanding AR-exposed
-    sales by days past due.
+    """AR Aging Report — one row per outstanding invoice, sorted customer_name ASC,
+    invoice_date ASC.
 
-    Bridge-table approach (never reads sales.balance_due / sales.payment_status —
-    an AR-charge tender marks a sale "Paid" at post time even though the
-    customer still owes the full amount on credit):
-
-      - AR-exposed sales = ar_ledger rows with reason='SALE', reference_type='sales'
-        (written only for customer-linked posted sales — see post_draft step 9).
-      - principal = ar_ledger.amount_change for that entry (== grand_total at post).
-      - non_ar_charge_payments = SUM(customer_payment_applied.amount_applied)
-        joined through customer_payments -> payment_modes, excluding is_ar_charge
-        tenders (an AR-charge tender defers the obligation rather than settling it;
-        is_ar_credit tenders genuinely draw down the account and are kept as offsets).
-      - return_credits = SUM(sales_returns.grand_total) for returns linked to the sale.
-      - outstanding_for_sale = principal - non_ar_charge_payments - return_credits;
-        only rows with outstanding_for_sale > 0 age into the report.
-      - due_date = transaction_date + customer.terms_days (computed fresh — the
-        stored Sale.due_date is left null for COD/terms_days==0, but an unpaid
-        COD sale is due the day it was made, so it must still age normally).
-      - days_overdue = today - due_date.
+    Bridge-table calculation (never reads sale.balance_due):
+      outstanding = ar_ledger SALE amount_change
+                  - SUM(customer_payment_applied.amount_applied WHERE NOT is_ar_charge)
+                  - SUM(sales_returns.grand_total WHERE disposition='credit_to_account')
+    Only invoices with outstanding > 0 are emitted.
     """
     today = datetime.now(timezone.utc).date()
+    zero  = Decimal("0")
 
+    # 1. Active customers (optional name filter)
     q = db.query(models.Customer).filter(models.Customer.is_deleted == False)
     if search:
         q = q.filter(models.Customer.customer_name.ilike(f"%{search}%"))
-    if not include_zero_balance:
-        q = q.filter(models.Customer.outstanding_balance > 0)
     customers = q.order_by(models.Customer.customer_name).all()
-    print(f"[AGING DEBUG] customers passing pre-filter: {len(customers)} "
-          f"({[c.customer_name for c in customers]})")
     if not customers:
         return []
 
     customer_ids = [c.customer_id for c in customers]
-    terms_by_id  = {c.customer_id: c.terms_days for c in customers}
+    customer_map = {c.customer_id: c for c in customers}
 
-    zero = Decimal("0")
-    buckets = {
-        cid: {"current": zero, "days_1_30": zero, "days_31_60": zero, "days_61_90": zero, "days_90_plus": zero}
-        for cid in customer_ids
-    }
-
-    # ── 1. AR-exposed sales: SALE entries written to ar_ledger ─────────────────
+    # 2. AR-exposed SALE entries for these customers only (avoids full-table scan)
     ar_sale_rows = (
-        db.query(models.ArLedger.reference_id, models.ArLedger.amount_change)
-        .filter(models.ArLedger.reason == "SALE", models.ArLedger.reference_type == "sales")
+        db.query(
+            models.ArLedger.customer_id,
+            models.ArLedger.reference_id,
+            models.ArLedger.amount_change,
+        )
+        .filter(
+            models.ArLedger.reason == "SALE",
+            models.ArLedger.reference_type == "sales",
+            models.ArLedger.customer_id.in_(customer_ids),
+        )
         .all()
     )
-    principal_by_sale_id = {
-        int(reference_id): amount_change
-        for reference_id, amount_change in ar_sale_rows
-        if reference_id and reference_id.isdigit()
-    }
-    print(f"[AGING DEBUG] ar_sale_rows found: {len(ar_sale_rows)} raw, "
-          f"{len(principal_by_sale_id)} parsed into principal_by_sale_id "
-          f"(sale_ids: {sorted(principal_by_sale_id.keys())})")
+    if not ar_sale_rows:
+        return []
 
-    sale_ids = list(principal_by_sale_id.keys())
-    sales = []
-    if sale_ids:
-        sales = (
-            db.query(models.Sale.sale_id, models.Sale.customer_id, models.Sale.transaction_date)
-            .filter(
-                models.Sale.sale_id.in_(sale_ids),
-                models.Sale.status != "Voided",
-                models.Sale.customer_id.in_(customer_ids),
-            )
-            .all()
+    parsed = [
+        (cid, int(ref_id), amount_change)
+        for cid, ref_id, amount_change in ar_sale_rows
+        if ref_id and ref_id.isdigit()
+    ]
+    if not parsed:
+        return []
+
+    # 3. Fetch transaction_date from Sale and exclude voided sales in one query.
+    #    Using sale.transaction_date (the business date, Manila-local) rather than
+    #    ar_ledger.occurred_at (UTC system timestamp) ensures correct aging for
+    #    backdated sales and avoids the UTC/PHT midnight drift.
+    all_sale_ids = [sale_id for _, sale_id, _ in parsed]
+    sale_date_rows = (
+        db.query(models.Sale.sale_id, models.Sale.transaction_date)
+        .filter(
+            models.Sale.sale_id.in_(all_sale_ids),
+            models.Sale.status != "Voided",
         )
-    print(f"[AGING DEBUG] sales after status/customer filter: {len(sales)} "
-          f"({[(s.sale_id, s.customer_id, s.transaction_date) for s in sales]})")
+        .all()
+    )
+    transaction_date_by_id = {sid: td for sid, td in sale_date_rows}
 
-    if sales:
-        relevant_sale_ids = [s.sale_id for s in sales]
+    invoice_rows = [
+        {
+            "customer_id":  cid,
+            "sale_id":      sale_id,
+            "principal":    amount_change,
+            "invoice_date": transaction_date_by_id[sale_id],
+        }
+        for cid, sale_id, amount_change in parsed
+        if sale_id in transaction_date_by_id
+    ]
+    if not invoice_rows:
+        return []
 
-        # ── 2. Offsets — non-AR-charge payments via the bridge table ───────────
-        payment_rows = (
-            db.query(models.CustomerPaymentApplied.sale_id,
-                     func.sum(models.CustomerPaymentApplied.amount_applied))
-            .join(models.CustomerPayment,
-                  models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id)
-            .join(models.PaymentMode,
-                  models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
-            .filter(
-                models.CustomerPaymentApplied.sale_id.in_(relevant_sale_ids),
-                models.PaymentMode.is_ar_charge == False,
-            )
-            .group_by(models.CustomerPaymentApplied.sale_id)
-            .all()
+    active_sale_ids = [r["sale_id"] for r in invoice_rows]
+
+    # 4. Payment offsets — non-AR-charge tenders only
+    payments_by_sale_id = dict(
+        db.query(
+            models.CustomerPaymentApplied.sale_id,
+            func.sum(models.CustomerPaymentApplied.amount_applied),
         )
-        payments_by_sale_id = dict(payment_rows)
-
-        # ── 3. Offsets — return credits ────────────────────────────────────────
-        return_rows = (
-            db.query(models.SalesReturn.sale_id, func.sum(models.SalesReturn.grand_total))
-            .filter(models.SalesReturn.sale_id.in_(relevant_sale_ids))
-            .group_by(models.SalesReturn.sale_id)
-            .all()
+        .join(
+            models.CustomerPayment,
+            models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id,
         )
-        returns_by_sale_id = dict(return_rows)
+        .join(
+            models.PaymentMode,
+            models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id,
+        )
+        .filter(
+            models.CustomerPaymentApplied.sale_id.in_(active_sale_ids),
+            models.PaymentMode.is_ar_charge == False,
+        )
+        .group_by(models.CustomerPaymentApplied.sale_id)
+        .all()
+    )
 
-        # ── 4. Net outstanding per sale → bucket by days overdue ───────────────
-        for sale_id, customer_id, transaction_date in sales:
-            if transaction_date is None or customer_id not in buckets:
-                continue
-            principal = principal_by_sale_id.get(sale_id, zero)
-            outstanding_for_sale = (
-                principal
-                - payments_by_sale_id.get(sale_id, zero)
-                - returns_by_sale_id.get(sale_id, zero)
-            )
-            if outstanding_for_sale <= 0:
-                continue
+    # 5. Return credit offsets — credit_to_account returns only
+    returns_by_sale_id = dict(
+        db.query(models.SalesReturn.sale_id, func.sum(models.SalesReturn.grand_total))
+        .filter(
+            models.SalesReturn.sale_id.in_(active_sale_ids),
+            models.SalesReturn.disposition == "credit_to_account",
+        )
+        .group_by(models.SalesReturn.sale_id)
+        .all()
+    )
 
-            due_date = transaction_date + timedelta(days=terms_by_id[customer_id])
-            days_overdue = (today - due_date).days
-            b = buckets[customer_id]
-            if days_overdue <= 0:
-                b["current"] += outstanding_for_sale
-            elif days_overdue <= 30:
-                b["days_1_30"] += outstanding_for_sale
-            elif days_overdue <= 60:
-                b["days_31_60"] += outstanding_for_sale
-            elif days_overdue <= 90:
-                b["days_61_90"] += outstanding_for_sale
-            else:
-                b["days_90_plus"] += outstanding_for_sale
+    # 6. Build per-invoice result rows
+    result: list[schemas.AgingRowOut] = []
+    for row in invoice_rows:
+        cid          = row["customer_id"]
+        sale_id      = row["sale_id"]
+        principal    = row["principal"]
+        invoice_date = row["invoice_date"]
 
-    rows = []
-    for c in customers:
-        b = buckets[c.customer_id]
-        total = b["current"] + b["days_1_30"] + b["days_31_60"] + b["days_61_90"] + b["days_90_plus"]
-        rows.append(schemas.CustomerAgingOut(
-            customer_id=c.customer_id,
-            customer_name=c.customer_name,
-            terms_days=c.terms_days,
-            current=b["current"],
-            days_1_30=b["days_1_30"],
-            days_31_60=b["days_31_60"],
-            days_61_90=b["days_61_90"],
-            days_90_plus=b["days_90_plus"],
-            total_outstanding=total,
+        customer = customer_map.get(cid)
+        if customer is None or invoice_date is None:
+            continue
+
+        outstanding = (
+            principal
+            - payments_by_sale_id.get(sale_id, zero)
+            - returns_by_sale_id.get(sale_id, zero)
+        )
+        if outstanding <= zero:
+            continue
+
+        due_date     = invoice_date + timedelta(days=customer.terms_days)
+        days_overdue = (today - due_date).days
+
+        result.append(schemas.AgingRowOut(
+            customer_id=cid,
+            customer_name=customer.customer_name,
+            invoice_id=sale_id,
+            invoice_date=invoice_date,
+            due_date=due_date,
+            current_amt  = outstanding if days_overdue <= 0        else zero,
+            days_1_30    = outstanding if 1  <= days_overdue <= 30 else zero,
+            days_31_60   = outstanding if 31 <= days_overdue <= 60 else zero,
+            days_61_90   = outstanding if 61 <= days_overdue <= 90 else zero,
+            days_91_plus = outstanding if days_overdue > 90        else zero,
         ))
-    return rows
+
+    result.sort(key=lambda r: (r.customer_name, r.invoice_date))
+    return result
 
 
 @router.get("/customers/{customer_id}", response_model=schemas.CustomerOut)
@@ -738,6 +740,13 @@ def _recalculate_totals(sale: models.Sale) -> None:
     """Recompute subtotal, discount_amount, grand_total, and balance_due."""
     subtotal = sum((item.line_total for item in sale.items), Decimal("0"))
     sale.subtotal_amount = subtotal
+
+    merch_subtotal = sum(
+        item.line_total for item in sale.items
+        if item.variant and item.variant.product
+        and item.variant.product.product_type == 'Inventory'
+    )
+    sale.merchandise_subtotal = merch_subtotal
 
     cart_pct_amt  = subtotal * (sale.cart_discount_pct  or Decimal("0")) / 100
     cart_flat_amt = sale.cart_discount_flat or Decimal("0")
@@ -1213,6 +1222,7 @@ def post_draft(
 
     # ── 6. Process each line item ──────────────────────────────────────────────
     new_items: list[models.SaleItem] = []
+    inventory_variant_ids: set[int] = set()
     ref_id = str(sale.sale_id)
 
     for variant_id, qty, unit_price, disc_pct, disc_flat, item_line_total in draft_items:
@@ -1231,6 +1241,8 @@ def post_draft(
             )
 
         product_type = variant_obj.product.product_type
+        if product_type == 'Inventory':
+            inventory_variant_ids.add(variant_id)
 
         # ── Non-Inventory / Service: revenue recorded, no stock movement ────────
         if product_type in ("Non-Inventory", "Service"):
@@ -1331,6 +1343,10 @@ def post_draft(
 
     # ── 7. Recalculate totals from final SaleItem rows ─────────────────────────
     subtotal = sum(item.line_total for item in new_items)
+    merchandise_subtotal = sum(
+        item.line_total for item in new_items
+        if item.variant_id in inventory_variant_ids
+    )
     cart_pct_amt  = subtotal * (sale.cart_discount_pct  or Decimal("0")) / 100
     cart_flat_amt = sale.cart_discount_flat or Decimal("0")
     sale.discount_amount = (cart_pct_amt + cart_flat_amt).quantize(Decimal("0.01"))
@@ -1420,8 +1436,11 @@ def post_draft(
                     standard_applied += amount_to_apply
 
     # ── 11. Compute balance_due and payment_status ─────────────────────────────
-    balance_due = max(grand_total - total_applied, Decimal("0"))
-    if total_applied == 0:
+    # standard_applied excludes AR Charge (deferred credit) and AR Credit tenders.
+    # balance_due and payment_status must reflect only cash/card actually collected
+    # so that AR-charged sales are not incorrectly marked Paid.
+    balance_due = max(grand_total - standard_applied, Decimal("0"))
+    if standard_applied == 0:
         payment_status = "Unpaid"
     elif balance_due <= 0:
         payment_status = "Paid"
@@ -1445,8 +1464,9 @@ def post_draft(
     sale.posted_at       = now
     sale.transaction_date = payload.transaction_date
     sale.status          = "Posted"
-    sale.subtotal_amount = subtotal
-    sale.grand_total     = grand_total
+    sale.subtotal_amount      = subtotal
+    sale.merchandise_subtotal = merchandise_subtotal
+    sale.grand_total          = grand_total
     sale.balance_due     = balance_due
     sale.payment_status  = payment_status
     sale.audit_variance  = audit_variance
@@ -1472,13 +1492,9 @@ def post_draft(
 # READING SALES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# `Sale.transaction_date` is a plain calendar Date with no time/timezone
-# component, so date_from/date_to compare against it directly — no PH-anchoring
-# needed. `SalesReturn.return_date`, however, is still a UTC timestamp, and
-# sales are entered/read in Manila local time (UTC+8): a `date_from`/`date_to`
-# of "2026-06-07" means the full Manila-local calendar day, so naive
-# query-param dates must still be anchored to PH time before comparison
-# against that UTC-stored column. _ph_day_bounds remains for that purpose.
+# Both `Sale.transaction_date` and `SalesReturn.return_date` are plain calendar
+# Date columns (no time/timezone). date_from/date_to query params are coerced
+# to plain dates as txn_date_from/txn_date_to and compared directly.
 _PH_TZ = timezone(timedelta(hours=8))
 
 
@@ -1494,8 +1510,7 @@ def _ph_today() -> date:
 
 def _ph_day_bounds(date_from: Optional[datetime], date_to: Optional[datetime]):
     """Anchor naive date_from/date_to to PH-local midnight and return a
-    half-open [start, end) UTC-comparable range covering full local day(s).
-    Used for `SalesReturn.return_date` (a UTC timestamp column)."""
+    half-open [start, end) UTC-comparable range covering full local day(s)."""
     start = date_from.replace(tzinfo=_PH_TZ) if (date_from and date_from.tzinfo is None) else date_from
     end = None
     if date_to is not None:
@@ -1590,14 +1605,15 @@ def list_sales(
     # ── Query and append return rows (only for Posted / unfiltered status) ─
     include_returns = (not status or status == "Posted") and not has_variance and not has_uncosted
     if include_returns:
-        range_start, range_end = _ph_day_bounds(date_from, date_to)
         rq = db.query(models.SalesReturn)
-        if range_start is not None:
-            rq = rq.filter(models.SalesReturn.return_date >= range_start)
-        if range_end is not None:
-            rq = rq.filter(models.SalesReturn.return_date < range_end)
+        if txn_date_from is not None:
+            rq = rq.filter(models.SalesReturn.return_date >= txn_date_from)
+        if txn_date_to is not None:
+            rq = rq.filter(models.SalesReturn.return_date <= txn_date_to)
         if location_id is not None:
             rq = rq.filter(models.SalesReturn.location_id == location_id)
+        if customer_id is not None:
+            rq = rq.filter(models.SalesReturn.customer_id == customer_id)
         if search:
             rq = rq.filter(models.SalesReturn.return_pid.ilike(f"%{search}%"))
         all_returns = rq.all()
@@ -1607,8 +1623,8 @@ def list_sales(
             combined.append(schemas.SaleOut(
                 sale_id=-r.return_id,  # negative sentinel — never matches a real sale_id
                 sale_pid=r.return_pid,
-                transaction_date=r.return_date.date() if r.return_date else None,
-                posted_at=r.return_date,
+                transaction_date=r.return_date.date() if isinstance(r.return_date, datetime) else r.return_date,
+                posted_at=None,
                 location_id=r.location_id,
                 register_id=None,
                 customer_id=r.customer_id,
@@ -2099,6 +2115,7 @@ def _do_return(
     Returns the unflushed SalesReturn ORM object (return_id is available after flush).
     """
     is_blind = payload.sale_id is None
+    resolved_return_date = payload.return_date if payload.return_date is not None else _ph_today()
 
     if is_blind:
         if not _has_permission(current_user, "process_blind_returns"):
@@ -2174,6 +2191,7 @@ def _do_return(
     sales_return = models.SalesReturn(
         sale_id=payload.sale_id,
         location_id=location_id,
+        return_date=resolved_return_date,
         reason=payload.reason,
         grand_total=grand_total,
         disposition=payload.disposition,
@@ -2235,6 +2253,54 @@ def _do_return(
         customer.outstanding_balance = (
             (customer.outstanding_balance or Decimal("0")) - grand_total
         )
+
+    elif payload.disposition == 'cash_refund' and customer:
+        db.add(models.ArLedger(
+            customer_id=customer.customer_id,
+            amount_change=-grand_total,
+            reason="RETURN",
+            reference_type="sales_returns",
+            reference_id=ref_id,
+        ))
+        customer.outstanding_balance = (
+            (customer.outstanding_balance or Decimal("0")) - grand_total
+        )
+
+    if payload.disposition == 'cash_refund' and payload.sale_id is not None:
+        largest_tender_row = (
+            db.query(models.CustomerPayment.payment_mode_id)
+            .join(models.CustomerPaymentApplied,
+                  models.CustomerPayment.payment_id == models.CustomerPaymentApplied.payment_id)
+            .join(models.PaymentMode,
+                  models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
+            .filter(
+                models.CustomerPaymentApplied.sale_id == payload.sale_id,
+                models.PaymentMode.is_ar_charge == False,
+                models.PaymentMode.is_ar_credit == False,
+            )
+            .order_by(models.CustomerPaymentApplied.amount_applied.desc())
+            .first()
+        )
+        if largest_tender_row is not None:
+            neg_payment = models.CustomerPayment(
+                customer_id=sales_return.customer_id,
+                payment_mode_id=largest_tender_row.payment_mode_id,
+                amount=-grand_total,
+                payment_date=datetime(
+                    resolved_return_date.year,
+                    resolved_return_date.month,
+                    resolved_return_date.day,
+                ),
+                notes=f"Cash refund for return #{sales_return.return_id}",
+                unapplied_amount=Decimal("0"),
+            )
+            db.add(neg_payment)
+            db.flush()
+            db.add(models.CustomerPaymentApplied(
+                payment_id=neg_payment.payment_id,
+                sale_id=payload.sale_id,
+                amount_applied=-grand_total,
+            ))
 
     return sales_return
 
@@ -2359,12 +2425,7 @@ def list_returns(
     if sale_id is not None:
         q = q.filter(models.SalesReturn.sale_id == sale_id)
     if customer_id is not None:
-        linked_sale_ids = (
-            db.query(models.Sale.sale_id)
-            .filter(models.Sale.customer_id == customer_id)
-            .subquery()
-        )
-        q = q.filter(models.SalesReturn.sale_id.in_(linked_sale_ids))
+        q = q.filter(models.SalesReturn.customer_id == customer_id)
     if location_id is not None:
         q = q.filter(models.SalesReturn.location_id == location_id)
     if date_from is not None:
@@ -2475,19 +2536,50 @@ def get_sales_summary(
 
     base_sale_ids = [r.sale_id for r in base_q.all()]
 
+    # ── Returns total — filtered by return_date window ────────────────────────
+    # Computed before the early-return so that a date window containing returns
+    # but no Posted sales still reports the correct returns figure.
+    ret_q = db.query(
+        func.coalesce(func.sum(models.SalesReturn.grand_total), zero)
+    )
+    if txn_date_from is not None:
+        ret_q = ret_q.filter(models.SalesReturn.return_date >= txn_date_from)
+    if txn_date_to is not None:
+        ret_q = ret_q.filter(models.SalesReturn.return_date <= txn_date_to)
+    if location_id:
+        ret_q = ret_q.filter(models.SalesReturn.location_id == location_id)
+    if customer_id:
+        ret_q = ret_q.filter(models.SalesReturn.customer_id == customer_id)
+    returns_total = ret_q.scalar() or zero
+
+    # ── Cash refund total — for Collections display deduction ─────────────────
+    refund_q = db.query(
+        func.coalesce(func.sum(models.SalesReturn.grand_total), zero)
+    ).filter(models.SalesReturn.disposition == 'cash_refund')
+    if txn_date_from is not None:
+        refund_q = refund_q.filter(models.SalesReturn.return_date >= txn_date_from)
+    if txn_date_to is not None:
+        refund_q = refund_q.filter(models.SalesReturn.return_date <= txn_date_to)
+    if location_id:
+        refund_q = refund_q.filter(models.SalesReturn.location_id == location_id)
+    if customer_id:
+        refund_q = refund_q.filter(models.SalesReturn.customer_id == customer_id)
+    cash_refunds_total = refund_q.scalar() or zero
+
     if not base_sale_ids:
         return schemas.SalesSummaryResponse(
             merchandise_gross=zero, cart_discounts=zero,
-            non_merchandise_revenue=zero, variances=zero, returns_total=zero,
-            total_revenue=zero, gross_profit=zero, uncosted_revenue=zero,
+            non_merchandise_revenue=zero, variances=zero, returns_total=returns_total,
+            cash_refunds_total=cash_refunds_total,
+            total_revenue=-returns_total, gross_profit=zero, uncosted_revenue=zero,
             collections=[], total_physical=zero, total_virtual=zero, total_collected=zero,
         )
 
     # ── 2. Merchandise gross, cart discounts, variances ───────────────────────
     agg = db.query(
-        func.coalesce(func.sum(models.Sale.subtotal_amount),   zero),
-        func.coalesce(func.sum(models.Sale.discount_amount),   zero),
-        func.coalesce(func.sum(models.Sale.audit_variance),    zero),
+        func.coalesce(func.sum(models.Sale.merchandise_subtotal), zero),
+        func.coalesce(func.sum(models.Sale.discount_amount),      zero),
+        func.coalesce(func.sum(models.Sale.audit_variance),       zero),
     ).filter(models.Sale.sale_id.in_(base_sale_ids)).first()
 
     merchandise_gross = agg[0] or zero
@@ -2508,30 +2600,10 @@ def get_sales_summary(
         inv_models.Product.product_type.in_(["Service", "Non-Inventory"]),
     ).scalar() or zero
 
-    # ── 4. Returns total (sales returns linked to the filtered sale scope) ───────
-    returns_total = db.query(
-        func.coalesce(func.sum(models.SalesReturn.grand_total), zero)
-    ).filter(
-        models.SalesReturn.sale_id.in_(base_sale_ids),
-    ).scalar() or zero
-
-    # Standalone blind returns (return_id with no sale_id) are included via
-    # their return_date falling in the filter window
-    range_start, range_end = _ph_day_bounds(date_from, date_to)
-    if range_start is not None or range_end is not None:
-        blind_q = db.query(
-            func.coalesce(func.sum(models.SalesReturn.grand_total), zero)
-        ).filter(models.SalesReturn.sale_id.is_(None))
-        if range_start is not None:
-            blind_q = blind_q.filter(models.SalesReturn.return_date >= range_start)
-        if range_end is not None:
-            blind_q = blind_q.filter(models.SalesReturn.return_date < range_end)
-        returns_total += blind_q.scalar() or zero
-
-    # ── 5. Total revenue ───────────────────────────────────────────────────────
+    # ── 4. Total revenue ───────────────────────────────────────────────────────
     total_revenue = merchandise_gross - returns_total - cart_discounts + non_merch + variances_sum
 
-    # ── 6. Sale IDs that contain at least one uncosted item ───────────────────
+    # ── 5. Sale IDs that contain at least one uncosted item ───────────────────
     uncosted_sq = (
         db.query(models.SaleItem.sale_id)
         .filter(
@@ -2595,6 +2667,7 @@ def get_sales_summary(
         non_merchandise_revenue=non_merch,
         variances=variances_sum,
         returns_total=returns_total,
+        cash_refunds_total=cash_refunds_total,
         total_revenue=total_revenue,
         gross_profit=gross_profit,
         uncosted_revenue=uncosted_revenue,

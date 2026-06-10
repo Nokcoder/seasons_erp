@@ -33,6 +33,10 @@ function fmtDateOnly(s: string | null | undefined) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-PH', { dateStyle: 'medium', timeZone: 'UTC' })
 }
 
+function todayManila() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })
+}
+
 interface ReturnLine {
   sale_item_id:    number | null
   variant_id:      number
@@ -56,6 +60,7 @@ export default function ReturnNew() {
   const [reason,       setReason]       = useState('')
   const [saving,       setSaving]       = useState(false)
   const [error,        setError]        = useState('')
+  const [returnDate,   setReturnDate]   = useState(todayManila)
 
   // ── blind return item search ──────────────────────────────────────────────
   const [catalogSearch, setCatalogSearch] = useState('')
@@ -175,6 +180,7 @@ export default function ReturnNew() {
   // ── submit ────────────────────────────────────────────────────────────────
   async function handleSubmit() {
     if (activeLines.length === 0) { setError('No items selected for return.'); return }
+    if (!returnDate)              { setError('Return date is required.'); return }
     if (!locationId)              { setError('Return location is required.'); return }
     setSaving(true); setError('')
     try {
@@ -184,6 +190,7 @@ export default function ReturnNew() {
         customer_id: customerId ? parseInt(customerId) : undefined,
         disposition,
         reason:      reason.trim() || undefined,
+        return_date: returnDate,
         items:       activeLines.map(l => ({
           sale_item_id: l.sale_item_id,
           variant_id:   l.variant_id,
@@ -228,15 +235,20 @@ export default function ReturnNew() {
                 <p className={`${vCls} font-mono`}>{(sale as SaleOut).sale_pid ?? '—'}</p>
               </div>
               <div>
-                <label className={lCls}>Date</label>
-                <p className={vCls}>{fmtDateOnly((sale as SaleOut).transaction_date)}</p>
-              </div>
-              <div>
                 <label className={lCls}>Grand Total</label>
                 <p className={`${vCls} font-semibold`}>₱{fmt((sale as SaleOut).grand_total)}</p>
               </div>
             </>
           )}
+
+          {/* return date */}
+          <div>
+            <label className={lCls}>Return Date <span className="text-red-500">*</span></label>
+            <input type="date" className={`${inpCls} w-full`}
+              value={returnDate}
+              max={todayManila()}
+              onChange={e => setReturnDate(e.target.value || todayManila())} />
+          </div>
 
           {/* return location */}
           <div>

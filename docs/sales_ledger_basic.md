@@ -45,13 +45,16 @@ line up visually within one card to show the relationship:
 │                                     │
 │ Merchandise Gross      ₱ 50,000.00  │
 │ Cart Discounts       - ₱  2,000.00  │
+│ Returns              - ₱  3,000.00  │
 │ Non-Merch Revenue    + ₱  1,500.00  │
 │ Variances            + ₱    200.00  │
 │ ─────────────────────────────────── │
-│ Total Revenue          ₱ 49,700.00  │
+│ Total Revenue          ₱ 46,700.00  │
 └─────────────────────────────────────┘
 **Merchandise Gross**
-Sum of subtotal_amount for all Posted sales in filter.
+Sum of merchandise_subtotal for all Posted sales in filter.
+Inventory and Bundle line items only — Service and Non-Inventory
+items are excluded.
 Tooltip: "Total value of merchandise sold before discounts."
 
 **Cart Discounts**
@@ -64,6 +67,8 @@ Sum of line totals for sale_items where parent product
 product_type is Service or Non-Inventory.
 Tooltip: "Revenue from services, delivery charges, and
 non-stock items."
+Note: Non-Merchandise Revenue is additive to Merchandise Gross in the
+Total Revenue formula — it is not included in Merchandise Gross.
 
 **Variances**
 Sum of audit_variance for all Posted sales in filter.
@@ -72,7 +77,7 @@ Tooltip: "Net difference between money tendered entered
 by auditors and system-computed grand totals."
 
 **Total Revenue**
-= Merchandise Gross - Cart Discounts
+= Merchandise Gross - Cart Discounts - Returns
   + Non-Merchandise Revenue + Variances
 Primary highlighted value in the card.
 
@@ -132,18 +137,23 @@ No coverage percentage shown — removed as inaccurate.
 ### Card 3 — Collections
 
 Payment mode breakdown showing physical vs virtual split.
-┌─────────────────────────────────────┐
-│ COLLECTIONS                         │
-│                                     │
-│ Cash              ₱ 30,000.00  Physical │
-│ GCash             ₱ 12,000.00  Virtual  │
-│ Maya              ₱  5,000.00  Virtual  │
-│ Visa              ₱  2,700.00  Virtual  │
-│ ─────────────────────────────────── │
-│ Total Physical        ₱ 30,000.00  │
-│ Total Virtual         ₱ 19,700.00  │
-│ Total Collected       ₱ 49,700.00  │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│ COLLECTIONS                             │
+│                                         │
+│ Cash          ₱ 30,000.00  Physical     │
+│ GCash         ₱ 12,000.00  Virtual      │
+│ Maya          ₱  5,000.00  Virtual      │
+│ Visa          ₱  2,700.00  Virtual      │
+│ Cash Refunds  ₱ -5,000.00  Physical     │
+│ ─────────────────────────────────────── │
+│ Total Physical        ₱ 25,000.00       │
+│ Total Virtual         ₱ 19,700.00       │
+│ Total Collected       ₱ 44,700.00       │
+└─────────────────────────────────────────┘
+Cash Refunds row appears only when cash_refunds_total > 0.
+Amount displayed as negative in warning color.
+Total Physical and Total Collected are net of cash refunds.
+
 Each active payment mode that appears in the filtered
 period gets its own row showing total amount collected
 via that mode. Labeled Physical or Virtual based on
@@ -165,6 +175,8 @@ Returns:
   "cart_discounts": 0.00,
   "non_merchandise_revenue": 0.00,
   "variances": 0.00,
+  "returns_total": 0.00,
+  "cash_refunds_total": 0.00,
   "total_revenue": 0.00,
   "gross_profit": 0.00,
   "uncosted_revenue": 0.00,
@@ -398,6 +410,13 @@ to fetch options. Ensure the GET /sales/registers endpoint
 is stable — add retry logic or confirm the React Query
 retry configuration is applied to this query.
 
+### Sale model — merchandise_subtotal
+Sale rows carry a merchandise_subtotal column (Numeric 15,2) alongside
+subtotal_amount. It stores the sum of Inventory and Bundle line items only,
+computed at post time and kept in sync by _recalculate_totals on drafts.
+get_sales_summary reads merchandise_subtotal for Merchandise Gross —
+never subtotal_amount.
+
 
 ## Returns
 
@@ -455,7 +474,14 @@ Read-only. Displayed at bottom of grid.
      amount_change = negative (customer has credit)
    - customers.outstanding_balance updated transactionally
 6. If disposition = cash_refund:
-   - No AR entry — cash settled at counter
+   - AR ledger entry: reason = RETURN,
+     amount_change = negative (reduces outstanding balance)
+   - customers.outstanding_balance updated transactionally
+     (only when a registered customer is linked — skip for walk-ins)
+   - Negative CustomerPayment written against the original sale's
+     cash tender payment_mode to deduct from Collections totals
+   - CustomerPaymentApplied row linking the negative payment
+     to the original sale
 7. Original sale flagged — return badge shown in ledger
 
 ---
@@ -487,14 +513,16 @@ The Sale Detail page tracks returnable quantities:
 ### Return Credit Policy
 
 **Registered customers:**
-- Cash Refund: settled at counter, no AR entry
-- Credit to Account: AR credit posted, available on
-  future sales via AR Credit payment mode
+- Cash Refund: AR entry written, outstanding_balance reduced,
+  negative CustomerPayment written to deduct from Collections.
+  Customer is encouraged to apply return value toward a new purchase.
+- Credit to Account: AR credit posted, outstanding_balance reduced,
+  available on future sales via AR Credit payment mode.
 
 **Walk-in customers:**
-- Cash Refund only — no credit to account option
-- No credit carried forward under any circumstances
-- If customer wants to apply return value toward a new
-  purchase, auditor processes return (cash refund) then
-  processes new sale — customer tenders the difference
-  between new sale total and return value
+- Cash Refund only — Credit to Account not available.
+- AR entry is skipped (no customer balance to update).
+- Negative CustomerPayment written to deduct from Collections.
+- If customer applies return value toward a new purchase, auditor
+  processes the return then posts the follow-up sale — customer
+  tenders the difference only.

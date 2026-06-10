@@ -173,6 +173,10 @@ export default function SaleDetail() {
   const variance = sale.audit_variance
   const customer = sale.customer_id ? customerMap.get(sale.customer_id) : null
 
+  const arChargedTotal = ((sale.payments ?? []) as CustomerPaymentOut[])
+    .reduce((s, p) => s + (modeMap.get(p.payment_mode_id)?.is_ar_charge ? Number(p.amount) : 0), 0)
+  const isArObligation = arChargedTotal > 0 && Number(sale.balance_due) > 0
+
   return (
     <div className="p-5 max-w-6xl t-bg-base min-h-full">
       <FetchingBar show={fetching} />
@@ -253,7 +257,7 @@ export default function SaleDetail() {
           )}
           <div><label className={lCls}>Discount</label><p className={vCls}>₱{fmt(sale.discount_amount)}</p></div>
           <div><label className={lCls}>Grand Total</label><p className="text-sm font-bold t-text-1">₱{fmt(sale.grand_total)}</p></div>
-          <div><label className={lCls}>Balance Due</label><p className={`text-sm font-medium ${sale.balance_due > 0 ? 'text-red-400' : 't-text-1'}`}>₱{fmt(sale.balance_due)}</p></div>
+          <div><label className={lCls}>{isArObligation ? 'On Account' : 'Balance Due'}</label><p className={`text-sm font-medium ${Number(sale.balance_due) > 0 && !isArObligation ? 'text-red-400' : 't-text-1'}`}>₱{fmt(sale.balance_due)}</p></div>
           <div><label className={lCls}>Receipt Total</label><p className={vCls}>{sale.receipt_grand_total != null ? `₱${fmt(sale.receipt_grand_total)}` : '—'}</p></div>
           <div><label className={lCls}>Variance</label>
             <p className={`text-sm font-medium ${variance != null && variance !== 0 ? 'text-yellow-500' : 't-text-4'}`}>
@@ -331,17 +335,18 @@ export default function SaleDetail() {
               <tbody>
                 {(sale.payments as CustomerPaymentOut[]).map(p => {
                   // Use backend-resolved name/is_physical; fall back to modeMap for older data
-                  const fallback = modeMap.get(p.payment_mode_id)
+                  const fallback    = modeMap.get(p.payment_mode_id)
                   const modeName    = p.payment_mode_name    ?? fallback?.name    ?? `Mode ${p.payment_mode_id}`
                   const isPhysical  = p.payment_mode_is_physical != null ? p.payment_mode_is_physical : (fallback?.is_physical ?? true)
+                  const isArCharge  = fallback?.is_ar_charge ?? false
                   return (
                     <tr key={p.payment_id} className="border-b t-border">
                       <td className="px-3 py-2 t-text-2">{modeName}</td>
                       <td className="px-3 py-2 tabular-nums t-text-1">₱{fmt(p.amount)}</td>
                       <td className="px-3 py-2 font-mono t-text-3 text-[10px]">{p.reference_number || '—'}</td>
                       <td className="px-3 py-2">
-                        <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${isPhysical ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}`}>
-                          {isPhysical ? 'Physical' : 'Virtual'}
+                        <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${isArCharge ? 'bg-amber-950 text-amber-400' : isPhysical ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}`}>
+                          {isArCharge ? 'On Account' : isPhysical ? 'Physical' : 'Virtual'}
                         </span>
                       </td>
                     </tr>
@@ -353,12 +358,15 @@ export default function SaleDetail() {
                   const pmts = sale.payments as CustomerPaymentOut[]
                   const resolvePhysical = (p: CustomerPaymentOut) =>
                     p.payment_mode_is_physical != null ? p.payment_mode_is_physical : (modeMap.get(p.payment_mode_id)?.is_physical ?? true)
-                  const physical = pmts.filter(p => resolvePhysical(p)).reduce((s, p) => s + Number(p.amount), 0)
-                  const virtual  = pmts.filter(p => !resolvePhysical(p)).reduce((s, p) => s + Number(p.amount), 0)
+                  const isAr       = (p: CustomerPaymentOut) => modeMap.get(p.payment_mode_id)?.is_ar_charge ?? false
+                  const physical   = pmts.filter(p => !isAr(p) &&  resolvePhysical(p)).reduce((s, p) => s + Number(p.amount), 0)
+                  const virtual    = pmts.filter(p => !isAr(p) && !resolvePhysical(p)).reduce((s, p) => s + Number(p.amount), 0)
+                  const onAccount  = pmts.filter(p =>  isAr(p)).reduce((s, p) => s + Number(p.amount), 0)
                   return (
                     <>
-                      {physical > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Physical</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(physical)}</td><td /><td /></tr>}
-                      {virtual  > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Virtual</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(virtual)}</td><td /><td /></tr>}
+                      {physical   > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Physical</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(physical)}</td><td /><td /></tr>}
+                      {virtual    > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Virtual</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(virtual)}</td><td /><td /></tr>}
+                      {onAccount  > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">On Account</td><td className="px-3 py-1.5 tabular-nums text-amber-400">₱{fmt(onAccount)}</td><td /><td /></tr>}
                       <tr>
                         <td className="px-3 py-2 text-[10px] font-semibold uppercase tracking-widest t-text-3">Total Tendered</td>
                         <td className="px-3 py-2 tabular-nums font-bold t-text-1">₱{fmt(physical + virtual)}</td>

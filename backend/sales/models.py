@@ -125,8 +125,9 @@ class Sale(Base):
     origin_sale_id     = Column(Integer, ForeignKey("sales.sales.sale_id"),
                                 nullable=True)
 
-    subtotal_amount     = Column(Numeric(15, 2), default=0)
-    cart_discount_pct   = Column(Numeric(5, 2), nullable=True)
+    subtotal_amount       = Column(Numeric(15, 2), default=0)
+    merchandise_subtotal  = Column(Numeric(15, 2), nullable=False, server_default='0')
+    cart_discount_pct     = Column(Numeric(5, 2), nullable=True)
     cart_discount_flat  = Column(Numeric(15, 2), nullable=True)
     discount_amount     = Column(Numeric(15, 2), default=0)
     tax_amount          = Column(Numeric(15, 2), default=0)
@@ -253,7 +254,7 @@ class SalesReturn(Base):
                                 nullable=True)
     location_id        = Column(Integer, ForeignKey("inventory.locations.location_id"),
                                 nullable=False)
-    return_date        = Column(DateTime(timezone=True), server_default=func.now())
+    return_date        = Column(Date, nullable=False)
     reason             = Column(String(500), nullable=True)
     grand_total        = Column(Numeric(15, 2), default=0)
     disposition        = Column(String(20), nullable=True)

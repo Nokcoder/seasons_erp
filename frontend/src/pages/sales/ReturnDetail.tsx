@@ -9,6 +9,11 @@ function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
   return new Date(s).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })
 }
+function fmtDateOnly(s: string | null | undefined) {
+  if (!s) return '—'
+  const [y, m, d] = s.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-PH', { dateStyle: 'medium', timeZone: 'UTC' })
+}
 function fmt(n: number | null | undefined) {
   if (n == null) return '—'
   return Number(n).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -51,7 +56,7 @@ export default function ReturnDetail() {
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div><label className={lCls}>Return PID</label><p className={`${vCls} font-mono`}>{ret.return_pid ?? '—'}</p></div>
-          <div><label className={lCls}>Date</label><p className={vCls}>{fmtDate(ret.return_date)}</p></div>
+          <div><label className={lCls}>Date</label><p className={vCls}>{fmtDateOnly(ret.return_date)}</p></div>
           <div><label className={lCls}>Grand Total</label><p className="text-sm font-bold text-white">₱{fmt(ret.grand_total)}</p></div>
           <div><label className={lCls}>Reason</label><p className={vCls}>{ret.reason || '—'}</p></div>
           <div>
