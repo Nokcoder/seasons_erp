@@ -1,5 +1,141 @@
 # Changelog
 
+## 2026-06-12 — Docs: update schema.dbml to match deployed state
+
+**`docs/schema.dbml`** — Five corrections to bring the schema document in line with the codebase:
+
+1. **`sales_returns`** — Fixed a malformed multi-line note on `location_id` that was swallowing `disposition` and `customer_id` as literal text. Changed `return_date` from `datetime` to `date [not null]` (matches `d4e5f6a7b8c9` migration). Added `shift_id` and `register_id` fields (matches `f6a7b8c9d0e1` migration).
+2. **`sales`** — Added `merchandise_subtotal decimal(15,2)` field (matches `c3d4e5f6a7b8` migration). Removed duplicate `created_by_user_id` line.
+3. **`payment_modes`** — Added `is_credit_memo boolean` flag (matches `g7b8c9d0e1f2` migration).
+4. **`credit_memos`** — New table added (matches `g7b8c9d0e1f2` migration).
+5. **`credit_memo_redemptions`** — New table added (matches `g7b8c9d0e1f2` migration).
+
+---
+
+## 2026-06-12 — Docs housekeeping
+
+Deleted two stale files from `docs/`:
+- `docs/performance_audit.md` — assistant narration from a prior session, not a design document.
+- `docs/batch2_6_settings.md` — duplicate of `docs/customers_ar.md`.
+
+No backend or frontend files were changed.
+
+---
+
+## 2026-06-12 — Fix: Credit Memo migration seed INSERT missing `is_active`
+
+**`backend/alembic/versions/g7b8c9d0e1f2_add_credit_memos.py`** — The seed `INSERT INTO sales.payment_modes` omitted `is_active` from the column list. Since `is_active` is `NOT NULL`, the insert produced a null-violation on startup and put the backend into a restart loop. Added `is_active` to both the column list and the `SELECT` values (`true`).
+
+---
+
+## 2026-06-12 — Credit Memo feature (full implementation)
+
+### Overview
+Implemented Credit Memo as a new payment mode. Issued by Admin/Manager for walk-in returns; redeemable at POS; all-or-nothing redemption; voiding a sale reinstates the memo.
+
+### Migration — `backend/alembic/versions/g7b8c9d0e1f2_add_credit_memos.py`
+- Adds `is_credit_memo BOOLEAN NOT NULL DEFAULT FALSE` to `sales.payment_modes`
+- Creates `sales.credit_memos` table (memo_id, code, amount, status, issued_at, valid_until, issued_by_user_id, return_id, notes, cancelled_by_user_id, cancelled_at)
+- Creates `sales.credit_memo_redemptions` table (redemption_id, memo_id, sale_id, amount_redeemed, redeemed_at, redeemed_by_user_id)
+- Seeds one `payment_modes` row: name='Credit Memo', is_credit_memo=true, is_physical=false
+- Chains from `f6a7b8c9d0e1`
+
+### Backend — `backend/sales/models.py`
+- `PaymentMode`: added `is_credit_memo` column (Boolean, server_default=false)
+- New model `CreditMemo`: all spec fields, relationships to issued_by, cancelled_by, sales_return, redemptions
+- New model `CreditMemoRedemption`: memo_id, sale_id, amount_redeemed, redeemed_at, redeemed_by_user_id
+
+### Backend — `backend/sales/schemas.py`
+- `PaymentModeCreate/Patch/Out`: added `is_credit_memo` field
+- New schemas: `CreditMemoCreate`, `CreditMemoRedemptionOut`, `CreditMemoOut`, `CreditMemoListOut`, `CreditMemoValidateOut`
+
+### Backend — `backend/sales/router.py`
+- `create_payment_mode`: passes `is_credit_memo` to constructor
+- `update_payment_mode`: handles `is_credit_memo` patch
+- `post_draft` tender loop: validates memo code via `with_for_update()` before payment; on apply sets status='REDEEMED' and inserts `CreditMemoRedemption`
+- `void_sale`: reverses credit memo redemptions — deletes redemption row, restores status='ACTIVE'
+- Five new endpoints under `/sales/credit-memos/`: GET list, POST issue, GET validate?code=, GET detail, POST cancel
+- Added imports: `random`, `string`, `Query`; helper `_generate_memo_code()`
+
+### Frontend — `frontend/src/services/api.ts`
+- `PaymentMode`, `PaymentModeCreate`, `PaymentModePatch`: added `is_credit_memo`
+- New interfaces: `CreditMemoRedemptionOut`, `CreditMemoListOut`, `CreditMemoOut`, `CreditMemoValidateOut`, `CreditMemoCreate`
+- `salesApi.creditMemos`: list, get, issue, cancel, validate endpoints
+- `settingsApi.storeName()`: reads store name from `/settings/system-settings/store_name`
+
+### Frontend — `frontend/src/lib/queryKeys.ts`
+- Added `creditMemos`, `creditMemo`, `creditMemoValidate`, `storeName` keys
+
+### Frontend — `frontend/src/pages/customers/CreditMemo.tsx` (new file)
+- Full Credit Memo management page at `/customers/credit-memo`
+- Access guard: Admin and Store Manager only (redirects to /customers)
+- Filter panel: keyword, status multi-select (default: ACTIVE), date range
+- Table: issued_at DESC, status badges, expiring-soon warning (within 7 days)
+- Issue modal: amount, valid_until (default today+30), linked return ID, notes
+- On issue: POST → close modal → refresh → window.print() of receipt
+- Detail modal: full fields + redemption history for REDEEMED memos
+- Cancel: confirmation modal; status→CANCELLED
+- Print layout: thermal receipt with store name from settings API, prominent code display
+- XLSX export via `xlsx` library
+
+### Frontend — `frontend/src/pages/sales/Workstation.tsx`
+- `TenderRow` interface: added `memo_code`, `memo_valid: boolean | null`, `memo_invalid_reason`
+- All tender reset points updated to include new fields
+- `addTender()`: includes new fields with defaults
+- `validateMemoCode()`: async function — calls validate API on blur/Enter; auto-fills and locks amount on success; shows inline error on failure
+- Mode select onChange: resets memo state when mode changes
+- Amount input: `readOnly` when credit memo is validated (locked)
+- Tender render: shows memo code input when `mode.is_credit_memo`; inline success/error messages
+- `handlePost()` pre-flight: blocks post if credit memo mode selected but code not validated
+
+### Frontend — `frontend/src/pages/Customers.tsx`
+- Added `CreditMemo` lazy import
+- Added Credit Memo tab (`/customers/credit-memo`)
+- Added `<Route path="credit-memo" element={<CreditMemo />} />`
+
+---
+
+## 2026-06-11 — Sales Ledger: brand column fix, non-merch revenue column, shift/register on returns
+
+### Fix 1 — Brand column in SaleDetail showing variant name instead of brand (`frontend/src/pages/sales/SaleDetail.tsx`)
+- Line 297 in the Line Items table was rendering `item.variant?.variant_name` for the Brand column. Changed to `item.variant?.product_brand`.
+
+### Fix 2 — Non-merchandise revenue as toggleable column in Sales Ledger
+- `backend/sales/schemas.py`: Added `non_merchandise_revenue: Decimal = Decimal("0")` to `SaleOut`.
+- `backend/sales/router.py`: In `list_sales`, compute non_merch per sale from eager-loaded items (product_type IN Service, Non-Inventory) and attach to each `SaleOut` row.
+- `frontend/src/services/api.ts`: Added `non_merchandise_revenue: number` to `SaleOut` interface.
+- `frontend/src/pages/sales/SalesLedger.tsx`: Added `nonMerchRev` toggleable column (off by default). Shows `₱{amount}` when > 0, blank otherwise. Right-aligned.
+
+### Fix 3 — Shift and Register on Returns
+- `backend/sales/models.py`: Added `shift_id` (FK → sales.shifts) and `register_id` (FK → sales.cash_registers) columns to `SalesReturn`.
+- `backend/alembic/versions/f6a7b8c9d0e1_add_shift_register_to_sales_returns.py`: Migration chaining from `e5f6a7b8c9d0`; adds both columns with `IF NOT EXISTS`.
+- `backend/sales/schemas.py`: Added `shift_id` and `register_id` to `SalesReturnCreate` and `SalesReturnOut`.
+- `backend/sales/router.py`: `_do_return` passes `shift_id`/`register_id` from payload to the `SalesReturn` constructor; `list_sales` returns sub-query now filters by `shift_id` and `register_id` when set.
+- `frontend/src/services/api.ts`: Updated `returns.create` type and `SalesReturnOut` interface.
+- `frontend/src/pages/sales/ReturnNew.tsx`: Added Shift and Register dropdowns to the return form header; values passed in the API call.
+
+## 2026-06-11 — Docs: update requirements.md to reflect Sales Ledger session changes
+
+**`docs/requirements.md`** — Three targeted updates: (1) §16.6 `GET /sales/`: noted that each `SaleOut` row now carries a computed `non_merchandise_revenue` field (sum of Service + Non-Inventory line totals) and that shift/register filters apply to return rows as well as sale rows. (2) §14.1 Creating a Return: added point 5 — `shift_id` and `register_id` are optional tagging fields stored on `sales_returns` for ledger filtering, with no business logic. (3) §16.9 Sales Returns request body: documented `shift_id` and `register_id` optional fields.
+
+---
+
+## 2026-06-11 — Sales Ledger: three bug fixes (discounts, collections double deduction, walk-in payment status)
+
+### Fix 1 — Line-item discount fields missing from Sale Detail (`backend/sales/router.py`)
+
+`_collapse_items()` built each collapsed `SaleItemOut` without passing `discount_pct` or `discount_flat`, so both fields defaulted to `None` regardless of what was stored on the sale items. `GET /{sale_id}` therefore always returned `null` for those fields, and the Sale Detail page always displayed `—` in the Disc % and Disc ₱ columns even when discounts were present. Added `discount_pct=first.discount_pct` and `discount_flat=first.discount_flat` to the constructor call, following the same pattern as `unit_price` and `cost_source`. Header-level cart discount fields (`cart_discount_pct`, `cart_discount_flat`, `discount_amount`) were unaffected — they come directly from the `Sale` ORM model.
+
+### Fix 2 — Collections card double-deducting cash refunds (`frontend/src/pages/sales/SalesLedger.tsx`)
+
+`get_sales_summary` computes `total_physical` and `total_collected` by summing `customer_payment_applied.amount_applied` across the in-scope sales. Cash-refund returns write a negative `CustomerPayment` + `CustomerPaymentApplied` row against the original sale, so when the original sale falls within the date window the refund is already netted out of `total_physical` server-side. The frontend was additionally subtracting `cash_refunds_total` from `total_physical` to derive `adjPhysical`, and computing `adjCollected = adjPhysical + total_virtual` — a second deduction of the same refund amount for same-day returns. Removed `adjPhysical` and `adjCollected`. "Total Physical" now renders `summary.total_physical` and "Total Collected" renders `summary.total_collected` directly. The Cash Refunds informational row remains visible in the collections list for transparency but no longer drives any arithmetic.
+
+### Fix 3 — Walk-in cash sales incorrectly stamped Unpaid (`backend/sales/router.py`)
+
+In `post_draft` step 10, the `standard_applied += amount_to_apply` increment that determines `payment_status` was nested inside `if customer:`. For walk-in sales (`customer = None`) the entire block was skipped regardless of what was tendered, so `standard_applied` stayed at zero and the sale was always stamped `payment_status = "Unpaid"`. Moved the increment outside `if customer:` to a peer-level `if not mode.is_ar_charge and not mode.is_ar_credit:` guard. AR ledger writes remain inside `if customer:` — only the `standard_applied` increment moved. AR-charge and AR-credit tenders continue to be excluded from `standard_applied` as intended, preserving the existing payment-status behaviour for credit customers.
+
+---
+
 ## 2026-06-11 — Docs: update sales_ledger_basic.md to reflect session changes
 
 **`docs/sales_ledger_basic.md`** — Seven targeted updates: (1) Revenue card ASCII diagram: added Returns row between Cart Discounts and Non-Merch Revenue, corrected Total Revenue example total. (2) Merchandise Gross definition: changed source field from `subtotal_amount` to `merchandise_subtotal`, added "Inventory and Bundle line items only" clause. (3) Non-Merchandise Revenue: added note that it is additive to Merchandise Gross in the formula, not a subset of it. (4) Total Revenue formula: added `- Returns` term. (5) Collections card diagram: standardised box-drawing characters, renamed "Cash Refund" row to "Cash Refunds", added three explanatory lines (conditional display, warning color, net-of-refunds totals). (6) JSON schema: added missing `returns_total` field in correct position. (7) On Post step 6 (cash_refund disposition): replaced stale "No AR entry" note with the four actual behaviors — AR ledger entry, outstanding_balance update (registered customers only), negative CustomerPayment, CustomerPaymentApplied. (8) Return Credit Policy: replaced both registered-customer and walk-in blocks with accurate current behavior including AR entry and Collections deduction for cash refunds. (9) Backend Notes: added `Sale model — merchandise_subtotal` section.

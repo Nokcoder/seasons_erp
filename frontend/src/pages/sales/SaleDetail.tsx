@@ -294,7 +294,7 @@ export default function SaleDetail() {
               const qtyReturnable = Math.max(0, Number(item.quantity) - qtyReturned)
               return (
                 <tr key={item.sale_item_id} className="border-b t-border">
-                  <td className="px-3 py-2 t-text-3">{item.variant?.variant_name ?? '—'}</td>
+                  <td className="px-3 py-2 t-text-3">{item.variant?.product_brand ?? '—'}</td>
                   <td className="px-3 py-2 t-text-1">{item.variant?.variant_name ?? '—'}</td>
                   <td className="px-3 py-2 font-mono t-text-3">{item.variant?.PID ?? '—'}</td>
                   <td className="px-3 py-2 tabular-nums t-text-2">{Number(item.quantity).toLocaleString()}</td>

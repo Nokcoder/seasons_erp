@@ -12,7 +12,9 @@ All authenticated users can view customer profiles and balances.
 1. Customer List — `/customers`
 2. Customer Detail — `/customers/:customer_id`
 3. AR Ledger — `/customers/ledger`
-4. Record Payment — modal or sub-page from Customer Detail
+4. Aging Report — `/customers/aging`
+5. Credit Memo — `/customers/credit-memo`
+6. Record Payment — modal or sub-page from Customer Detail
 
 ---
 
@@ -181,6 +183,14 @@ XLSX export of current filtered result set.
 
 ---
 
+### Page 4 — Aging Report (`/customers/aging`)
+See docs/customers_aging.md for full spec.
+
+### Page 5 — Credit Memo (`/customers/credit-memo`)
+See docs/customers_credit_memo.md for full spec.
+
+---
+
 ## Customer Creation
 
 Accessible via + New Customer on the Customer List page.
@@ -227,9 +237,22 @@ Opens as a modal or inline form.
   amount_change = negative (reduces balance)
 - outstanding_balance updated transactionally
 
+### On sale post — with Credit Memo tender row
+- Code input field appears when Credit Memo payment mode selected
+- Cashier scans QR or types memo code manually
+- System validates: exists, status = ACTIVE, valid_until >= today
+- If valid: amount auto-fills (locked, not editable)
+- If invalid: inline error (Expired / Cancelled / Not Found)
+- On post: credit_memos.status → REDEEMED,
+  credit_memo_redemptions row inserted
+- standard_applied incremented by memo amount (treated as
+  real payment, not deferred)
+
 ### On sale void
 - All AR entries from that sale reversed via ADJUSTMENT
 - outstanding_balance updated transactionally
+- If sale was paid with Credit Memo: status → ACTIVE,
+  redemption row deleted (memo reinstated)
 
 ---
 
@@ -241,13 +264,15 @@ Opens as a modal or inline form.
 - Credit stays on account indefinitely
 
 ### Walk-in returns
-- Cash refund processed same day only
-- No credit carried forward under any circumstances
-- If customer wants to apply return credit toward a new
-  purchase, the new sale must be processed on the same day
-  before they leave — auditor processes return then
-  immediately processes the new sale
-- No account, no future credit
+- Cash Refund disposition: AR entry written, negative
+  CustomerPayment written to deduct from Collections.
+  Customer encouraged to apply return value toward a
+  new purchase on the same visit.
+- Credit Memo: Admin or Manager may issue a Credit Memo
+  for the return value. Redeemable on any future visit
+  within the valid_until date. Memo linked to the return
+  via return_id on credit_memos table.
+- No open-ended credit account for walk-in customers.
 
 ---
 
@@ -290,6 +315,29 @@ Opens as a modal or inline form.
 ### sales.payment_modes (additions required)
 - is_ar_charge boolean default false
 - is_ar_credit boolean default false
+- is_credit_memo boolean default false  ← NEW
+
+### sales.credit_memos (new)
+- memo_id              serial PK
+- code                 varchar(20) UNIQUE NOT NULL
+- amount               decimal(15,2) NOT NULL
+- status               enum('ACTIVE','REDEEMED','EXPIRED',
+                        'CANCELLED') DEFAULT 'ACTIVE'
+- issued_at            date NOT NULL
+- valid_until          date NOT NULL  — defaults to issued_at + 30 days
+- issued_by_user_id    int FK → users
+- return_id            int FK → sales_returns NULLABLE
+- notes                varchar(500) NULLABLE
+- cancelled_by_user_id int FK → users NULLABLE
+- cancelled_at         timestamp NULLABLE
+
+### sales.credit_memo_redemptions (new)
+- redemption_id       serial PK
+- memo_id             int FK → credit_memos NOT NULL
+- sale_id             int FK → sales NOT NULL
+- amount_redeemed     decimal(15,2) NOT NULL
+- redeemed_at         timestamp NOT NULL
+- redeemed_by_user_id int FK → users NOT NULL
 
 ---
 
@@ -299,6 +347,20 @@ Opens as a modal or inline form.
 2. Add is_ar_credit boolean default false to
    sales.payment_modes
 3. Expand ar_reason enum to include AR_CHARGE and AR_CREDIT
+4. Add is_credit_memo boolean default false to
+   sales.payment_modes
+5. Create sales.credit_memos table
+6. Create sales.credit_memo_redemptions table
+7. Seed one payment_modes row: name='Credit Memo',
+   is_credit_memo=true, is_physical=false
+
+---
+
+## Store Identity
+Any reference to the store name in printed output,
+receipts, or documents must be read from a settings
+table variable (e.g. settings.store_name). No store
+name shall be hardcoded anywhere in the codebase.
 
 ---
 
@@ -316,6 +378,9 @@ payment or sale post affecting that customer.
 - Create / edit customers: Admin and Manager only
 - Record payments: Admin and Manager only
 - Deactivate customers: Admin and Manager only
+- Issue credit memos: Admin and Manager only
+- Cancel credit memos: Admin and Manager only
+- Validate credit memo code at POS: all authenticated users
 
 #### Overdue definition
 A customer is overdue when:

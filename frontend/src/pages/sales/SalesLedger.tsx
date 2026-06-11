@@ -97,8 +97,6 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
 
   type SummaryWithRefunds = SalesSummaryResponse & { cash_refunds_total?: number }
   const cashRefundsTotal = Number((summary as SummaryWithRefunds).cash_refunds_total ?? 0)
-  const adjPhysical      = Number(summary.total_physical) - cashRefundsTotal
-  const adjCollected     = adjPhysical + Number(summary.total_virtual)
 
   return (
     <div className="shrink-0 border-b t-border px-4 py-3 flex gap-3 overflow-x-auto">
@@ -197,7 +195,7 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
           <div className="border-t t-border pt-1.5 space-y-1 text-xs">
             <div className="flex items-center gap-2">
               <span className="t-text-3 flex-1">Total Physical</span>
-              <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(adjPhysical)}</span>
+              <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(summary.total_physical)}</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="t-text-3 flex-1">
@@ -209,7 +207,7 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
             </div>
             <div className="flex items-center gap-2 font-semibold">
               <span className="t-text-2 flex-1">Total Collected</span>
-              <span className="tabular-nums t-text-1 text-right w-24 shrink-0">{php(adjCollected)}</span>
+              <span className="tabular-nums t-text-1 text-right w-24 shrink-0">{php(summary.total_collected)}</span>
             </div>
           </div>
         )}
@@ -225,13 +223,13 @@ const COL_KEY = 'erp_ledger_cols'
 interface ColVis {
   shift: boolean; location: boolean; register: boolean; cashier: boolean
   customer: boolean; subtotalAmt: boolean; cartDiscPct: boolean; cartDiscFlat: boolean
-  discountAmt: boolean; taxAmt: boolean; totalTendered: boolean
+  discountAmt: boolean; taxAmt: boolean; nonMerchRev: boolean; totalTendered: boolean
   variance: boolean; payStatus: boolean; saleStatus: boolean; actions: boolean
 }
 const COL_DEFAULTS: ColVis = {
   shift: false, location: true, register: false, cashier: true,
   customer: true, subtotalAmt: false, cartDiscPct: false, cartDiscFlat: false,
-  discountAmt: false, taxAmt: false, totalTendered: true,
+  discountAmt: false, taxAmt: false, nonMerchRev: false, totalTendered: true,
   variance: true, payStatus: true, saleStatus: true, actions: true,
 }
 function loadCols(): ColVis {
@@ -245,7 +243,7 @@ const COL_LABELS: [keyof ColVis, string][] = [
   ['cashier', 'Cashier'], ['customer', 'Customer'],
   ['subtotalAmt', 'Subtotal Amount'], ['cartDiscPct', 'Cart Disc %'],
   ['cartDiscFlat', 'Cart Disc ₱'], ['discountAmt', 'Discount Amount'],
-  ['taxAmt', 'Tax Amount'], ['totalTendered', 'Total Tendered'],
+  ['taxAmt', 'Tax Amount'], ['nonMerchRev', 'Non-Merch Revenue'], ['totalTendered', 'Total Tendered'],
   ['variance', 'Variance'], ['payStatus', 'Payment Status'],
   ['saleStatus', 'Sale Status'], ['actions', 'Actions'],
 ]
@@ -460,7 +458,7 @@ export default function SalesLedger() {
     (cols.shift ? 1 : 0) + (cols.location ? 1 : 0) + (cols.register ? 1 : 0) +
     (cols.cashier ? 1 : 0) + (cols.customer ? 1 : 0) +
     (cols.subtotalAmt ? 1 : 0) + (cols.cartDiscPct ? 1 : 0) + (cols.cartDiscFlat ? 1 : 0) +
-    (cols.discountAmt ? 1 : 0) + (cols.taxAmt ? 1 : 0) + (cols.totalTendered ? 1 : 0) +
+    (cols.discountAmt ? 1 : 0) + (cols.taxAmt ? 1 : 0) + (cols.nonMerchRev ? 1 : 0) + (cols.totalTendered ? 1 : 0) +
     (cols.variance ? 1 : 0) + (cols.payStatus ? 1 : 0) + (cols.saleStatus ? 1 : 0) +
     (cols.actions ? 1 : 0) + 1 /* expand col */
 
@@ -601,6 +599,7 @@ export default function SalesLedger() {
                   {cols.cartDiscFlat && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Cart Disc ₱</th>}
                   {cols.discountAmt  && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Discount</th>}
                   {cols.taxAmt       && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Tax</th>}
+                  {cols.nonMerchRev  && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Non-Merch</th>}
                   <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Grand Total</th>
                   {cols.totalTendered && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Tendered</th>}
                   {cols.variance     && <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Variance</th>}
@@ -657,6 +656,7 @@ export default function SalesLedger() {
                         {cols.cartDiscFlat && <td className="px-3 py-2 tabular-nums t-text-3 text-right" onClick={rowNav}>{!isReturn && s.cart_discount_flat != null && Number(s.cart_discount_flat) > 0 ? `₱${fmt(s.cart_discount_flat)}` : '—'}</td>}
                         {cols.discountAmt  && <td className="px-3 py-2 tabular-nums t-text-4 text-right" onClick={rowNav}>{isReturn ? '—' : `₱${fmt(s.discount_amount)}`}</td>}
                         {cols.taxAmt       && <td className="px-3 py-2 tabular-nums t-text-3 text-right" onClick={rowNav}>{!isReturn && Number(s.tax_amount) > 0 ? `₱${fmt(s.tax_amount)}` : '—'}</td>}
+                        {cols.nonMerchRev  && <td className="px-3 py-2 tabular-nums t-text-3 text-right" onClick={rowNav}>{!isReturn && Number(s.non_merchandise_revenue) > 0 ? `₱${fmt(s.non_merchandise_revenue)}` : ''}</td>}
                         <td className={`px-3 py-2 tabular-nums font-medium text-right ${gtColor}`} onClick={rowNav}>
                           {isReturn ? `−₱${fmt(Math.abs(gt))}` : `₱${fmt(gt)}`}
                         </td>
@@ -727,6 +727,7 @@ export default function SalesLedger() {
                     {cols.cartDiscFlat && <td />}
                     {cols.discountAmt  && <td className="px-3 py-2 tabular-nums t-text-3 font-semibold text-right">₱{fmt(totals.discount)}</td>}
                     {cols.taxAmt       && <td />}
+                    {cols.nonMerchRev  && <td />}
                     <td className="px-3 py-2 tabular-nums t-text-1 font-bold text-right">₱{fmt(totals.grand_total)}</td>
                     {cols.totalTendered && <td className="px-3 py-2 tabular-nums t-text-2 font-semibold text-right">₱{fmt(Number(totals.grand_total ?? 0) + Number(totals.variance ?? 0))}</td>}
                     {cols.variance   && <td className={`px-3 py-2 tabular-nums font-semibold text-right ${totals.variance != null && totals.variance !== 0 ? 'text-yellow-500' : 't-text-4'}`}>{totals.variance != null && totals.variance !== 0 ? `₱${fmt(totals.variance)}` : '—'}</td>}

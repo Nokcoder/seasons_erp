@@ -123,6 +123,7 @@ export interface PaymentMode {
   is_active: boolean
   is_ar_charge: boolean
   is_ar_credit: boolean
+  is_credit_memo: boolean
 }
 
 export interface CashRegister {
@@ -343,6 +344,7 @@ export interface SaleOut {
   voided_at: string | null
   void_reason: string | null
   idempotency_key: string | null
+  non_merchandise_revenue: number
   items: SaleItemOut[]
   payments: CustomerPaymentOut[]
   row_type: string          // 'sale' | 'return'
@@ -408,8 +410,8 @@ export interface ShiftPatch   { shift_name?: string; is_active?: boolean }
 export interface RegisterCreate { name: string; location_id: number; is_active?: boolean }
 export interface RegisterPatch  { name?: string; location_id?: number; is_active?: boolean }
 
-export interface PaymentModeCreate { name: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean }
-export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean }
+export interface PaymentModeCreate { name: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean }
+export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean }
 
 // ── SALES API ─────────────────────────────────────────────────────────────────
 
@@ -563,6 +565,7 @@ export const salesApi = {
       sale_id?: number | null; location_id?: number | null
       customer_id?: number | null; disposition?: string
       reason?: string; return_date?: string
+      shift_id?: number | null; register_id?: number | null
       items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[]
     }) => post<SalesReturnOut>('/sales/returns', p),
     exchange: (
@@ -590,6 +593,28 @@ export const salesApi = {
       const qs = q.toString()
       return get<ArLedgerOut[]>(`/sales/ar-ledger${qs ? '?' + qs : ''}`)
     },
+  },
+  creditMemos: {
+    list: (params?: {
+      keyword?: string
+      status?: string[]
+      date_from?: string
+      date_to?: string
+      issued_by_user_id?: number
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.keyword)             q.set('keyword',             params.keyword)
+      if (params?.status?.length)      params.status.forEach(s => q.append('status', s))
+      if (params?.date_from)           q.set('date_from',           params.date_from)
+      if (params?.date_to)             q.set('date_to',             params.date_to)
+      if (params?.issued_by_user_id)   q.set('issued_by_user_id',   String(params.issued_by_user_id))
+      const qs = q.toString()
+      return get<CreditMemoListOut[]>(`/sales/credit-memos${qs ? '?' + qs : ''}`)
+    },
+    get:      (id: number)              => get<CreditMemoOut>(`/sales/credit-memos/${id}`),
+    issue:    (p: CreditMemoCreate)     => post<CreditMemoOut>('/sales/credit-memos', p),
+    cancel:   (id: number)              => post<CreditMemoOut>(`/sales/credit-memos/${id}/cancel`, {}),
+    validate: (code: string)            => get<CreditMemoValidateOut>(`/sales/credit-memos/validate?code=${encodeURIComponent(code)}`),
   },
 }
 
@@ -830,6 +855,8 @@ export interface SalesReturnOut {
   disposition:         string | null
   customer_id:         number | null
   created_by_user_id:  number | null
+  shift_id:            number | null
+  register_id:         number | null
   items:               SalesReturnItemOut[]
   exchange_sale_pid:   string | null
   exchange_sale_id:    number | null
@@ -867,6 +894,54 @@ export interface ImportConfirmResponse {
   written: number
   skipped: number
   errors:  ImportErrorRow[]
+}
+
+// ── CREDIT MEMOS ──────────────────────────────────────────────────────────────
+
+export interface CreditMemoRedemptionOut {
+  redemption_id:       number
+  memo_id:             number
+  sale_id:             number
+  amount_redeemed:     number
+  redeemed_at:         string | null
+  redeemed_by_user_id: number
+}
+
+export interface CreditMemoListOut {
+  memo_id:           number
+  code:              string
+  amount:            number
+  status:            string
+  issued_at:         string
+  valid_until:       string
+  issued_by_user_id: number | null
+  issued_by_name:    string | null
+  return_id:         number | null
+  return_pid:        string | null
+  notes:             string | null
+}
+
+export interface CreditMemoOut extends CreditMemoListOut {
+  cancelled_by_user_id: number | null
+  cancelled_at:         string | null
+  redemptions:          CreditMemoRedemptionOut[]
+}
+
+export interface CreditMemoValidateOut {
+  memo_id:        number | null
+  code:           string
+  amount:         number | null
+  valid_until:    string | null
+  status:         string | null
+  is_valid:       boolean
+  invalid_reason: string | null
+}
+
+export interface CreditMemoCreate {
+  amount:      number
+  valid_until?: string
+  return_id?:  number | null
+  notes?:      string
 }
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? '/api'
@@ -908,6 +983,7 @@ export const settingsApi = {
     get:   ()                                        => get<InventoryPolicy>('/settings/inventory-policy'),
     patch: (p: { allow_negative_stock: boolean })    => patch<InventoryPolicy>('/settings/inventory-policy', p),
   },
+  storeName: () => get<{ key: string; value: string }>('/settings/system-settings/store_name'),
 }
 
 // ── STOCK MOVEMENT TYPES ──────────────────────────────────────────────────────

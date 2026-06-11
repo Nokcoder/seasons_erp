@@ -56,6 +56,7 @@ class PaymentModeCreate(BaseModel):
     is_active: bool = True
     is_ar_charge: bool = False
     is_ar_credit: bool = False
+    is_credit_memo: bool = False
 
 
 class PaymentModePatch(BaseModel):
@@ -64,6 +65,7 @@ class PaymentModePatch(BaseModel):
     is_active: Optional[bool] = None
     is_ar_charge: Optional[bool] = None
     is_ar_credit: Optional[bool] = None
+    is_credit_memo: Optional[bool] = None
 
 
 class PaymentModeOut(BaseModel):
@@ -73,6 +75,7 @@ class PaymentModeOut(BaseModel):
     is_active: bool
     is_ar_charge: bool
     is_ar_credit: bool
+    is_credit_memo: bool = False
     class Config: from_attributes = True
 
 
@@ -263,6 +266,7 @@ class SaleOut(BaseModel):
     voided_at: Optional[datetime] = None
     void_reason: Optional[str] = None
     idempotency_key: Optional[str] = None
+    non_merchandise_revenue: Decimal = Decimal("0")
     items: List[SaleItemOut] = []
     payments: List["CustomerPaymentOut"] = []
     row_type: str = 'sale'          # 'sale' or 'return'
@@ -435,6 +439,8 @@ class SalesReturnCreate(BaseModel):
     disposition: Optional[str] = None   # 'cash_refund' or 'credit_to_account'
     reason: Optional[str] = None
     return_date: Optional[date] = None
+    shift_id: Optional[int] = None
+    register_id: Optional[int] = None
     items: List[SalesReturnItemIn]
 
 
@@ -461,6 +467,8 @@ class SalesReturnOut(BaseModel):
     disposition: Optional[str] = None
     customer_id: Optional[int] = None
     created_by_user_id: Optional[int] = None
+    shift_id: Optional[int] = None
+    register_id: Optional[int] = None
     items: List[SalesReturnItemOut] = []
     exchange_sale_pid: Optional[str] = None  # set if an exchange was created
     exchange_sale_id:  Optional[int] = None  # set if an exchange was created
@@ -518,3 +526,67 @@ class SupplierReturnOut(BaseModel):
     created_at: Optional[datetime] = None
     items: List[SupplierReturnItemOut] = []
     class Config: from_attributes = True
+
+
+# ==========================================
+# CREDIT MEMOS
+# ==========================================
+
+class CreditMemoCreate(BaseModel):
+    amount: Decimal
+    valid_until: Optional[date] = None   # defaults to issued_at + 30 days server-side
+    return_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class CreditMemoRedemptionOut(BaseModel):
+    redemption_id:       int
+    memo_id:             int
+    sale_id:             int
+    amount_redeemed:     Decimal
+    redeemed_at:         Optional[datetime] = None
+    redeemed_by_user_id: int
+    class Config: from_attributes = True
+
+
+class CreditMemoOut(BaseModel):
+    memo_id:              int
+    code:                 str
+    amount:               Decimal
+    status:               str
+    issued_at:            date
+    valid_until:          date
+    issued_by_user_id:    Optional[int] = None
+    issued_by_name:       Optional[str] = None
+    return_id:            Optional[int] = None
+    return_pid:           Optional[str] = None
+    notes:                Optional[str] = None
+    cancelled_by_user_id: Optional[int] = None
+    cancelled_at:         Optional[datetime] = None
+    redemptions:          List[CreditMemoRedemptionOut] = []
+    class Config: from_attributes = True
+
+
+class CreditMemoListOut(BaseModel):
+    memo_id:           int
+    code:              str
+    amount:            Decimal
+    status:            str
+    issued_at:         date
+    valid_until:       date
+    issued_by_user_id: Optional[int] = None
+    issued_by_name:    Optional[str] = None
+    return_id:         Optional[int] = None
+    return_pid:        Optional[str] = None
+    notes:             Optional[str] = None
+    class Config: from_attributes = True
+
+
+class CreditMemoValidateOut(BaseModel):
+    memo_id:        Optional[int] = None
+    code:           str
+    amount:         Optional[Decimal] = None
+    valid_until:    Optional[date] = None
+    status:         Optional[str] = None
+    is_valid:       bool
+    invalid_reason: Optional[str] = None   # EXPIRED | CANCELLED | REDEEMED | NOT_FOUND

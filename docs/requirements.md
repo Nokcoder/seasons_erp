@@ -469,6 +469,7 @@ When a customer return is processed:
 2. `return_pid` is a system-generated human-friendly reference (e.g. `RET-00045`).
 3. `location_id` is where returned stock will land. It defaults to the original sale's `location_id`. The cashier may override this at the time of return.
 4. Each returned item references the exact `sale_item_id` (and therefore the exact `cost_layer_id`) from the original sale. This ensures FIFO reversal is precise.
+5. `shift_id` and `register_id` are optional tagging fields that record which shift and register the return was processed under. They default to `null` and carry no business logic — they are used for filtering returns in the Sales Ledger.
 
 ### 14.2 Stock on Return
 
@@ -580,7 +581,7 @@ All sales endpoints live under the `/sales` prefix unless noted.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/sales/` | List posted and voided sales with cursor pagination. Returns `SalesListResponse` with `items`, `totals` (summary row), and `next_cursor`. Filters: date range, location, shift, register, cashier, employee, customer, payment_status, status, has_variance, has_uncosted. |
+| `GET` | `/sales/` | List posted and voided sales with cursor pagination. Returns `SalesListResponse` with `items`, `totals` (summary row), and `next_cursor`. Filters: date range, location, shift, register, cashier, employee, customer, payment_status, status, has_variance, has_uncosted. Each `SaleOut` row includes a computed `non_merchandise_revenue` field: the sum of `line_total` for all `Service` and `Non-Inventory` line items on that sale. The shift and register filters apply to both sale rows and return rows in the mixed list. |
 | `GET` | `/sales/summary` | Revenue and profit dashboard metrics for the filtered scope. Same filter parameters as `GET /sales/` (excluding pagination). Returns merchandise_gross, cart_discounts, non_merchandise_revenue, variances, total_revenue, gross_profit, uncosted_revenue, collections (per payment mode), total_physical, total_virtual, total_collected. |
 | `GET` | `/sales/next-pid` | Returns the next sale PID formatted as `SALE-{n:05d}`, computed as `MAX(CAST(SUBSTRING(sale_pid FROM 6) AS INTEGER)) + 1` over all conforming PIDs. Defaults to `SALE-00001`. |
 | `GET` | `/sales/{id}` | Get a single sale. Line items collapsed to one per variant for display. Includes `payments` (tender rows). |
@@ -635,6 +636,8 @@ All sales endpoints live under the `/sales` prefix unless noted.
 - `location_id` — where stock lands. Defaults to original sale's `location_id` if `sale_id` is provided.
 - `origin_sale_id` — set on any new exchange sale created as a result of this return, linking the transactions.
 - `items` — list of `{ sale_item_id, quantity }`. `sale_item_id` is required when `sale_id` is provided. When processing a blind return (no `sale_id`), `variant_id` and `unit_price` are provided instead.
+- `shift_id` — optional. Tags the return to a shift for ledger filtering.
+- `register_id` — optional. Tags the return to a cash register for ledger filtering.
 
 **What happens inside `POST /sales/returns` (all in one transaction):**
 1. Assigns `return_pid` (e.g. `RET-00045`).

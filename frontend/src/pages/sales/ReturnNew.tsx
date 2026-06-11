@@ -7,7 +7,7 @@ import { stale } from '../../lib/queryClient'
 import {
   salesApi, inventoryApi,
   type SaleItemOut, type SaleOut, type Location, type CustomerOut,
-  type POSCatalogItem, type POSVariant,
+  type POSCatalogItem, type POSVariant, type Shift, type CashRegister,
 } from '../../services/api'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -57,6 +57,8 @@ export default function ReturnNew() {
   const [disposition,  setDisposition]  = useState<'cash_refund' | 'credit_to_account'>('cash_refund')
   const [locationId,   setLocationId]   = useState('')
   const [customerId,   setCustomerId]   = useState('')
+  const [shiftId,      setShiftId]      = useState('')
+  const [registerId,   setRegisterId]   = useState('')
   const [reason,       setReason]       = useState('')
   const [saving,       setSaving]       = useState(false)
   const [error,        setError]        = useState('')
@@ -77,6 +79,16 @@ export default function ReturnNew() {
   const { data: customers = [] } = useQuery({
     queryKey: qk.customers(),
     queryFn:  () => salesApi.customers.list(),
+    ...stale.reference,
+  })
+  const { data: shifts = [] } = useQuery({
+    queryKey: qk.shifts(),
+    queryFn:  () => salesApi.shifts.list(),
+    ...stale.reference,
+  })
+  const { data: registers = [] } = useQuery({
+    queryKey: qk.registers(),
+    queryFn:  () => salesApi.registers.list(),
     ...stale.reference,
   })
   const { data: catalog = [] } = useQuery({
@@ -188,6 +200,8 @@ export default function ReturnNew() {
         sale_id:     saleId,
         location_id: parseInt(locationId),
         customer_id: customerId ? parseInt(customerId) : undefined,
+        shift_id:    shiftId    ? parseInt(shiftId)    : undefined,
+        register_id: registerId ? parseInt(registerId) : undefined,
         disposition,
         reason:      reason.trim() || undefined,
         return_date: returnDate,
@@ -258,6 +272,30 @@ export default function ReturnNew() {
               <option value="">Select location…</option>
               {physLocs.map((l: Location) => (
                 <option key={l.location_id} value={l.location_id}>{l.location_name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* shift */}
+          <div>
+            <label className={lCls}>Shift</label>
+            <select value={shiftId} onChange={e => setShiftId(e.target.value)}
+              className={`${inpCls} w-full`}>
+              <option value="">None</option>
+              {(shifts as Shift[]).filter(s => s.is_active).map(s => (
+                <option key={s.shift_id} value={s.shift_id}>{s.shift_name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* register */}
+          <div>
+            <label className={lCls}>Register</label>
+            <select value={registerId} onChange={e => setRegisterId(e.target.value)}
+              className={`${inpCls} w-full`}>
+              <option value="">None</option>
+              {(registers as CashRegister[]).filter(r => r.is_active).map(r => (
+                <option key={r.register_id} value={r.register_id}>{r.name}</option>
               ))}
             </select>
           </div>

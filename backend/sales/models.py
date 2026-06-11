@@ -20,6 +20,8 @@ class PaymentMode(Base):
     is_active       = Column(Boolean, default=True, nullable=False)
     is_ar_charge    = Column(Boolean, default=False, nullable=False)
     is_ar_credit    = Column(Boolean, default=False, nullable=False)
+    is_credit_memo  = Column(Boolean, default=False, nullable=False,
+                             server_default='false')
 
 
 # ==========================================
@@ -262,6 +264,10 @@ class SalesReturn(Base):
                                 nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("auth.users.user_id"),
                                 nullable=True)
+    shift_id           = Column(Integer, ForeignKey("sales.shifts.shift_id"),
+                                nullable=True)
+    register_id        = Column(Integer, ForeignKey("sales.cash_registers.register_id"),
+                                nullable=True)
 
     sale       = relationship("Sale")
     location   = relationship("Location")
@@ -348,3 +354,56 @@ class SupplierReturnItem(Base):
     supplier_return = relationship("SupplierReturn", back_populates="items")
     variant         = relationship("Variant")
     cost_layer      = relationship("CostLayer")
+
+
+# ==========================================
+# 14. CREDIT MEMOS
+# ==========================================
+class CreditMemo(Base):
+    __tablename__ = "credit_memos"
+    __table_args__ = {"schema": "sales"}
+
+    memo_id              = Column(Integer, primary_key=True)
+    code                 = Column(String(20), unique=True, nullable=False)
+    amount               = Column(Numeric(15, 2), nullable=False)
+    status               = Column(String(20), nullable=False, default='ACTIVE',
+                                  server_default='ACTIVE')
+    issued_at            = Column(Date, nullable=False)
+    valid_until          = Column(Date, nullable=False)
+    issued_by_user_id    = Column(Integer, ForeignKey("auth.users.user_id"),
+                                  nullable=True)
+    return_id            = Column(Integer,
+                                  ForeignKey("sales.sales_returns.return_id"),
+                                  nullable=True)
+    notes                = Column(String(500), nullable=True)
+    cancelled_by_user_id = Column(Integer, ForeignKey("auth.users.user_id"),
+                                  nullable=True)
+    cancelled_at         = Column(DateTime(timezone=True), nullable=True)
+
+    issued_by    = relationship("User", foreign_keys=[issued_by_user_id])
+    cancelled_by = relationship("User", foreign_keys=[cancelled_by_user_id])
+    sales_return = relationship("SalesReturn", foreign_keys=[return_id])
+    redemptions  = relationship("CreditMemoRedemption", back_populates="memo")
+
+
+# ==========================================
+# 15. CREDIT MEMO REDEMPTIONS
+# ==========================================
+class CreditMemoRedemption(Base):
+    __tablename__ = "credit_memo_redemptions"
+    __table_args__ = {"schema": "sales"}
+
+    redemption_id       = Column(Integer, primary_key=True)
+    memo_id             = Column(Integer, ForeignKey("sales.credit_memos.memo_id"),
+                                 nullable=False)
+    sale_id             = Column(Integer, ForeignKey("sales.sales.sale_id"),
+                                 nullable=False)
+    amount_redeemed     = Column(Numeric(15, 2), nullable=False)
+    redeemed_at         = Column(DateTime(timezone=True), server_default=func.now(),
+                                 nullable=False)
+    redeemed_by_user_id = Column(Integer, ForeignKey("auth.users.user_id"),
+                                 nullable=False)
+
+    memo          = relationship("CreditMemo", back_populates="redemptions")
+    sale          = relationship("Sale")
+    redeemed_by   = relationship("User", foreign_keys=[redeemed_by_user_id])

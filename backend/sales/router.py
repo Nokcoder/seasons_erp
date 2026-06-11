@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import random
+import string
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import func
@@ -23,6 +25,16 @@ from settings.models import SystemSetting
 def _get_allow_negative_stock(db: Session) -> bool:
     row = db.query(SystemSetting).filter_by(key="allow_negative_stock").first()
     return row.value == "true" if row else False
+
+
+def _generate_memo_code(db: Session, max_attempts: int = 5) -> str:
+    chars = string.ascii_uppercase + string.digits
+    for _ in range(max_attempts):
+        suffix = ''.join(random.choices(chars, k=6))
+        code = f"CM-{suffix}"
+        if not db.query(models.CreditMemo).filter_by(code=code).first():
+            return code
+    raise HTTPException(status_code=500, detail="Could not generate unique memo code")
 
 router = APIRouter(
     prefix="/sales",
@@ -110,6 +122,7 @@ def create_payment_mode(
         name=payload.name,
         is_physical=payload.is_physical,
         is_active=payload.is_active,
+        is_credit_memo=payload.is_credit_memo,
     )
     db.add(mode)
     db.commit()
@@ -142,6 +155,8 @@ def update_payment_mode(
         mode.is_ar_charge = payload.is_ar_charge
     if payload.is_ar_credit is not None:
         mode.is_ar_credit = payload.is_ar_credit
+    if payload.is_credit_memo is not None:
+        mode.is_credit_memo = payload.is_credit_memo
 
     db.commit()
     db.refresh(mode)
@@ -1073,6 +1088,8 @@ def _collapse_items(items: list) -> list[schemas.SaleItemOut]:
             cost_layer_id=None,
             quantity=sum(r.quantity for r in rows),
             unit_price=first.unit_price,
+            discount_pct=first.discount_pct,
+            discount_flat=first.discount_flat,
             line_total=sum(r.line_total for r in rows),
             gross_cost=first.gross_cost,
             supplier_discount=first.supplier_discount,
@@ -1384,6 +1401,33 @@ def post_draft(
 
     for tender in payload.tenders:
         mode = tender_modes[tender.payment_mode_id]
+
+        # ── Credit memo pre-redemption validation ──────────────────────────
+        validated_memo = None
+        if mode.is_credit_memo:
+            memo_code = tender.reference_number
+            if not memo_code:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Credit Memo tender requires a memo code in reference_number",
+                )
+            validated_memo = (
+                db.query(models.CreditMemo)
+                .filter(models.CreditMemo.code == memo_code)
+                .with_for_update()
+                .first()
+            )
+            if not validated_memo:
+                raise HTTPException(status_code=400, detail="Credit memo not found")
+            today = schemas._ph_today()
+            if validated_memo.status != "ACTIVE" or validated_memo.valid_until < today:
+                reason = (validated_memo.status
+                          if validated_memo.status != "ACTIVE" else "EXPIRED")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Credit memo cannot be redeemed: {reason}",
+                )
+
         amount_to_apply = min(tender.amount, remaining_balance)
         unapplied = tender.amount - amount_to_apply
 
@@ -1405,6 +1449,15 @@ def post_draft(
             ))
             total_applied += amount_to_apply
             remaining_balance -= amount_to_apply
+
+            if validated_memo:
+                validated_memo.status = "REDEEMED"
+                db.add(models.CreditMemoRedemption(
+                    memo_id=validated_memo.memo_id,
+                    sale_id=sale.sale_id,
+                    amount_redeemed=amount_to_apply,
+                    redeemed_by_user_id=_actor.user_id,
+                ))
 
             if customer:
                 if mode.is_ar_charge:
@@ -1433,7 +1486,9 @@ def post_draft(
                         reference_type="customer_payments",
                         reference_id=str(payment.payment_id),
                     ))
-                    standard_applied += amount_to_apply
+
+            if not mode.is_ar_charge and not mode.is_ar_credit:
+                standard_applied += amount_to_apply
 
     # ── 11. Compute balance_due and payment_status ─────────────────────────────
     # standard_applied excludes AR Charge (deferred credit) and AR Credit tenders.
@@ -1600,6 +1655,12 @@ def list_sales(
         out = schemas.SaleOut.model_validate(sale)
         out.items = _collapse_items(sale.items)
         out.payments = []
+        out.non_merchandise_revenue = sum(
+            (item.line_total for item in sale.items
+             if getattr(item, 'variant', None) and getattr(item.variant, 'product', None)
+             and item.variant.product.product_type in ("Service", "Non-Inventory")),
+            Decimal("0"),
+        )
         combined.append(out)
 
     # ── Query and append return rows (only for Posted / unfiltered status) ─
@@ -1614,6 +1675,10 @@ def list_sales(
             rq = rq.filter(models.SalesReturn.location_id == location_id)
         if customer_id is not None:
             rq = rq.filter(models.SalesReturn.customer_id == customer_id)
+        if shift_id is not None:
+            rq = rq.filter(models.SalesReturn.shift_id == shift_id)
+        if register_id is not None:
+            rq = rq.filter(models.SalesReturn.register_id == register_id)
         if search:
             rq = rq.filter(models.SalesReturn.return_pid.ilike(f"%{search}%"))
         all_returns = rq.all()
@@ -1780,6 +1845,23 @@ def void_sale(
                 layer.quantity_remaining + item.quantity,
                 layer.original_quantity,
             )
+
+    # ── 3.5. Reverse any credit memo redemptions for this sale ────────────────
+    cm_redemptions = (
+        db.query(models.CreditMemoRedemption)
+        .filter(models.CreditMemoRedemption.sale_id == sale.sale_id)
+        .all()
+    )
+    for redemption in cm_redemptions:
+        memo = (
+            db.query(models.CreditMemo)
+            .filter(models.CreditMemo.memo_id == redemption.memo_id)
+            .with_for_update()
+            .first()
+        )
+        if memo and memo.status == "REDEEMED":
+            memo.status = "ACTIVE"
+        db.delete(redemption)
 
     # ── 4 & 5. AR ledger + customer balance ────────────────────────────────────
     customer = None
@@ -2197,6 +2279,8 @@ def _do_return(
         disposition=payload.disposition,
         customer_id=customer.customer_id if customer else None,
         created_by_user_id=current_user.user_id,
+        shift_id=payload.shift_id,
+        register_id=payload.register_id,
     )
     db.add(sales_return)
     db.flush()
@@ -2693,6 +2777,239 @@ def get_next_pid(db: Session = Depends(get_db)):
     """)).scalar()
     n = (row or 0) + 1
     return {"next_pid": f"SALE-{n:05d}"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CREDIT MEMOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/credit-memos/validate", response_model=schemas.CreditMemoValidateOut)
+def validate_credit_memo(
+    code: str = Query(..., description="Memo code to validate"),
+    db: Session = Depends(get_db),
+):
+    today = schemas._ph_today()
+    memo = (
+        db.query(models.CreditMemo)
+        .filter(models.CreditMemo.code == code)
+        .first()
+    )
+    if not memo:
+        return schemas.CreditMemoValidateOut(code=code, is_valid=False,
+                                             invalid_reason="NOT_FOUND")
+    if memo.status == "REDEEMED":
+        return schemas.CreditMemoValidateOut(
+            memo_id=memo.memo_id, code=code, amount=memo.amount,
+            valid_until=memo.valid_until, status=memo.status,
+            is_valid=False, invalid_reason="REDEEMED",
+        )
+    if memo.status == "CANCELLED":
+        return schemas.CreditMemoValidateOut(
+            memo_id=memo.memo_id, code=code, amount=memo.amount,
+            valid_until=memo.valid_until, status=memo.status,
+            is_valid=False, invalid_reason="CANCELLED",
+        )
+    if memo.valid_until < today:
+        return schemas.CreditMemoValidateOut(
+            memo_id=memo.memo_id, code=code, amount=memo.amount,
+            valid_until=memo.valid_until, status=memo.status,
+            is_valid=False, invalid_reason="EXPIRED",
+        )
+    return schemas.CreditMemoValidateOut(
+        memo_id=memo.memo_id, code=code, amount=memo.amount,
+        valid_until=memo.valid_until, status="ACTIVE",
+        is_valid=True, invalid_reason=None,
+    )
+
+
+@router.get("/credit-memos", response_model=List[schemas.CreditMemoListOut])
+def list_credit_memos(
+    keyword: Optional[str] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    issued_by_user_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    q = db.query(models.CreditMemo)
+    if keyword:
+        kw = f"%{keyword}%"
+        q = q.filter(
+            models.CreditMemo.code.ilike(kw)
+            | models.CreditMemo.notes.ilike(kw)
+        )
+    if status:
+        q = q.filter(models.CreditMemo.status.in_(status))
+    if date_from:
+        q = q.filter(models.CreditMemo.issued_at >= date_from)
+    if date_to:
+        q = q.filter(models.CreditMemo.issued_at <= date_to)
+    if issued_by_user_id:
+        q = q.filter(models.CreditMemo.issued_by_user_id == issued_by_user_id)
+
+    memos = q.order_by(models.CreditMemo.issued_at.desc(),
+                       models.CreditMemo.memo_id.desc()).all()
+
+    result = []
+    for m in memos:
+        return_pid = None
+        if m.return_id and m.sales_return:
+            return_pid = m.sales_return.return_pid
+        issued_by_name = None
+        if m.issued_by:
+            issued_by_name = getattr(m.issued_by, "full_name", None) or getattr(m.issued_by, "username", None)
+        result.append(schemas.CreditMemoListOut(
+            memo_id=m.memo_id,
+            code=m.code,
+            amount=m.amount,
+            status=m.status,
+            issued_at=m.issued_at,
+            valid_until=m.valid_until,
+            issued_by_user_id=m.issued_by_user_id,
+            issued_by_name=issued_by_name,
+            return_id=m.return_id,
+            return_pid=return_pid,
+            notes=m.notes,
+        ))
+    return result
+
+
+@router.post("/credit-memos", response_model=schemas.CreditMemoOut, status_code=201)
+def issue_credit_memo(
+    payload: schemas.CreditMemoCreate,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    today = schemas._ph_today()
+    valid_until = payload.valid_until or (today + timedelta(days=30))
+    if valid_until <= today:
+        raise HTTPException(status_code=400, detail="valid_until must be in the future")
+
+    code = _generate_memo_code(db)
+    memo = models.CreditMemo(
+        code=code,
+        amount=payload.amount,
+        status="ACTIVE",
+        issued_at=today,
+        valid_until=valid_until,
+        issued_by_user_id=_actor.user_id,
+        return_id=payload.return_id,
+        notes=payload.notes,
+    )
+    db.add(memo)
+    db.commit()
+    db.refresh(memo)
+
+    issued_by_name = None
+    if memo.issued_by:
+        issued_by_name = getattr(memo.issued_by, "full_name", None) or getattr(memo.issued_by, "username", None)
+    return schemas.CreditMemoOut(
+        memo_id=memo.memo_id,
+        code=memo.code,
+        amount=memo.amount,
+        status=memo.status,
+        issued_at=memo.issued_at,
+        valid_until=memo.valid_until,
+        issued_by_user_id=memo.issued_by_user_id,
+        issued_by_name=issued_by_name,
+        return_id=memo.return_id,
+        return_pid=None,
+        notes=memo.notes,
+        cancelled_by_user_id=None,
+        cancelled_at=None,
+        redemptions=[],
+    )
+
+
+@router.get("/credit-memos/{memo_id}", response_model=schemas.CreditMemoOut)
+def get_credit_memo(
+    memo_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    memo = (
+        db.query(models.CreditMemo)
+        .options(selectinload(models.CreditMemo.redemptions))
+        .filter(models.CreditMemo.memo_id == memo_id)
+        .first()
+    )
+    if not memo:
+        raise HTTPException(status_code=404, detail="Credit memo not found")
+
+    return_pid = None
+    if memo.return_id and memo.sales_return:
+        return_pid = memo.sales_return.return_pid
+    issued_by_name = None
+    if memo.issued_by:
+        issued_by_name = getattr(memo.issued_by, "full_name", None) or getattr(memo.issued_by, "username", None)
+    return schemas.CreditMemoOut(
+        memo_id=memo.memo_id,
+        code=memo.code,
+        amount=memo.amount,
+        status=memo.status,
+        issued_at=memo.issued_at,
+        valid_until=memo.valid_until,
+        issued_by_user_id=memo.issued_by_user_id,
+        issued_by_name=issued_by_name,
+        return_id=memo.return_id,
+        return_pid=return_pid,
+        notes=memo.notes,
+        cancelled_by_user_id=memo.cancelled_by_user_id,
+        cancelled_at=memo.cancelled_at,
+        redemptions=[schemas.CreditMemoRedemptionOut.model_validate(r)
+                     for r in memo.redemptions],
+    )
+
+
+@router.post("/credit-memos/{memo_id}/cancel", response_model=schemas.CreditMemoOut)
+def cancel_credit_memo(
+    memo_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    memo = (
+        db.query(models.CreditMemo)
+        .filter(models.CreditMemo.memo_id == memo_id)
+        .with_for_update()
+        .first()
+    )
+    if not memo:
+        raise HTTPException(status_code=404, detail="Credit memo not found")
+    if memo.status != "ACTIVE":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only ACTIVE memos can be cancelled (current status: {memo.status})",
+        )
+    now = datetime.now(timezone.utc)
+    memo.status = "CANCELLED"
+    memo.cancelled_by_user_id = _actor.user_id
+    memo.cancelled_at = now
+    db.commit()
+    db.refresh(memo)
+
+    issued_by_name = None
+    if memo.issued_by:
+        issued_by_name = getattr(memo.issued_by, "full_name", None) or getattr(memo.issued_by, "username", None)
+    return schemas.CreditMemoOut(
+        memo_id=memo.memo_id,
+        code=memo.code,
+        amount=memo.amount,
+        status=memo.status,
+        issued_at=memo.issued_at,
+        valid_until=memo.valid_until,
+        issued_by_user_id=memo.issued_by_user_id,
+        issued_by_name=issued_by_name,
+        return_id=memo.return_id,
+        return_pid=None,
+        notes=memo.notes,
+        cancelled_by_user_id=memo.cancelled_by_user_id,
+        cancelled_at=memo.cancelled_at,
+        redemptions=[],
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

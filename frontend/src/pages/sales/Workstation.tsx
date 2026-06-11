@@ -39,10 +39,13 @@ interface CartItem {
 }
 
 interface TenderRow {
-  localId:          string
-  payment_mode_id:  string
-  amount:           string
-  reference_number: string
+  localId:             string
+  payment_mode_id:     string
+  amount:              string
+  reference_number:    string
+  memo_code:           string
+  memo_valid:          boolean | null
+  memo_invalid_reason: string
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -232,7 +235,7 @@ export default function Workstation() {
 
   // ── tenders ───────────────────────────────────────────────────────────────
   const [tenders, setTenders] = useState<TenderRow[]>([
-    { localId: uid(), payment_mode_id: '', amount: '', reference_number: '' },
+    { localId: uid(), payment_mode_id: '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' },
   ])
 
   // ── ui state ──────────────────────────────────────────────────────────────
@@ -613,6 +616,14 @@ export default function Workstation() {
           flash(`AR Credit amount exceeds available credit (₱${fmt(avail)}).`, true); return
         }
       }
+      if (mode?.is_credit_memo) {
+        if (!t.memo_code.trim()) {
+          flash('Enter a credit memo code before posting.', true); return
+        }
+        if (t.memo_valid !== true) {
+          flash(`Credit memo is invalid: ${t.memo_invalid_reason || 'validate the code first'}.`, true); return
+        }
+      }
     }
 
     setLoading(true); setError('')
@@ -639,7 +650,7 @@ export default function Workstation() {
 
       setCartItems([])
       setCartDiscPct('');  setCartDiscFlat('')
-      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '' }])
+      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
       setActiveDraftId(null)
       setTxnKey(uid())
       clearOriginSale()
@@ -660,7 +671,7 @@ export default function Workstation() {
       await salesApi.drafts.delete(activeDraftId)
       setCartItems([])
       setCartDiscPct(''); setCartDiscFlat('')
-      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '' }])
+      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
       setActiveDraftId(null)
       clearOriginSale()
       await refreshDrafts()
@@ -676,7 +687,7 @@ export default function Workstation() {
     if (cartItems.length > 0 && !window.confirm('Clear current cart and start a new transaction?')) return
     setCartItems([])
     setCartDiscPct(''); setCartDiscFlat('')
-    setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '' }])
+    setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
     setActiveDraftId(null)
     setTxnKey(uid())
     clearOriginSale()
@@ -685,13 +696,47 @@ export default function Workstation() {
 
   // ── tender handlers ───────────────────────────────────────────────────────
   function addTender() {
-    setTenders(t => [...t, { localId: uid(), payment_mode_id: '', amount: '', reference_number: '' }])
+    setTenders(t => [...t, { localId: uid(), payment_mode_id: '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
   }
   function removeTender(localId: string) {
     setTenders(t => t.filter(r => r.localId !== localId))
   }
   function updateTender(localId: string, field: keyof TenderRow, value: string) {
     setTenders(t => t.map(r => r.localId === localId ? { ...r, [field]: value } : r))
+  }
+
+  async function validateMemoCode(localId: string, code: string) {
+    if (!code.trim()) {
+      setTenders(t => t.map(r => r.localId === localId ? { ...r, memo_valid: null, memo_invalid_reason: '' } : r))
+      return
+    }
+    try {
+      const result = await salesApi.creditMemos.validate(code.trim())
+      if (result.is_valid) {
+        setTenders(t => t.map(r => r.localId === localId ? {
+          ...r,
+          amount: String(Number(result.amount).toFixed(2)),
+          reference_number: code.trim(),
+          memo_valid: true,
+          memo_invalid_reason: '',
+        } : r))
+      } else {
+        const msgs: Record<string, string> = {
+          EXPIRED:   'This credit memo has expired',
+          CANCELLED: 'This credit memo has been cancelled',
+          REDEEMED:  'This credit memo has already been redeemed',
+          NOT_FOUND: 'Credit memo not found',
+        }
+        const msg = msgs[result.invalid_reason ?? ''] ?? 'Invalid credit memo'
+        setTenders(t => t.map(r => r.localId === localId ? {
+          ...r, memo_valid: false, memo_invalid_reason: msg,
+        } : r))
+      }
+    } catch {
+      setTenders(t => t.map(r => r.localId === localId ? {
+        ...r, memo_valid: false, memo_invalid_reason: 'Could not validate credit memo',
+      } : r))
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1136,12 +1181,18 @@ export default function Workstation() {
                 const visibleModes = paymentModes.filter(m =>
                   !m.is_ar_credit || hasCustomer
                 )
+                const memoLocked = mode?.is_credit_memo && row.memo_valid === true
                 return (
                   <div key={row.localId} className="space-y-0.5">
                     <div className="flex items-center gap-2">
                       <select
                         value={row.payment_mode_id}
-                        onChange={e => updateTender(row.localId, 'payment_mode_id', e.target.value)}
+                        onChange={e => {
+                          const newModeId = e.target.value
+                          setTenders(t => t.map(r => r.localId === row.localId ? {
+                            ...r, payment_mode_id: newModeId, memo_code: '', memo_valid: null, memo_invalid_reason: '',
+                          } : r))
+                        }}
                         className="flex-none w-32 t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1
                                    focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors"
                       >
@@ -1150,18 +1201,30 @@ export default function Workstation() {
                           <option key={m.payment_mode_id} value={m.payment_mode_id}>{m.name}</option>
                         )}
                       </select>
+                      {mode?.is_credit_memo && (
+                        <input type="text"
+                          value={row.memo_code}
+                          onChange={e => updateTender(row.localId, 'memo_code', e.target.value)}
+                          onBlur={e => validateMemoCode(row.localId, e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') validateMemoCode(row.localId, row.memo_code) }}
+                          placeholder="CM-XXXXXX"
+                          className={`w-28 t-bg-input border rounded px-2 py-1 text-xs font-mono t-text-1
+                                     focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors
+                                     ${row.memo_valid === false ? 'border-red-500' : row.memo_valid === true ? 'border-green-500' : 't-border-strong'}`} />
+                      )}
                       <input type="number" min="0" step="0.01"
                         value={row.amount}
-                        onChange={e => updateTender(row.localId, 'amount', e.target.value)}
+                        readOnly={memoLocked}
+                        onChange={e => !memoLocked && updateTender(row.localId, 'amount', e.target.value)}
                         onFocus={onFocusSelect}
                         placeholder="0.00"
                         className={`w-24 text-right t-bg-input border rounded px-2 py-1 text-xs t-text-1
                                    focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors
-                                   ${arCreditError ? 'border-red-500' : 't-border-strong'}`} />
+                                   ${arCreditError ? 'border-red-500' : memoLocked ? 't-border opacity-60 cursor-not-allowed' : 't-border-strong'}`} />
                       {mode?.is_ar_credit && availableCredit > 0 && (
                         <span className="text-[10px] text-emerald-400">max ₱{fmt(availableCredit)}</span>
                       )}
-                      {showRef && (
+                      {showRef && !mode?.is_credit_memo && (
                         <input type="text"
                           value={row.reference_number}
                           onChange={e => updateTender(row.localId, 'reference_number', e.target.value)}
@@ -1176,6 +1239,12 @@ export default function Workstation() {
                     </div>
                     {arChargeError && <p className="text-[10px] text-red-400 pl-1">{arChargeError}</p>}
                     {arCreditError && <p className="text-[10px] text-red-400 pl-1">{arCreditError}</p>}
+                    {mode?.is_credit_memo && row.memo_valid === false && (
+                      <p className="text-[10px] text-red-400 pl-1">{row.memo_invalid_reason}</p>
+                    )}
+                    {mode?.is_credit_memo && row.memo_valid === true && (
+                      <p className="text-[10px] text-emerald-400 pl-1">Valid — amount auto-filled</p>
+                    )}
                   </div>
                 )
               })}

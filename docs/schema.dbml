@@ -352,6 +352,7 @@ Table payment_modes {
   is_active boolean [default: true]
   is_ar_charge boolean [default: false, note: 'posts amount as AR debit — customer owes more']
   is_ar_credit boolean [default: false, note: 'draws from customer AR credit balance']
+  is_credit_memo boolean [default: false, note: 'identifies the Credit Memo payment mode; exactly one row should have this true']
 }
 
 Table cash_registers {
@@ -399,6 +400,7 @@ Table sales {
   created_by_user_id int [ref: > users.user_id]
 
   subtotal_amount decimal(15,2) [note: 'Sum of all line_totals before discounts and tax']
+  merchandise_subtotal decimal(15,2) [not null, default: 0, note: 'Sum of line_totals for Inventory-type items only. Excludes Service and Non-Inventory. Used by sales summary for merchandise gross.']
   cart_discount_pct decimal(5,2) [note: 'cart-level percent discount applied first; null = none']
   cart_discount_flat decimal(15,2) [note: 'cart-level flat discount applied after pct; null = none']
   discount_amount decimal(15,2) [default: 0]
@@ -419,7 +421,6 @@ Table sales {
 
   idempotency_key varchar [unique, note: 'Prevents double-posting on network retries. Set by client.']
   origin_sale_id int [ref: > sales.sale_id, note: 'If this sale originated from another transaction (e.g. exchange), links back to the original. Nullable for normal sales.']
-  created_by_user_id int [ref: > users.user_id]
 }
 
 Table sale_items {
@@ -474,14 +475,15 @@ Table sales_returns {
   return_id int [pk, increment]
   return_pid varchar [unique, not null, note: 'Human-friendly reference e.g. RET-00045']
   sale_id int [ref: > sales.sale_id]
-  location_id int [ref: > locations.location_id, note: 'Where stock is returned to. Defaults to original sale location. 
-  disposition varchar [note: 'cash_refund or credit_to_account']
+  location_id int [ref: > locations.location_id, note: 'Where stock is returned to. Defaults to original sale location. Cashier may override.']
+  disposition varchar [note: 'cash_refund | credit_memo | credit_to_account']
   customer_id int [ref: > customers.customer_id, note: 'nullable — for blind returns with known customer']
-Cashier may override.']
-  return_date datetime
+  return_date date [not null, note: 'Manila local calendar date of the return']
   reason varchar
   grand_total decimal(15,2) [note: 'Total value being credited back']
   created_by_user_id int [ref: > users.user_id]
+  shift_id int [ref: > shifts.shift_id, note: 'optional — tags return to a shift for ledger filtering']
+  register_id int [ref: > cash_registers.register_id, note: 'optional — tags return to a register for ledger filtering']
 }
 
 Table sales_return_items {
@@ -521,6 +523,32 @@ Table shifts {
   shift_id int [pk, increment]
   shift_name varchar [not null, note: 'e.g. AM, PM, Shift 1, Graveyard']
   is_active boolean [default: true]
+}
+
+// ==========================================
+// 15. CREDIT MEMOS
+// ==========================================
+Table credit_memos {
+  memo_id int [pk, increment]
+  code varchar(20) [unique, not null, note: 'Short alphanumeric code e.g. CM-AB1C2D. Generated server-side.']
+  amount decimal(15,2) [not null]
+  status varchar(20) [not null, default: 'ACTIVE', note: 'ACTIVE | REDEEMED | EXPIRED | CANCELLED. Terminal states: REDEEMED, EXPIRED, CANCELLED.']
+  issued_at date [not null, note: 'Manila local date of issuance']
+  valid_until date [not null, note: 'Last date the memo can be redeemed. Defaults to issued_at + 30 days.']
+  issued_by_user_id int [ref: > users.user_id]
+  return_id int [ref: > sales_returns.return_id, note: 'nullable — linked return if issued during a walk-in return']
+  notes varchar(500)
+  cancelled_by_user_id int [ref: > users.user_id]
+  cancelled_at datetime
+}
+
+Table credit_memo_redemptions {
+  redemption_id int [pk, increment]
+  memo_id int [ref: > credit_memos.memo_id, not null]
+  sale_id int [ref: > sales.sale_id, not null]
+  amount_redeemed decimal(15,2) [not null]
+  redeemed_at datetime [not null, note: 'UTC timestamp of redemption']
+  redeemed_by_user_id int [ref: > users.user_id, not null]
 }
 
 
