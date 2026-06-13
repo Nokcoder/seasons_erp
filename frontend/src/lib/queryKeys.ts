@@ -62,10 +62,12 @@ export const qk = {
   customerPayments: (id: number)                    => ['customers', id, 'payments'] as const,
   customerReturns:  (id: number)                    => ['customers', id, 'returns']  as const,
   customerAging:    (filters?: Record<string, unknown>) => ['customers', 'aging', filters] as const,
-  arLedger:     (filters?: Record<string, unknown>) => ['ar-ledger', filters]     as const,
+  arLedger:          (filters?: Record<string, unknown>) => ['ar-ledger',          filters] as const,
+  customerArLedgerView: (filters?: Record<string, unknown>) => ['customers', 'ar-ledger-view', filters] as const,
   creditMemos:          (filters?: Record<string, unknown>) => ['creditMemos', filters]          as const,
   creditMemo:           (id: number)                        => ['creditMemos', id]               as const,
   creditMemoValidate:   (code: string)                      => ['creditMemos', 'validate', code] as const,
+  arLedgerPayments:     (saleId: number)                    => ['ar-ledger', 'payments', saleId] as const,
 
   // ── auth / settings ───────────────────────────────────────────────────
   users:           () => ['users'] as const,

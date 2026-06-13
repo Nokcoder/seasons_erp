@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Shipment } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
 
 function fmtDate(s: string | null | undefined) {
@@ -36,9 +37,12 @@ export default function Receiving() {
   }, [shipments])
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
     return shipments.filter(s => {
-      if (q && !((s.shipment_pid ?? '').toLowerCase().includes(q) || (s.supplier?.supplier_name ?? '').toLowerCase().includes(q) || (s.reference_number ?? '').toLowerCase().includes(q))) return false
+      if (search.trim() && !(
+        normalize(s.shipment_pid ?? '').includes(normalize(search)) ||
+        normalize(s.supplier?.supplier_name ?? '').includes(normalize(search)) ||
+        normalize(s.reference_number ?? '').includes(normalize(search))
+      )) return false
       if (supFilter && s.supplier?.supplier_name !== supFilter) return false
       return true
     })

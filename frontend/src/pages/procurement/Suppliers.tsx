@@ -4,6 +4,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { catalogueApi, type InvSupplier, type SupplierCreate, type SupplierUpdate } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 
 // ── Status toggle ─────────────────────────────────────────────────────────────
 type StatusFilter = 'Active' | 'Inactive' | 'Both'
@@ -109,13 +110,12 @@ export default function Suppliers() {
   })
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
     return suppliers.filter(s => {
       if (statusFilter === 'Active'   && s.is_deleted)  return false
       if (statusFilter === 'Inactive' && !s.is_deleted) return false
-      if (q && !(
-        s.supplier_code.toLowerCase().includes(q) ||
-        s.supplier_name.toLowerCase().includes(q)
+      if (search.trim() && !(
+        normalize(s.supplier_code).includes(normalize(search)) ||
+        normalize(s.supplier_name).includes(normalize(search))
       )) return false
       return true
     })

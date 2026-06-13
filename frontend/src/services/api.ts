@@ -294,6 +294,26 @@ export interface ArLedgerOut {
   occurred_at: string | null
 }
 
+export interface CustomerARLedgerRowOut {
+  sale_id:          number
+  sale_pid:         string
+  customer_id:      number
+  customer_name:    string
+  transaction_date: string  // "YYYY-MM-DD"
+  due_date:         string  // "YYYY-MM-DD"
+  grand_total:      number
+  balance_due:      number
+  status:           string  // Open | Partial | Paid | Overdue
+}
+
+export interface ARLedgerPaymentRowOut {
+  payment_id:       number
+  payment_date:     string  // "YYYY-MM-DD"
+  payment_mode:     string
+  reference_number: string | null
+  amount_applied:   number
+}
+
 export interface CustomerAgingOut {
   customer_id:   number
   customer_name: string
@@ -534,7 +554,7 @@ export const salesApi = {
       const qs = q.toString()
       return get<CustomerPaymentOut[]>(`/sales/customers/${id}/payments${qs ? '?' + qs : ''}`)
     },
-    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string }) =>
+    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string; sale_id?: number }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
     aging: (params?: { search?: string }) => {
       const qs = params?.search ? `?search=${encodeURIComponent(params.search)}` : ''
@@ -581,6 +601,30 @@ export const salesApi = {
       return post<ExchangeResult>(`/sales/returns/exchange${qs ? '?' + qs : ''}`, p)
     },
     itemsForReturn: (sale_id: number) => get<SaleItemOut[]>(`/sales/sale/${sale_id}/items-for-return`),
+  },
+  customerArLedger: {
+    list: (params?: {
+      customer_id?: number
+      date_from?: string
+      date_to?: string
+      status?: string[]
+      search?: string
+      limit?: number
+      cursor?: number
+    }) => {
+      const q = new URLSearchParams()
+      if (params?.customer_id) q.set('customer_id', String(params.customer_id))
+      if (params?.date_from)   q.set('date_from',   params.date_from)
+      if (params?.date_to)     q.set('date_to',     params.date_to)
+      if (params?.status?.length) params.status.forEach(s => q.append('status', s))
+      if (params?.search)      q.set('search',      params.search)
+      if (params?.limit  != null) q.set('limit',  String(params.limit))
+      if (params?.cursor != null) q.set('cursor', String(params.cursor))
+      const qs = q.toString()
+      return get<CustomerARLedgerRowOut[]>(`/sales/customers/ar-ledger${qs ? '?' + qs : ''}`)
+    },
+    payments: (saleId: number) =>
+      get<ARLedgerPaymentRowOut[]>(`/sales/customers/ar-ledger/${saleId}/payments`),
   },
   arLedger: {
     list: (params?: { customer_id?: number; reason?: string; date_from?: string; date_to?: string; cursor?: number }) => {
@@ -908,17 +952,18 @@ export interface CreditMemoRedemptionOut {
 }
 
 export interface CreditMemoListOut {
-  memo_id:           number
-  code:              string
-  amount:            number
-  status:            string
-  issued_at:         string
-  valid_until:       string
-  issued_by_user_id: number | null
-  issued_by_name:    string | null
-  return_id:         number | null
-  return_pid:        string | null
-  notes:             string | null
+  memo_id:            number
+  code:               string
+  amount:             number
+  status:             string
+  issued_at:          string
+  valid_until:        string
+  issued_by_user_id:  number | null
+  issued_by_name:     string | null
+  return_id:          number | null
+  return_pid:         string | null
+  notes:              string | null
+  redeemed_sale_id:   number | null
 }
 
 export interface CreditMemoOut extends CreditMemoListOut {

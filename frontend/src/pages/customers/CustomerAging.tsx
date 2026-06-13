@@ -6,6 +6,7 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
 import { salesApi } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
 
 const ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']
@@ -67,8 +68,7 @@ export default function CustomerAging() {
 
   const filtered = useMemo(() => {
     if (!search.trim()) return rows
-    const s = search.trim().toLowerCase()
-    return rows.filter(r => r.customer_name.toLowerCase().includes(s))
+    return rows.filter(r => normalize(r.customer_name).includes(normalize(search)))
   }, [rows, search])
 
   const totals = useMemo(() =>

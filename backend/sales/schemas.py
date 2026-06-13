@@ -149,6 +149,30 @@ class AgingRowOut(BaseModel):
 
 
 # ==========================================
+# CUSTOMER AR LEDGER VIEW  (invoice-level)
+# ==========================================
+
+class CustomerARLedgerRowOut(BaseModel):
+    sale_id:          int
+    sale_pid:         str
+    customer_id:      int
+    customer_name:    str
+    transaction_date: date
+    due_date:         date
+    grand_total:      Decimal
+    balance_due:      Decimal
+    status:           str  # Open | Partial | Paid | Overdue
+
+
+class ARLedgerPaymentRowOut(BaseModel):
+    payment_id:       int
+    payment_date:     date
+    payment_mode:     str
+    reference_number: Optional[str] = None
+    amount_applied:   Decimal
+
+
+# ==========================================
 # AR LEDGER  (read-only; written programmatically)
 # ==========================================
 
@@ -406,6 +430,7 @@ class RecordPaymentIn(BaseModel):
     payment_date: Optional[datetime] = None
     reference_number: Optional[str] = None
     notes: Optional[str] = None
+    sale_id: Optional[int] = None  # when provided, applies payment to this specific sale
 
 
 class ArLedgerOut(BaseModel):
@@ -568,17 +593,18 @@ class CreditMemoOut(BaseModel):
 
 
 class CreditMemoListOut(BaseModel):
-    memo_id:           int
-    code:              str
-    amount:            Decimal
-    status:            str
-    issued_at:         date
-    valid_until:       date
-    issued_by_user_id: Optional[int] = None
-    issued_by_name:    Optional[str] = None
-    return_id:         Optional[int] = None
-    return_pid:        Optional[str] = None
-    notes:             Optional[str] = None
+    memo_id:            int
+    code:               str
+    amount:             Decimal
+    status:             str
+    issued_at:          date
+    valid_until:        date
+    issued_by_user_id:  Optional[int] = None
+    issued_by_name:     Optional[str] = None
+    return_id:          Optional[int] = None
+    return_pid:         Optional[str] = None
+    notes:              Optional[str] = None
+    redeemed_sale_id:   Optional[int] = None
     class Config: from_attributes = True
 
 

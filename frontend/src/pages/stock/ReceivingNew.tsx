@@ -9,6 +9,7 @@ import {
   type InvProduct, type InvVariant, type EmployeeOut,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { normalize } from '../../lib/normalize'
 
 // ui_standards §10 — onFocus selects all numeric input value
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -74,19 +75,18 @@ export default function ReceivingNew() {
   const [error,      setError]      = useState('')
 
   const searchResults = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return []
+    if (!search.trim()) return []
     const out: { product: InvProduct; variant: InvVariant }[] = []
     for (const p of products) {
       for (const v of p.variants) {
         if (v.is_deleted) continue
         if (v.bundle_components && v.bundle_components.length > 0) continue  // bundles blocked
         if (
-          p.brand.toLowerCase().includes(q) ||
-          v.variant_name.toLowerCase().includes(q) ||
-          v.PID.toLowerCase().includes(q) ||
-          (v.sku ?? '').toLowerCase().includes(q) ||
-          v.barcodes.some(b => b.barcode.toLowerCase().includes(q))
+          normalize(p.brand).includes(normalize(search)) ||
+          normalize(v.variant_name).includes(normalize(search)) ||
+          normalize(v.PID).includes(normalize(search)) ||
+          normalize(v.sku ?? '').includes(normalize(search)) ||
+          v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
         ) out.push({ product: p, variant: v })
         if (out.length >= 20) return out
       }

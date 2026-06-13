@@ -9,6 +9,7 @@ import {
   type SaleItemOut, type SaleOut, type Location, type CustomerOut,
   type POSCatalogItem, type POSVariant, type Shift, type CashRegister,
 } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
 
@@ -139,14 +140,13 @@ export default function ReturnNew() {
   // ── blind return catalog search ───────────────────────────────────────────
   const catalogResults = useMemo(() => {
     if (!catalogSearch.trim()) return []
-    const q = catalogSearch.toLowerCase()
     const results: Array<{ item: POSCatalogItem; variant: POSVariant }> = []
     for (const item of (catalog as POSCatalogItem[])) {
       for (const v of item.variants) {
         if (
-          v.variant_name.toLowerCase().includes(q) ||
-          v.PID.toLowerCase().includes(q) ||
-          item.product_brand.toLowerCase().includes(q)
+          normalize(v.variant_name).includes(normalize(catalogSearch)) ||
+          normalize(v.PID).includes(normalize(catalogSearch)) ||
+          normalize(item.product_brand).includes(normalize(catalogSearch))
         ) {
           results.push({ item, variant: v })
           if (results.length >= 20) return results

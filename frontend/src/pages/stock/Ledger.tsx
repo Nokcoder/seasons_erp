@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { inventoryApi, stockApi, type LedgerEntry } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
 
 const REASONS = ['RECEIVE','TRANSFER_IN','TRANSFER_OUT','RETURN_IN','RETURN_OUT','ADJUST'] as const
@@ -106,13 +107,12 @@ export default function Ledger() {
 
   // Client-side keyword filter (brand, PID, variant name, ref ID)
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return allEntries
+    if (!search.trim()) return allEntries
     return allEntries.filter((e: LedgerEntry) =>
-      (e.variant?.product?.brand ?? '').toLowerCase().includes(q) ||
-      (e.variant?.variant_name   ?? '').toLowerCase().includes(q) ||
-      (e.variant?.PID            ?? '').toLowerCase().includes(q) ||
-      (e.reference_id            ?? '').toLowerCase().includes(q)
+      normalize(e.variant?.product?.brand ?? '').includes(normalize(search)) ||
+      normalize(e.variant?.variant_name   ?? '').includes(normalize(search)) ||
+      normalize(e.variant?.PID            ?? '').includes(normalize(search)) ||
+      normalize(e.reference_id            ?? '').includes(normalize(search))
     )
   }, [allEntries, search])
 

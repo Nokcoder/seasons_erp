@@ -155,31 +155,144 @@ sale — the ledger tracks the net balance automatically.
 
 ## Page 3 — AR Ledger (`/customers/ledger`)
 
-Standalone view of all AR movements across all customers.
+Invoice-level master-detail view of all outstanding and settled
+sales per customer. The master row shows one sale per line.
+Expanding a row reveals the payment transactions applied to it.
 
 ### Layout
-Full-width table. Filter panel left. Table right.
-Follows same pattern as Inventory Ledger.
+Full-width table. Filter controls top. Table below.
+Export control top right.
 
-### Filter Panel
-- Keyword search bar per ui_standards §1 — searches
-  customer name, reference ID
-- Customer filter (dropdown of active customers)
-- Type filter: SALE / PAYMENT / RETURN / ADJUSTMENT /
-  AR_CHARGE / AR_CREDIT (multi-select)
-- Date range filter
-- Balance filter: Outstanding / Credit / All
+### Filters
+- Keyword search bar per ui_standards §1 — searches customer name.
+  Normalize per ui_standards §11.
+- Customer filter — dropdown of active customers
+- Date range filter — filters by Issue Date (transaction_date)
+- Status filter — multi-select: Open, Partial, Paid, Overdue
+  (default: all except Paid)
 
-### Table Columns
-- Date
-- Customer Name
-- Type
-- Reference (clickable — links to source document)
-- Amount Change
-- Notes
+### Master Row (one per Posted sale with linked customer)
+
+Pre-sorted: customer_name ASC, transaction_date ASC.
+No user-controlled column sorting.
+
+#### Columns (in order)
+- Expand toggle — chevron icon (▶ collapsed, ▼ expanded).
+  Clicking expands the row to show payment detail rows below.
+  Each row manages its expanded state independently.
+- Customer Name — show only on first row of customer group;
+  blank for subsequent rows. Clickable → /customers/:customer_id
+- Invoice # — sale PID. Clickable → /sales/ledger/:sale_id
+- Issue Date — sale.transaction_date (MMM DD, YYYY)
+- Due Date — transaction_date + customer.terms_days (MMM DD, YYYY),
+  computed server-side
+- Total Amount — sale.grand_total, right-aligned currency
+- Balance Due — sale.balance_due, right-aligned currency,
+  blank when 0
+- Status — badge, color coded:
+  Open → blue
+  Partial → orange
+  Paid → green
+  Overdue → red
+- Actions — context-aware buttons:
+  If balance_due > 0: primary [ Receive Payment ] button
+  Always: secondary [ View Invoice ] link → /sales/ledger/:sale_id
+- Subtotal — far right, per-customer sum of all Balance Due values.
+  Show only on first row of customer group; blank for subsequent rows.
+
+#### Status derivation (server-side)
+- due_date = transaction_date + customer.terms_days
+- If balance_due = 0 → Paid
+- If due_date < today and balance_due > 0 → Overdue
+- If 0 < balance_due < grand_total and not overdue → Partial
+- If balance_due = grand_total and not overdue → Open
+
+Only Posted sales with a linked customer are included.
+Walk-in sales (no customer_id) are excluded.
+
+### Detail Rows (payment history per sale)
+
+Rendered below the master row when expanded.
+Fetched on first expand — not loaded until needed.
+Source: customer_payments joined to customer_payment_applied
+where sale_id matches. One row per payment event.
+
+#### Detail columns (in order)
+- (empty — aligns with Expand toggle column)
+- Payment Date — customer_payments.payment_date (MMM DD, YYYY)
+- Payment Mode — payment_modes.name
+- Reference Number — customer_payments.reference_number
+  (blank if null)
+- Amount Applied — customer_payment_applied.amount_applied,
+  displayed as negative (e.g. −₱ 20,000.00), right-aligned,
+  muted/italic style to distinguish from master rows
+- (remaining columns empty)
+
+If no payments exist yet, show a single muted row:
+"No payments recorded for this invoice."
+
+### Receive Payment modal
+
+Triggered by [ Receive Payment ] button on any master row.
+Pre-populates with the selected sale's customer and balance due.
+
+Fields:
+- Customer (read-only — pre-filled from master row)
+- Invoice # (read-only — pre-filled from master row)
+- Payment Date (defaults to today Manila time, editable)
+- Payment Mode (dropdown — excludes is_ar_charge and
+  is_ar_credit modes — POS only)
+- Amount (required — defaults to full balance_due,
+  editable down but not above balance_due)
+- Reference Number (shown for non-physical payment modes)
+- Notes (optional)
+
+On submit:
+- Creates customer_payments row
+- Creates customer_payment_applied row linking to the sale
+- Updates sale.balance_due and sale.payment_status
+- Updates customer.outstanding_balance
+- Writes ar_ledger entry reason = PAYMENT
+- Closes modal, refreshes master row and expanded detail rows
+- Admin and Manager only
+
+### Totals row
+Sticky tfoot row pinned at bottom.
+Sums Balance Due and Total Amount across all currently
+visible filtered rows. Labeled "Total" in Customer Name column.
 
 ### Export
-XLSX export of current filtered result set.
+XLSX export of current filtered master rows (no detail rows).
+Columns: Customer Name, Invoice #, Issue Date, Due Date,
+Total Amount, Balance Due, Status.
+Totals row included at bottom.
+File named: ar_ledger_{today}.xlsx
+
+### Backend Endpoints
+
+#### GET /customers/ar-ledger (existing — no change to signature)
+Returns master rows per spec above.
+
+#### GET /customers/ar-ledger/:sale_id/payments (new)
+Returns payment detail rows for one sale.
+Called only when a row is first expanded.
+
+Response per payment row:
+```json
+{
+  "payment_id": 1,
+  "payment_date": "2026-06-15",
+  "payment_mode": "Cash",
+  "reference_number": "RCPT-449",
+  "amount_applied": 20000.00
+}
+```
+
+#### POST /customers/:customer_id/payment (existing)
+Used by the Receive Payment modal — no endpoint change needed.
+Frontend must pass sale_id so the payment is applied to the
+correct invoice via customer_payment_applied.
+Verify the existing endpoint accepts and processes sale_id.
 
 ---
 

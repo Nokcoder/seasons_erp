@@ -323,3 +323,73 @@ All numeric inputs across:
 Or as a global CSS + JS rule applied to all
 `input[type="number"]` elements to avoid having to add
 it manually to every field.
+
+---
+
+## 11. Search Input Normalization — Global Standard
+
+Applies to all keyword search inputs across the entire app,
+both client-side filtered lists and server-side search params.
+
+### Behavior
+Before comparing a search query against any field value,
+normalize both the query and the field value by:
+1. Converting to lowercase
+2. Removing all hyphens ( - )
+3. Removing all spaces
+4. Removing all underscores ( _ )
+
+This means UDA-0001, UDA 0001, UDA0001, and UDA_0001
+all match identically.
+
+### Implementation — shared helper
+Create a shared normalize helper in frontend/src/lib/normalize.ts:
+
+```typescript
+export function normalize(value: string): string {
+  return value.toLowerCase().replace(/[-_\s]/g, '');
+}
+```
+
+### Client-side usage
+Replace all existing .trim().toLowerCase().includes(q) patterns with:
+
+```typescript
+import { normalize } from '@/lib/normalize';
+// ...
+normalize(field).includes(normalize(searchQuery))
+```
+
+Apply to every client-side search filter across all pages.
+
+### Server-side usage
+On backend search params, apply the same normalization before
+running ILIKE or string comparison queries:
+
+```python
+def normalize_search(q: str) -> str:
+    import re
+    return re.sub(r'[-_\s]', '', q).lower()
+```
+
+Apply to all backend search handlers that accept a search= or
+keyword= query parameter.
+
+### Scope
+All search inputs listed in the file/field inventory:
+- CustomerARLedger.tsx — customer_name, reference_id
+- CustomerAging.tsx — customer_name
+- CreditMemo.tsx — code, notes (server-side)
+- CustomerList.tsx — customer_name
+- Catalogue.tsx — brand, variant_name, PID, SKU, barcodes
+- Detail.tsx — bundle component lookup
+- Suppliers.tsx — supplier_code, supplier_name
+- ReturnNew.tsx — variant_name, PID, product_brand
+- Returns.tsx — Return PID (server-side)
+- SalesLedger.tsx — Sale PID, cashier, customer (server-side)
+- Workstation.tsx — customer name, product search
+- Ledger.tsx — brand, variant_name, PID, reference_id
+- Receiving.tsx — shipment_pid, supplier_name, reference_number
+- ReceivingNew.tsx — brand, variant_name, PID, SKU, barcodes
+- TransferNew.tsx — brand, variant_name, PID, SKU, barcodes
+- Transfers.tsx — transfer_pid, location names

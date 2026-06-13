@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import random
+import re
 import string
 from typing import List, Optional
 
@@ -20,6 +21,14 @@ from sales import models, schemas
 from inventory import models as inv_models
 from inventory.models import Location
 from settings.models import SystemSetting
+
+
+def _normalize_search(q: str) -> str:
+    return re.sub(r'[-_\s]', '', q).lower()
+
+
+def normalize_search(q: str) -> str:
+    return re.sub(r'[-_\s]', '', q).lower()
 
 
 def _get_allow_negative_stock(db: Session) -> bool:
@@ -321,7 +330,7 @@ def list_customers(
     if not include_deleted:
         q = q.filter(models.Customer.is_deleted == False)
     if search:
-        q = q.filter(models.Customer.customer_name.ilike(f"%{search}%"))
+        q = q.filter(models.Customer.customer_name.ilike(f"%{normalize_search(search)}%"))
     return _attach_overdue_flags(db, q.all())
 
 
@@ -364,7 +373,7 @@ def get_ar_aging(
     # 1. Active customers (optional name filter)
     q = db.query(models.Customer).filter(models.Customer.is_deleted == False)
     if search:
-        q = q.filter(models.Customer.customer_name.ilike(f"%{search}%"))
+        q = q.filter(models.Customer.customer_name.ilike(f"%{normalize_search(search)}%"))
     customers = q.order_by(models.Customer.customer_name).all()
     if not customers:
         return []
@@ -498,6 +507,125 @@ def get_ar_aging(
 
     result.sort(key=lambda r: (r.customer_name, r.invoice_date))
     return result
+
+
+@router.get("/customers/ar-ledger", response_model=List[schemas.CustomerARLedgerRowOut])
+def get_customer_ar_ledger_view(
+    customer_id: Optional[int] = None,
+    date_from:   Optional[date] = None,
+    date_to:     Optional[date] = None,
+    status:      List[str] = Query(default=[]),
+    search:      Optional[str] = None,
+    limit:       int = 200,
+    cursor:      int = 0,
+    db: Session = Depends(get_db),
+):
+    """Invoice-level AR ledger — one row per Posted sale with a linked customer,
+    sorted customer_name ASC then transaction_date ASC."""
+    today = datetime.now(timezone.utc).date()
+    zero  = Decimal("0")
+
+    q = (
+        db.query(models.Sale)
+        .join(models.Customer, models.Sale.customer_id == models.Customer.customer_id)
+        .options(selectinload(models.Sale.customer))
+        .filter(
+            models.Sale.status == "Posted",
+            models.Sale.customer_id.isnot(None),
+            models.Customer.is_deleted == False,
+        )
+        .order_by(
+            models.Customer.customer_name.asc(),
+            models.Sale.transaction_date.asc(),
+            models.Sale.sale_id.asc(),
+        )
+    )
+
+    if customer_id:
+        q = q.filter(models.Sale.customer_id == customer_id)
+    if date_from:
+        q = q.filter(models.Sale.transaction_date >= date_from)
+    if date_to:
+        q = q.filter(models.Sale.transaction_date <= date_to)
+    if search:
+        q = q.filter(models.Customer.customer_name.ilike(f"%{normalize_search(search)}%"))
+
+    raw_rows = q.limit(2000).all()
+
+    norm_search = normalize_search(search) if search else None
+    result: list[schemas.CustomerARLedgerRowOut] = []
+    for sale in raw_rows:
+        customer = sale.customer
+
+        if norm_search and norm_search not in normalize_search(customer.customer_name):
+            continue
+
+        terms = customer.terms_days or 0
+        due   = sale.transaction_date + timedelta(days=terms)
+        bal   = sale.balance_due or zero
+        total = sale.grand_total  or zero
+
+        if bal <= zero:
+            st = "Paid"
+        elif due < today and bal > zero:
+            st = "Overdue"
+        elif zero < bal < total:
+            st = "Partial"
+        else:
+            st = "Open"
+
+        if status and st not in status:
+            continue
+
+        result.append(schemas.CustomerARLedgerRowOut(
+            sale_id=sale.sale_id,
+            sale_pid=sale.sale_pid or "",
+            customer_id=customer.customer_id,
+            customer_name=customer.customer_name,
+            transaction_date=sale.transaction_date,
+            due_date=due,
+            grand_total=total,
+            balance_due=bal,
+            status=st,
+        ))
+
+    return result[cursor: cursor + limit]
+
+
+@router.get("/customers/ar-ledger/{sale_id}/payments", response_model=List[schemas.ARLedgerPaymentRowOut])
+def get_ar_ledger_sale_payments(
+    sale_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return all payments applied to a specific sale, ordered by payment date."""
+    rows = (
+        db.query(models.CustomerPaymentApplied)
+        .join(
+            models.CustomerPayment,
+            models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id,
+        )
+        .options(
+            selectinload(models.CustomerPaymentApplied.payment)
+            .selectinload(models.CustomerPayment.payment_mode)
+        )
+        .filter(models.CustomerPaymentApplied.sale_id == sale_id)
+        .order_by(
+            models.CustomerPayment.payment_date.asc(),
+            models.CustomerPaymentApplied.apply_id.asc(),
+        )
+        .all()
+    )
+    return [
+        schemas.ARLedgerPaymentRowOut(
+            payment_id=r.payment_id,
+            payment_date=(r.payment.payment_date.date()
+                          if r.payment.payment_date else date.today()),
+            payment_mode=r.payment.payment_mode.name,
+            reference_number=r.payment.reference_number,
+            amount_applied=r.amount_applied,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/customers/{customer_id}", response_model=schemas.CustomerOut)
@@ -646,10 +774,31 @@ def record_customer_payment(
         reference_number=payload.reference_number,
         notes=payload.notes,
         payment_date=payload.payment_date or datetime.now(timezone.utc),
-        unapplied_amount=payload.amount,
+        unapplied_amount=Decimal("0") if payload.sale_id else payload.amount,
     )
     db.add(payment)
     db.flush()
+
+    if payload.sale_id:
+        sale = db.query(models.Sale).filter(
+            models.Sale.sale_id == payload.sale_id,
+            models.Sale.customer_id == customer_id,
+        ).first()
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found for this customer")
+        db.add(models.CustomerPaymentApplied(
+            payment_id=payment.payment_id,
+            sale_id=payload.sale_id,
+            amount_applied=payload.amount,
+        ))
+        new_balance = max(Decimal("0"), (sale.balance_due or Decimal("0")) - payload.amount)
+        sale.balance_due = new_balance
+        if new_balance <= Decimal("0"):
+            sale.payment_status = "Paid"
+        elif new_balance < (sale.grand_total or Decimal("0")):
+            sale.payment_status = "Partial"
+        else:
+            sale.payment_status = "Unpaid"
 
     db.add(models.ArLedger(
         customer_id=customer_id,
@@ -1632,7 +1781,7 @@ def list_sales(
     if register_id is not None:
         q = q.filter(models.Sale.register_id == register_id)
     if search:
-        q = q.filter(models.Sale.sale_pid.ilike(f"%{search}%"))
+        q = q.filter(models.Sale.sale_pid.ilike(f"%{normalize_search(search)}%"))
     if has_variance:
         q = q.filter(
             models.Sale.audit_variance.isnot(None),
@@ -2517,7 +2666,7 @@ def list_returns(
     if date_to is not None:
         q = q.filter(models.SalesReturn.return_date <= date_to)
     if search:
-        q = q.filter(models.SalesReturn.return_pid.ilike(f"%{search}%"))
+        q = q.filter(models.SalesReturn.return_pid.ilike(f"%{normalize_search(search)}%"))
     if has_exchange:
         exchange_sale_ids_sq = (
             db.query(models.Sale.origin_sale_id)
@@ -2834,7 +2983,7 @@ def list_credit_memos(
 ):
     q = db.query(models.CreditMemo)
     if keyword:
-        kw = f"%{keyword}%"
+        kw = f"%{normalize_search(keyword)}%"
         q = q.filter(
             models.CreditMemo.code.ilike(kw)
             | models.CreditMemo.notes.ilike(kw)
@@ -2850,6 +2999,19 @@ def list_credit_memos(
 
     memos = q.order_by(models.CreditMemo.issued_at.desc(),
                        models.CreditMemo.memo_id.desc()).all()
+
+    # Batch-fetch redemption sale_ids in one query
+    memo_ids = [m.memo_id for m in memos]
+    redemption_map: dict[int, int] = {}
+    if memo_ids:
+        redemption_map = dict(
+            db.query(
+                models.CreditMemoRedemption.memo_id,
+                models.CreditMemoRedemption.sale_id,
+            )
+            .filter(models.CreditMemoRedemption.memo_id.in_(memo_ids))
+            .all()
+        )
 
     result = []
     for m in memos:
@@ -2871,6 +3033,7 @@ def list_credit_memos(
             return_id=m.return_id,
             return_pid=return_pid,
             notes=m.notes,
+            redeemed_sale_id=redemption_map.get(m.memo_id),
         ))
     return result
 

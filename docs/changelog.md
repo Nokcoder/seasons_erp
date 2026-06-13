@@ -1,5 +1,118 @@
 # Changelog
 
+## 2026-06-13 — Credit Memo page spec compliance
+
+### Overview
+Brought `CreditMemo.tsx` into full alignment with `docs/customers_credit_memo.md`. All backend endpoints were already implemented; four frontend deviations corrected and one missing backend field added.
+
+### Backend — `backend/sales/schemas.py`
+- Added `redeemed_sale_id: Optional[int] = None` to `CreditMemoListOut`
+
+### Backend — `backend/sales/router.py`
+- `list_credit_memos`: batch-fetches `credit_memo_redemptions.sale_id` for all returned memos in one query; included as `redeemed_sale_id` in each list row
+
+### Frontend — `frontend/src/services/api.ts`
+- Added `redeemed_sale_id: number | null` to `CreditMemoListOut` interface
+
+### Frontend — `frontend/src/pages/customers/CreditMemo.tsx`
+- **Remove auto-print**: `handleIssue` no longer calls `setPrintMemo` or `window.print()` after issuing — spec requires no automatic print prompt; print remains on-demand via the Print button in the detail modal
+- **Button text**: "Issue & Print" → "Issue"
+- **Issued By filter**: added `issuedByFilter` state, `authApi.users.allActive()` query, and user dropdown in filter sidebar; wired to `issued_by_user_id` API param; cleared by "Clear filters"
+- **XLSX export**: added "Redeemed In Sale" column (sale ID when REDEEMED, blank otherwise)
+
+---
+
+## 2026-06-13 — AR Ledger master-detail upgrade (expand + Receive Payment)
+
+### Overview
+Upgraded the AR Ledger at `/customers/ledger` from a flat invoice list to a master-detail table. Each invoice row now expands to show the payment history applied to it. A per-row Receive Payment modal applies payments directly to a specific invoice, writing a `customer_payment_applied` row and updating `sale.balance_due` / `sale.payment_status` in one transaction.
+
+### Backend — `backend/sales/schemas.py`
+- Added `ARLedgerPaymentRowOut` schema: `payment_id`, `payment_date`, `payment_mode`, `reference_number`, `amount_applied`
+- Added `sale_id: Optional[int] = None` to `RecordPaymentIn` — when present, payment is applied to that specific invoice
+
+### Backend — `backend/sales/router.py`
+- Added `GET /customers/ar-ledger/{sale_id}/payments` — returns all `customer_payment_applied` rows for one sale, joined to `customer_payments` + `payment_modes`; ordered by payment date then apply_id
+- Updated `record_customer_payment` (`POST /customers/{customer_id}/payment`): when `sale_id` is provided, creates a `CustomerPaymentApplied` row, updates `sale.balance_due` (floor 0), and sets `sale.payment_status` to Paid / Partial / Unpaid; sets `unapplied_amount = 0` when sale_id is given
+
+### Frontend — `frontend/src/lib/queryKeys.ts`
+- Added `arLedgerPayments: (saleId: number) => ['ar-ledger', 'payments', saleId]`
+
+### Frontend — `frontend/src/services/api.ts`
+- Added `ARLedgerPaymentRowOut` interface
+- Added `salesApi.customerArLedger.payments(saleId)` — calls `/sales/customers/ar-ledger/{saleId}/payments`
+- Updated `salesApi.customers.recordPayment` signature to accept optional `sale_id`
+
+### Frontend — `frontend/src/pages/customers/CustomerARLedger.tsx` (full rewrite)
+- Table expanded from 8 to 10 columns: Expand toggle, Customer Name, Invoice #, Issue Date, Due Date, Total Amount, Balance Due, Status, **Actions**, Subtotal
+- Expand/collapse per row via chevron toggle; state tracked in `Set<number>`
+- `DetailRows` sub-component: lazy-fetched via `useQuery` on first expand (cached thereafter); shows one row per applied payment with date, mode, reference, and amount as negative muted italic; "No payments recorded" empty state
+- Actions column: **Receive Payment** primary button (when `balance_due > 0`) + **View Invoice** secondary link
+- Receive Payment modal: pre-fills customer name, invoice #, today's Manila date, and full balance due; Payment Mode dropdown excludes `is_ar_charge` / `is_ar_credit` modes; Reference Number shown only for non-physical modes; amount capped at `balance_due`; on success invalidates both master and payment-detail query caches
+- `useQueries` now fetches customers, payment modes, and paginated invoice pages in one call
+
+---
+
+## 2026-06-12 — Search input normalization (§11)
+
+### Overview
+Implemented `normalize()` / `normalize_search()` per `docs/ui_standards.md §11`. Searches now strip hyphens, underscores, and spaces before comparing, so "abc-123", "abc_123", and "abc 123" all match each other.
+
+### Frontend — `frontend/src/lib/normalize.ts` (new)
+- Created shared helper: `normalize(value) → value.toLowerCase().replace(/[-_\s]/g, '')`
+
+### Frontend — all client-side search filters updated
+Replaced `.trim().toLowerCase().includes()` with `normalize(field).includes(normalize(query))` in:
+- `CustomerAging.tsx` — customer_name
+- `CustomerList.tsx` — customer_name
+- `Catalogue.tsx` — brand, variant_name, PID, SKU, barcodes, category_name (also normalizes search tags)
+- `Detail.tsx` — PID, variant_name (both bundle component search functions)
+- `Suppliers.tsx` — supplier_code, supplier_name
+- `ReturnNew.tsx` — variant_name, PID, product_brand
+- `Workstation.tsx` — product_brand, variant_name, PID, barcodes
+- `Ledger.tsx` — brand, variant_name, PID, reference_id
+- `Receiving.tsx` — shipment_pid, supplier_name, reference_number
+- `ReceivingNew.tsx` — brand, variant_name, PID, SKU, barcodes
+- `TransferNew.tsx` — brand, variant_name, PID, SKU, barcodes
+- `Transfers.tsx` — transfer_pid, from/to location names
+
+### Backend — `backend/sales/router.py`
+- Added public `normalize_search(q)` helper (identical to existing `_normalize_search`)
+- Applied `normalize_search` before all ILIKE queries in: `list_customers`, `get_ar_aging`, `get_customer_ar_ledger_view`, `list_sales`, `list_returns`, `list_credit_memos`
+- `get_customer_ar_ledger_view` in-memory filter now uses `normalize_search` (was `_normalize_search`)
+
+---
+
+## 2026-06-12 — Customer AR Ledger redesign (invoice-level view)
+
+### Overview
+Replaced the per-customer AR ledger stub with a global, invoice-level AR ledger at `/customers/ledger`. One row per Posted sale with a linked customer, sorted by customer name then transaction date. Status is computed server-side from balance and due date.
+
+### Backend — `backend/sales/schemas.py`
+- Added `CustomerARLedgerRowOut` schema: `sale_id`, `sale_pid`, `customer_id`, `customer_name`, `transaction_date`, `due_date`, `grand_total`, `balance_due`, `status` (Open/Partial/Paid/Overdue)
+
+### Backend — `backend/sales/router.py`
+- Added `_normalize_search()` helper: strips hyphens, spaces, underscores, lowercases — applied to both the search query and customer name for fuzzy matching
+- Added `GET /customers/ar-ledger` endpoint: accepts `customer_id`, `date_from`, `date_to`, `status` (multi-value), `search`, `limit`, `cursor`; joins `Sale` → `Customer`; fetches up to 2000 rows from DB then applies Python-side status derivation and normalized search; returns a cursor-paginated slice
+- **Route ordering fix**: positioned the new static route before `GET /customers/{customer_id}` to prevent FastAPI from matching "ar-ledger" as an integer `customer_id` parameter
+
+### Frontend — `frontend/src/services/api.ts`
+- Added `CustomerARLedgerRowOut` interface
+- Added `salesApi.customerArLedger.list()` — calls `/sales/customers/ar-ledger`, serializes `status[]` as repeated query params
+
+### Frontend — `frontend/src/lib/queryKeys.ts`
+- Added `customerArLedgerView` key: `['customers', 'ar-ledger-view', filters]`
+
+### Frontend — `frontend/src/pages/customers/CustomerARLedger.tsx` (full rewrite)
+- Filter bar: keyword search (customer name), customer dropdown, issue date range, status chips (Open/Partial/Overdue/Paid; default: all except Paid)
+- Load More pagination: `pageOffsets` array + `useQueries`; resets on filter change via `prevParams` ref
+- Grouped table rows: customer name shown only on first row of each group; per-customer Balance Due subtotal in last column
+- Sticky tfoot: Total Amount and Total Balance Due across all loaded rows
+- XLSX export: `ar_ledger_YYYY-MM-DD.xlsx`
+- **Decimal coercion fix**: API returns `grand_total`/`balance_due` as strings (Python `Decimal`); added `Number()` coercion in the `reduce` accumulator and subtotals Map to prevent string-concatenation NaN
+
+---
+
 ## 2026-06-12 — Docs: update schema.dbml to match deployed state
 
 **`docs/schema.dbml`** — Five corrections to bring the schema document in line with the codebase:

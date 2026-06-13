@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { salesApi } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -71,7 +72,7 @@ export default function CustomerList() {
       if (statusFilter === 'Active'   && c.is_deleted)  return false
       if (statusFilter === 'Inactive' && !c.is_deleted) return false
       if (search.trim()) {
-        if (!c.customer_name.toLowerCase().includes(search.trim().toLowerCase())) return false
+        if (!normalize(c.customer_name).includes(normalize(search))) return false
       }
       if (balanceFilter === 'outstanding' && !(c.outstanding_balance > 0)) return false
       if (balanceFilter === 'overdue'     && !c.is_overdue)                return false

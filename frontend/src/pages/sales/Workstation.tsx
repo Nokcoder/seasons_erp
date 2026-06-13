@@ -8,6 +8,7 @@ import {
   type Shift, type PaymentMode, type CashRegister, type Location, type EmployeeOut,
   type POSCatalogItem, type POSVariant, type POSUomOption, type SaleOut, type CustomerOut,
 } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 
 // ── local types ───────────────────────────────────────────────────────────────
 
@@ -273,16 +274,15 @@ export default function Workstation() {
 
   // ── search results ────────────────────────────────────────────────────────
   const searchResults = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return [] as Array<{ item: POSCatalogItem; variant: POSVariant }>
+    if (!search.trim()) return [] as Array<{ item: POSCatalogItem; variant: POSVariant }>
     const out: Array<{ item: POSCatalogItem; variant: POSVariant }> = []
     for (const item of catalog) {
       for (const v of item.variants) {
         const hit =
-          item.product_brand.toLowerCase().includes(q) ||
-          v.variant_name.toLowerCase().includes(q) ||
-          v.PID.toLowerCase().includes(q) ||
-          v.barcodes.some(b => b.barcode.toLowerCase().includes(q))
+          normalize(item.product_brand).includes(normalize(search)) ||
+          normalize(v.variant_name).includes(normalize(search)) ||
+          normalize(v.PID).includes(normalize(search)) ||
+          v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
         if (hit) out.push({ item, variant: v })
         if (out.length >= 80) break
       }

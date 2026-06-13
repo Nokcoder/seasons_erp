@@ -12,6 +12,7 @@ import {
   type PriceHistoryItem, type CostHistoryItem, type SalesHistoryItem, type PurchaseHistoryItem,
   type UOM, type Category, type InvSupplier,
 } from '../../services/api'
+import { normalize } from '../../lib/normalize'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -357,7 +358,7 @@ export default function Detail() {
     const results: InvVariant[] = []
     for (const p of all)
       for (const v of p.variants)
-        if (!v.is_deleted && (v.PID.toLowerCase().includes(q.toLowerCase()) || v.variant_name.toLowerCase().includes(q.toLowerCase())))
+        if (!v.is_deleted && (normalize(v.PID).includes(normalize(q)) || normalize(v.variant_name).includes(normalize(q))))
           results.push(v)
     setBundleSearch(results.slice(0, 10))
   }
@@ -427,7 +428,7 @@ export default function Detail() {
     const results: InvVariant[] = []
     for (const p of all)
       for (const v of p.variants)
-        if (!v.is_deleted && (v.PID.toLowerCase().includes(q.toLowerCase()) || v.variant_name.toLowerCase().includes(q.toLowerCase())))
+        if (!v.is_deleted && (normalize(v.PID).includes(normalize(q)) || normalize(v.variant_name).includes(normalize(q))))
           results.push(v)
     setAddVBundleSearch(results.slice(0, 10))
   }

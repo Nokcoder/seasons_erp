@@ -5,7 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
-import { salesApi, settingsApi, type CreditMemoListOut, type CreditMemoOut } from '../../services/api'
+import { salesApi, settingsApi, authApi, type CreditMemoListOut, type CreditMemoOut, type UserEntry } from '../../services/api'
 import * as XLSX from 'xlsx'
 
 const ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']
@@ -80,10 +80,11 @@ export default function CreditMemo() {
   const today = todayLocal()
 
   // ── filters ────────────────────────────────────────────────────────────────
-  const [keyword, setKeyword]         = useState('')
-  const [statusFilter, setStatusFilter] = useState<string[]>(['ACTIVE'])
-  const [dateFrom, setDateFrom]       = useState('')
-  const [dateTo, setDateTo]           = useState('')
+  const [keyword, setKeyword]               = useState('')
+  const [statusFilter, setStatusFilter]     = useState<string[]>(['ACTIVE'])
+  const [dateFrom, setDateFrom]             = useState('')
+  const [dateTo, setDateTo]                 = useState('')
+  const [issuedByFilter, setIssuedByFilter] = useState('')
 
   // ── modal states ───────────────────────────────────────────────────────────
   const [isIssueOpen, setIsIssueOpen] = useState(false)
@@ -101,11 +102,12 @@ export default function CreditMemo() {
 
   // ── data queries ───────────────────────────────────────────────────────────
   const filters = useMemo(() => ({
-    keyword:  keyword || undefined,
-    status:   statusFilter.length ? statusFilter : undefined,
-    date_from: dateFrom || undefined,
-    date_to:   dateTo   || undefined,
-  }), [keyword, statusFilter, dateFrom, dateTo])
+    keyword:            keyword || undefined,
+    status:             statusFilter.length ? statusFilter : undefined,
+    date_from:          dateFrom || undefined,
+    date_to:            dateTo   || undefined,
+    issued_by_user_id:  issuedByFilter ? Number(issuedByFilter) : undefined,
+  }), [keyword, statusFilter, dateFrom, dateTo, issuedByFilter])
 
   const { data: memos = [], isLoading, isFetching } = useQuery({
     queryKey: qk.creditMemos(filters),
@@ -127,6 +129,12 @@ export default function CreditMemo() {
   })
   const storeName = storeNameData?.value ?? 'Store'
 
+  const { data: activeUsers = [] } = useQuery({
+    queryKey: qk.usersActive(),
+    queryFn:  () => authApi.users.allActive(),
+    ...stale.reference,
+  })
+
   // ── helpers ────────────────────────────────────────────────────────────────
   function toggleStatus(s: string) {
     setStatusFilter(prev =>
@@ -147,7 +155,7 @@ export default function CreditMemo() {
     }
     setIsIssuing(true)
     try {
-      const memo = await salesApi.creditMemos.issue({
+      await salesApi.creditMemos.issue({
         amount,
         valid_until: issueForm.valid_until,
         return_id:   issueForm.return_id ? parseInt(issueForm.return_id) : undefined,
@@ -156,8 +164,6 @@ export default function CreditMemo() {
       qc.invalidateQueries({ queryKey: qk.creditMemos({}) })
       setIsIssueOpen(false)
       setIssueForm({ amount: '', valid_until: todayPlusDays(30), return_id: '', notes: '' })
-      setPrintMemo(memo)
-      setTimeout(() => window.print(), 150)
     } catch (e: unknown) {
       const msg = (e as { detail?: string })?.detail ?? 'Failed to issue credit memo.'
       setIssueError(String(msg))
@@ -185,13 +191,14 @@ export default function CreditMemo() {
 
   function handleExport() {
     const ws = XLSX.utils.json_to_sheet(memos.map(m => ({
-      'Memo Code':    m.code,
-      'Issued Date':  fmtDate(m.issued_at),
-      'Valid Until':  fmtDate(m.valid_until),
-      'Amount':       Number(m.amount),
-      'Status':       displayStatus(m),
-      'Issued By':    m.issued_by_name ?? '',
-      'Return Ref':   m.return_pid ?? '',
+      'Memo Code':          m.code,
+      'Issued Date':        fmtDate(m.issued_at),
+      'Valid Until':        fmtDate(m.valid_until),
+      'Amount':             Number(m.amount),
+      'Status':             displayStatus(m),
+      'Issued By':          m.issued_by_name ?? '',
+      'Return Ref':         m.return_pid ?? '',
+      'Redeemed In Sale':   m.redeemed_sale_id ?? '',
     })))
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Credit Memos')
@@ -292,8 +299,23 @@ export default function CreditMemo() {
             value={dateTo} onChange={e => setDateTo(e.target.value)} />
         </div>
 
+        <div>
+          <label className={labelCls}>Issued By</label>
+          <select className={inputCls} value={issuedByFilter}
+            onChange={e => setIssuedByFilter(e.target.value)}>
+            <option value="">All users</option>
+            {(activeUsers as UserEntry[]).map(u => (
+              <option key={u.user_id} value={u.user_id}>
+                {u.employee
+                  ? `${u.employee.first_name} ${u.employee.last_name}`
+                  : u.username}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <button className={btnGhost} onClick={() => {
-          setKeyword(''); setStatusFilter(['ACTIVE']); setDateFrom(''); setDateTo('')
+          setKeyword(''); setStatusFilter(['ACTIVE']); setDateFrom(''); setDateTo(''); setIssuedByFilter('')
         }}>Clear filters</button>
       </aside>
 
@@ -419,7 +441,7 @@ export default function CreditMemo() {
                 Cancel
               </button>
               <button className={btnPrimary} disabled={isIssuing} onClick={handleIssue}>
-                {isIssuing ? 'Issuing…' : 'Issue & Print'}
+                {isIssuing ? 'Issuing…' : 'Issue'}
               </button>
             </div>
           </div>
@@ -497,15 +519,15 @@ export default function CreditMemo() {
                 )}
 
                 <div className="flex gap-2 justify-end mt-2">
+                  {(detailData.status === 'ACTIVE' || detailData.status === 'REDEEMED') && (
+                    <button className={btnGhost} onClick={() => { setPrintMemo(detailData); setTimeout(() => window.print(), 150) }}>
+                      Print
+                    </button>
+                  )}
                   {detailData.status === 'ACTIVE' && (
-                    <>
-                      <button className={btnGhost} onClick={() => { setPrintMemo(detailData); setTimeout(() => window.print(), 150) }}>
-                        Print
-                      </button>
-                      <button className={btnDanger} onClick={() => setCancelConfirmId(detailData.memo_id)}>
-                        Cancel Memo
-                      </button>
-                    </>
+                    <button className={btnDanger} onClick={() => setCancelConfirmId(detailData.memo_id)}>
+                      Cancel Memo
+                    </button>
                   )}
                   <button className={btnGhost} onClick={() => setSelectedMemoId(null)}>Close</button>
                 </div>

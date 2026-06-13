@@ -157,13 +157,15 @@ Modal triggered by Issue Credit Memo button.
 1. Generate unique memo code — short alphanumeric (e.g. CM-XXXXXX)
 2. Insert credit_memos row with status = ACTIVE
 3. Close modal, refresh table
-4. Print prompt — offer to print the physical memo (see Print Layout below)
+4. Modal closes, table refreshes showing the new memo with ACTIVE status. No automatic print prompt.
 
 ---
 
 ## Print Layout
 
-Triggered after issue or from detail view on ACTIVE memos.
+Print is optional and on-demand. Triggered manually from the Credit Memo detail view via a Print button. No automatic print prompt is shown after issuing a memo. This supports digital-only workflows where no physical stub is needed.
+
+Triggered from detail view on ACTIVE memos.
 Single thermal/A5 print sheet:
 
 ```

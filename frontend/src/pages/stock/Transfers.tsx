@@ -6,6 +6,7 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Transfer } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { normalize } from '../../lib/normalize'
 
 function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
@@ -27,12 +28,11 @@ export default function Transfers() {
   const [statusFilter, setStatusFilter] = useState('')
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
     return transfers.filter(t => {
-      if (q && !(
-        (t.transfer_pid ?? '').toLowerCase().includes(q) ||
-        (t.from_location?.location_name ?? '').toLowerCase().includes(q) ||
-        (t.to_location?.location_name   ?? '').toLowerCase().includes(q)
+      if (search.trim() && !(
+        normalize(t.transfer_pid ?? '').includes(normalize(search)) ||
+        normalize(t.from_location?.location_name ?? '').includes(normalize(search)) ||
+        normalize(t.to_location?.location_name   ?? '').includes(normalize(search))
       )) return false
       if (locFilter && t.from_location?.location_name !== locFilter && t.to_location?.location_name !== locFilter) return false
       if (statusFilter && (t.status ?? 'Posted') !== statusFilter) return false

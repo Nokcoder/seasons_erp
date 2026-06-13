@@ -11,6 +11,7 @@ import {
   type InvProduct, type InvVariant, type Location, type Category, type InvSupplier, type UOM,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { normalize } from '../../lib/normalize'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -301,19 +302,19 @@ export default function Catalogue() {
 
   const filteredRows = useMemo(() => {
     const allTerms = [
-      ...searchTags.map(t => t.toLowerCase()),
-      ...(liveInput.trim() ? [liveInput.trim().toLowerCase()] : []),
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
     ]
     const base = allRows.filter(({ product: p, variant: v }) => {
       if (statusFilter !== 'Both' && p.status !== statusFilter) return false
       if (allTerms.length > 0) {
         const hit = (term: string) =>
-          p.brand.toLowerCase().includes(term)
-          || v.variant_name.toLowerCase().includes(term)
-          || v.PID.toLowerCase().includes(term)
-          || (v.sku ?? '').toLowerCase().includes(term)
-          || v.barcodes.some(b => b.barcode.toLowerCase().includes(term))
-          || p.categories.some(c => c.category_name.toLowerCase().includes(term))
+          normalize(p.brand).includes(term)
+          || normalize(v.variant_name).includes(term)
+          || normalize(v.PID).includes(term)
+          || normalize(v.sku ?? '').includes(term)
+          || v.barcodes.some(b => normalize(b.barcode).includes(term))
+          || p.categories.some(c => normalize(c.category_name).includes(term))
         if (!allTerms.every(hit)) return false
       }
       if (catFilter !== '' && !p.categories.some(c => c.category_id === catFilter)) return false
