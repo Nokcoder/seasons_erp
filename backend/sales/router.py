@@ -131,7 +131,11 @@ def create_payment_mode(
         name=payload.name,
         is_physical=payload.is_physical,
         is_active=payload.is_active,
+        is_ar_charge=payload.is_ar_charge,
+        is_ar_credit=payload.is_ar_credit,
         is_credit_memo=payload.is_credit_memo,
+        is_pdc=payload.is_pdc,
+        is_cash=payload.is_cash,
     )
     db.add(mode)
     db.commit()
@@ -166,6 +170,10 @@ def update_payment_mode(
         mode.is_ar_credit = payload.is_ar_credit
     if payload.is_credit_memo is not None:
         mode.is_credit_memo = payload.is_credit_memo
+    if payload.is_pdc is not None:
+        mode.is_pdc = payload.is_pdc
+    if payload.is_cash is not None:
+        mode.is_cash = payload.is_cash
 
     db.commit()
     db.refresh(mode)
@@ -604,11 +612,18 @@ def get_ar_ledger_sale_payments(
             models.CustomerPayment,
             models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id,
         )
+        .join(
+            models.PaymentMode,
+            models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id,
+        )
         .options(
             selectinload(models.CustomerPaymentApplied.payment)
             .selectinload(models.CustomerPayment.payment_mode)
         )
-        .filter(models.CustomerPaymentApplied.sale_id == sale_id)
+        .filter(
+            models.CustomerPaymentApplied.sale_id == sale_id,
+            models.PaymentMode.is_ar_charge == False,
+        )
         .order_by(
             models.CustomerPayment.payment_date.asc(),
             models.CustomerPaymentApplied.apply_id.asc(),
@@ -767,6 +782,19 @@ def record_customer_payment(
     """Record a standalone customer payment — reduces outstanding_balance via AR ledger."""
     customer = _load_customer(customer_id, db)
 
+    mode = db.query(models.PaymentMode).filter(
+        models.PaymentMode.payment_mode_id == payload.payment_mode_id,
+        models.PaymentMode.is_active == True,
+    ).first()
+    if not mode:
+        raise HTTPException(status_code=400, detail="Payment mode not found or inactive")
+    if mode.is_pdc:
+        if not (payload.check_number and payload.check_date and payload.bank_name):
+            raise HTTPException(
+                status_code=400,
+                detail="PDC payment requires check_number, check_date, and bank_name.",
+            )
+
     payment = models.CustomerPayment(
         customer_id=customer_id,
         payment_mode_id=payload.payment_mode_id,
@@ -776,6 +804,11 @@ def record_customer_payment(
         payment_date=payload.payment_date or datetime.now(timezone.utc),
         unapplied_amount=Decimal("0") if payload.sale_id else payload.amount,
     )
+    if mode.is_pdc:
+        payment.check_number = payload.check_number
+        payment.check_date   = payload.check_date
+        payment.bank_name    = payload.bank_name
+        payment.check_status = "IN_VAULT"
     db.add(payment)
     db.flush()
 
@@ -843,6 +876,256 @@ def get_ar_ledger(
     if cursor:
         q = q.filter(models.ArLedger.ar_ledger_id < cursor)
     return q.limit(limit).all()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PDC VAULT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/pdc", response_model=schemas.PDCMaturityResponse)
+def get_pdc_vault(
+    status: Optional[str] = Query(None, description="IN_VAULT | DEPOSITED | BOUNCED"),
+    bank_name: Optional[str] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    as_of: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    """PDC vault — list and summarise post-dated cheques by maturity."""
+    today = as_of or _ph_today()
+    status_filter = status or "IN_VAULT"
+
+    pdc_mode_ids = [
+        m.payment_mode_id
+        for m in db.query(models.PaymentMode).filter(
+            models.PaymentMode.is_pdc == True
+        ).all()
+    ]
+
+    empty_summary = schemas.PDCMaturitySummary(
+        maturing_today=Decimal("0"),
+        maturing_next_7_days=Decimal("0"),
+        total_uncleared=Decimal("0"),
+        total_overdue=Decimal("0"),
+    )
+    if not pdc_mode_ids:
+        return schemas.PDCMaturityResponse(summary=empty_summary, entries=[])
+
+    # Summary is always computed against IN_VAULT regardless of status filter
+    in_vault = (
+        db.query(models.CustomerPayment)
+        .filter(
+            models.CustomerPayment.payment_mode_id.in_(pdc_mode_ids),
+            models.CustomerPayment.check_status == "IN_VAULT",
+        )
+        .all()
+    )
+    next_7 = today + timedelta(days=7)
+    summary = schemas.PDCMaturitySummary(
+        maturing_today=sum(
+            (p.amount for p in in_vault if p.check_date == today),
+            Decimal("0"),
+        ),
+        maturing_next_7_days=sum(
+            (p.amount for p in in_vault if p.check_date and today <= p.check_date <= next_7),
+            Decimal("0"),
+        ),
+        total_uncleared=sum((p.amount for p in in_vault), Decimal("0")),
+        total_overdue=sum(
+            (p.amount for p in in_vault if p.check_date and p.check_date < today),
+            Decimal("0"),
+        ),
+    )
+
+    q = (
+        db.query(models.CustomerPayment)
+        .options(selectinload(models.CustomerPayment.applications))
+        .filter(
+            models.CustomerPayment.payment_mode_id.in_(pdc_mode_ids),
+            models.CustomerPayment.check_status == status_filter,
+        )
+    )
+    if bank_name:
+        q = q.filter(models.CustomerPayment.bank_name.ilike(f"%{bank_name}%"))
+    if date_from:
+        q = q.filter(models.CustomerPayment.check_date >= date_from)
+    if date_to:
+        q = q.filter(models.CustomerPayment.check_date <= date_to)
+    payments = q.order_by(models.CustomerPayment.check_date.asc()).all()
+
+    customer_ids = {p.customer_id for p in payments if p.customer_id}
+    customer_map: dict[int, str] = {}
+    if customer_ids:
+        rows = db.query(models.Customer).filter(
+            models.Customer.customer_id.in_(customer_ids)
+        ).all()
+        customer_map = {c.customer_id: c.customer_name for c in rows}
+
+    entries = [
+        schemas.PDCEntryOut(
+            payment_id=p.payment_id,
+            customer_id=p.customer_id or 0,
+            customer_name=customer_map.get(p.customer_id, "Unknown") if p.customer_id else "Unknown",
+            check_number=p.check_number or "",
+            check_date=p.check_date,
+            bank_name=p.bank_name or "",
+            check_status=p.check_status or "",
+            amount=p.amount,
+            payment_date=p.payment_date.date() if p.payment_date else None,
+            days_until_maturity=(p.check_date - today).days if p.check_date else 0,
+            sale_ids=[a.sale_id for a in p.applications],
+        )
+        for p in payments
+    ]
+    return schemas.PDCMaturityResponse(summary=summary, entries=entries)
+
+
+@router.patch("/pdc/{payment_id}/deposit", response_model=schemas.CustomerPaymentOut)
+def deposit_pdc_check(
+    payment_id: int,
+    payload: schemas.PDCDepositIn,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    """Mark a PDC cheque as deposited and update its payment date to the actual deposit date."""
+    payment = (
+        db.query(models.CustomerPayment)
+        .options(
+            selectinload(models.CustomerPayment.payment_mode),
+            selectinload(models.CustomerPayment.applications),
+        )
+        .filter(models.CustomerPayment.payment_id == payment_id)
+        .first()
+    )
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if not payment.payment_mode.is_pdc:
+        raise HTTPException(status_code=400, detail="Payment is not a PDC payment")
+    if payment.check_status != "IN_VAULT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot deposit check with status '{payment.check_status}'",
+        )
+
+    payment.check_status = "DEPOSITED"
+    payment.payment_date = datetime(
+        payload.deposited_at.year,
+        payload.deposited_at.month,
+        payload.deposited_at.day,
+        tzinfo=timezone.utc,
+    )
+
+    write_audit(db, "sales.customer_payments", str(payment_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                new_values={"check_status": "DEPOSITED",
+                            "deposited_at": str(payload.deposited_at)})
+    db.commit()
+    return _load_payment(payment_id, db)
+
+
+@router.patch("/pdc/{payment_id}/bounce", response_model=schemas.CustomerPaymentOut)
+def bounce_pdc_check(
+    payment_id: int,
+    payload: schemas.PDCBounceIn,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    """Mark a PDC cheque as bounced and reverse all applied payments against their sales."""
+    payment = (
+        db.query(models.CustomerPayment)
+        .options(
+            selectinload(models.CustomerPayment.payment_mode),
+            selectinload(models.CustomerPayment.applications),
+        )
+        .filter(models.CustomerPayment.payment_id == payment_id)
+        .first()
+    )
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if not payment.payment_mode.is_pdc:
+        raise HTTPException(status_code=400, detail="Payment is not a PDC payment")
+    if payment.check_status != "IN_VAULT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot bounce check with status '{payment.check_status}'",
+        )
+
+    customer = None
+    if payment.customer_id:
+        customer = db.query(models.Customer).filter(
+            models.Customer.customer_id == payment.customer_id
+        ).first()
+
+    reversal_base = f"PDC reversal — check #{payment.check_number} bounced"
+    reversal_notes = (
+        f"{reversal_base}. {payload.bounce_notes}"
+        if payload.bounce_notes
+        else reversal_base
+    )
+
+    for apply in payment.applications:
+        sale = db.query(models.Sale).filter(
+            models.Sale.sale_id == apply.sale_id
+        ).first()
+        if not sale:
+            continue
+
+        new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
+        sale.balance_due = new_balance
+        gt = sale.grand_total or Decimal("0")
+        if new_balance >= gt:
+            sale.payment_status = "Unpaid"
+        elif new_balance > Decimal("0"):
+            sale.payment_status = "Partial"
+        else:
+            sale.payment_status = "Paid"
+
+        # Positive PAYMENT entry reverses the original credit in the AR ledger.
+        # The original payment wrote amount_change = -applied (reducing debt).
+        # This reversal writes +applied (restoring debt), net effect = zero.
+        db.add(models.ArLedger(
+            customer_id=payment.customer_id,
+            amount_change=apply.amount_applied,
+            reason="PAYMENT",
+            reference_type="customer_payments",
+            reference_id=str(payment.payment_id),
+            notes=reversal_notes,
+        ))
+
+        if customer:
+            customer.outstanding_balance = (
+                (customer.outstanding_balance or Decimal("0")) + apply.amount_applied
+            )
+
+    payment.check_status = "BOUNCED"
+    if customer:
+        customer.has_bounced_check = True
+
+    write_audit(db, "sales.customer_payments", str(payment_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                new_values={"check_status": "BOUNCED",
+                            "bounce_notes": payload.bounce_notes})
+    db.commit()
+    return _load_payment(payment_id, db)
+
+
+@router.patch("/customers/{customer_id}/clear-bounced-flag",
+              response_model=schemas.CustomerOut)
+def clear_bounced_flag(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
+    """Manually clear a customer's has_bounced_check flag once the situation is resolved."""
+    customer = _load_customer(customer_id, db)
+    customer.has_bounced_check = False
+    write_audit(db, "sales.customers", str(customer_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                new_values={"has_bounced_check": False})
+    db.commit()
+    db.refresh(customer)
+    return customer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1351,6 +1634,12 @@ def post_draft(
                 status_code=400,
                 detail=f"Payment mode '{mode.name}' requires a registered customer",
             )
+        if mode.is_pdc:
+            if not (tender.check_number and tender.check_date and tender.bank_name):
+                raise HTTPException(
+                    status_code=400,
+                    detail="PDC payment requires check_number, check_date, and bank_name.",
+                )
         tender_modes[tender.payment_mode_id] = mode
 
     # AR Credit validation: total AR Credit tenders must not exceed available credit
@@ -1587,6 +1876,11 @@ def post_draft(
             reference_number=tender.reference_number,
             unapplied_amount=unapplied,
         )
+        if mode.is_pdc:
+            payment.check_number = tender.check_number
+            payment.check_date   = tender.check_date
+            payment.bank_name    = tender.bank_name
+            payment.check_status = "IN_VAULT"
         db.add(payment)
         db.flush()  # need payment_id for the applied row
 

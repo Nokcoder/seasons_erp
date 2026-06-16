@@ -36,9 +36,12 @@ export const qk = {
   suppliersAll:    (includeDeleted: boolean) => ['suppliers', 'all', includeDeleted] as const,
 
   // ── AP ────────────────────────────────────────────────────────────────
-  apSummary:   (supplierId?: number) => ['ap', 'summary', supplierId] as const,
-  invoices:    (supplierId?: number) => ['invoices', supplierId]      as const,
-  payments:    (supplierId?: number) => ['payments',  supplierId]     as const,
+  apAging:      (asOf?: string)       => ['ap', 'aging',   asOf ?? 'today'] as const,
+  invoices:     (supplierId?: number) => ['invoices', supplierId]            as const,
+  invoice:      (id: number)          => ['invoices', id]                    as const,
+  invoiceMatch: (id: number)          => ['ap', 'invoices', id, 'match']    as const,
+  payments:     (supplierId?: number) => ['payments',  supplierId]           as const,
+  apLedger:     (supplierId?: number) => ['ap', 'ledger', supplierId]       as const,
 
   // ── stock movements ───────────────────────────────────────────────────
   transfers:   () => ['transfers']       as const,
@@ -68,6 +71,7 @@ export const qk = {
   creditMemo:           (id: number)                        => ['creditMemos', id]               as const,
   creditMemoValidate:   (code: string)                      => ['creditMemos', 'validate', code] as const,
   arLedgerPayments:     (saleId: number)                    => ['ar-ledger', 'payments', saleId] as const,
+  pdcVault:             (filters?: Record<string, unknown>) => ['pdc-vault', filters] as const,
 
   // ── auth / settings ───────────────────────────────────────────────────
   users:           () => ['users'] as const,

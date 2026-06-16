@@ -311,8 +311,14 @@ System-wide inventory behaviour flags stored as key-value pairs. Readable by all
 
 ### 10.1 Supplier Invoices
 
-- Created automatically on receiving, in the same transaction as the ledger write.
-- `total_amount` is based on `quantity_declared × unit_cost` from the receiving detail.
+Invoices may be created in two ways:
+
+**Automatic (GRN-linked):** Created by Stage 2 cost confirmation (`POST /procurement/shipments/{id}/confirm-costs`) in the same transaction as the AP ledger write. `shipment_id` is populated; line items (`supplier_invoice_items`) are created from the receiving details. The 3-way match view is available for these invoices.
+
+**Manual (standalone):** Created directly via `POST /ap/invoices` with `shipment_id = null`. Used for invoices not tied to a purchase order or shipment (e.g. services, utilities). No line items are created; the 3-way match view shows an empty state.
+
+Common rules for both:
+- `total_amount` is the amount on the supplier's invoice. For GRN-linked invoices, it is pre-populated as `quantity_declared × unit_cost`; for manual invoices, it is provided by the caller.
 - `amended_amount` records the final agreed amount if it differs from the original.
 - `amendment_notes` records what was negotiated (e.g. shortfall to be fulfilled in next shipment).
 - `due_date` is calculated as `invoice_date + suppliers.terms days`.

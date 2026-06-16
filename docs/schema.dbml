@@ -303,7 +303,7 @@ Table cost_layers {
 Table supplier_invoices {
   invoice_id int [pk, increment]
   supplier_id int [ref: > suppliers.supplier_id]
-  shipment_id int [ref: > inventory_shipments.shipment_id]
+  shipment_id int [null, ref: > inventory_shipments.shipment_id]
   invoice_number varchar
   invoice_date date
   due_date date

@@ -108,6 +108,9 @@ export default function CustomerARLedger() {
   const [payAmount,     setPayAmount]     = useState('')
   const [payRef,        setPayRef]        = useState('')
   const [payNotes,      setPayNotes]      = useState('')
+  const [payCheckNum,   setPayCheckNum]   = useState('')
+  const [payCheckDate,  setPayCheckDate]  = useState('')
+  const [payBank,       setPayBank]       = useState('')
   const [paySubmitting, setPaySubmitting] = useState(false)
   const [payError,      setPayError]      = useState('')
 
@@ -209,12 +212,18 @@ export default function CustomerARLedger() {
     setPayAmount(String(Number(row.balance_due)))
     setPayRef('')
     setPayNotes('')
+    setPayCheckNum('')
+    setPayCheckDate('')
+    setPayBank('')
     setPayError('')
   }
 
   function closeReceivePayment() {
     setRecvSale(null)
     setPaySubmitting(false)
+    setPayCheckNum('')
+    setPayCheckDate('')
+    setPayBank('')
     setPayError('')
   }
 
@@ -226,6 +235,11 @@ export default function CustomerARLedger() {
     if (amount > Number(recvSale.balance_due)) {
       setPayError('Amount cannot exceed balance due.'); return
     }
+    if (selectedMode?.is_pdc) {
+      if (!payCheckNum.trim() || !payCheckDate.trim() || !payBank.trim()) {
+        setPayError('PDC payment requires check number, check date, and bank name.'); return
+      }
+    }
     setPaySubmitting(true)
     setPayError('')
     try {
@@ -236,6 +250,11 @@ export default function CustomerARLedger() {
         reference_number: payRef.trim()   || undefined,
         notes:            payNotes.trim() || undefined,
         sale_id:          recvSale.sale_id,
+        ...(selectedMode?.is_pdc ? {
+          check_number: payCheckNum.trim() || undefined,
+          check_date:   payCheckDate       || undefined,
+          bank_name:    payBank.trim()     || undefined,
+        } : {}),
       })
       await qc.invalidateQueries({ queryKey: ['customers', 'ar-ledger-view'] })
       await qc.invalidateQueries({ queryKey: qk.arLedgerPayments(recvSale.sale_id) })
@@ -583,17 +602,35 @@ export default function CustomerARLedger() {
                 />
               </div>
 
-              {/* reference number — non-physical modes only */}
-              {selectedMode && !selectedMode.is_physical && (
+              {/* reference number — non-physical, non-PDC modes only */}
+              {selectedMode && !selectedMode.is_physical && !selectedMode.is_pdc && (
                 <div>
                   <label className={lCls}>Reference Number</label>
                   <input
                     className={iCls + ' w-full'}
-                    placeholder="e.g. check #, transfer ref…"
+                    placeholder="e.g. transfer ref…"
                     value={payRef}
                     onChange={e => setPayRef(e.target.value)}
                   />
                 </div>
+              )}
+
+              {/* PDC fields */}
+              {selectedMode?.is_pdc && (
+                <>
+                  <div>
+                    <label className={lCls}>Check Number <span className="text-red-400">*</span></label>
+                    <input className={iCls + ' w-full'} placeholder="Check #" value={payCheckNum} onChange={e => setPayCheckNum(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={lCls}>Check Date <span className="text-red-400">*</span></label>
+                    <input type="date" className={iCls + ' w-full'} value={payCheckDate} onChange={e => setPayCheckDate(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={lCls}>Bank Name <span className="text-red-400">*</span></label>
+                    <input className={iCls + ' w-full'} placeholder="Bank" value={payBank} onChange={e => setPayBank(e.target.value)} />
+                  </div>
+                </>
               )}
 
               {/* notes */}

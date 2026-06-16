@@ -1,5 +1,5 @@
 # procurement/models.py
-from sqlalchemy import (Column, Integer, String, Numeric, DateTime, Date,
+from sqlalchemy import (Column, Integer, String, Text, Numeric, DateTime, Date,
                          Boolean, ForeignKey, Enum as SAEnum)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -75,6 +75,14 @@ class InventoryShipment(Base):
     received_by_employee_id  = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
     inspected_by_employee_id = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=True)
     is_confirmed             = Column(Boolean, default=False, nullable=False)
+    discrepancy_status       = Column(
+        SAEnum("None", "Flagged", "Supplier_Notified", "Resolved", "Waived",
+               name="shipment_discrepancy_status", schema="procurement"),
+        nullable=False,
+        default="None",
+        server_default="None",
+    )
+    discrepancy_notes        = Column(Text, nullable=True)
 
     supplier             = relationship("Supplier")
     purchase_order       = relationship("PurchaseOrder")

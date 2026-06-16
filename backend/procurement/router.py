@@ -424,6 +424,44 @@ def confirm_shipment_deprecated(shipment_id: int):
     )
 
 
+# ── Discrepancy tracking ──────────────────────────────────────────────────────
+
+_VALID_DISCREPANCY_STATUSES = {"None", "Flagged", "Supplier_Notified", "Resolved", "Waived"}
+
+
+@router.patch("/shipments/{shipment_id}/discrepancy", response_model=schemas.ShipmentOut)
+def update_shipment_discrepancy(
+    shipment_id: int,
+    payload: schemas.ShipmentDiscrepancyUpdate,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_purchase_orders")),
+):
+    """Update discrepancy_status and optionally discrepancy_notes on a shipment."""
+    if payload.discrepancy_status not in _VALID_DISCREPANCY_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid discrepancy_status '{payload.discrepancy_status}'. "
+                f"Must be one of: {sorted(_VALID_DISCREPANCY_STATUSES)}"
+            ),
+        )
+
+    shipment = _load_shipment(shipment_id, db)
+    old = _serialize(shipment)
+
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(shipment, field, value)
+
+    db.commit()
+    write_audit(
+        db, "procurement.inventory_shipments", str(shipment_id), "UPDATE",
+        actor_user_id=_actor.user_id, old_values=old, new_values=_serialize(shipment),
+    )
+    db.commit()
+    return _load_shipment(shipment_id, db)
+
+
 # ── Stage 1: receive — writes ledger entries only, no cost layers ─────────────
 
 @router.post("/shipments/{shipment_id}/receive", response_model=schemas.ReceiveResult)
@@ -534,7 +572,57 @@ def confirm_costs(
 
     shipment.is_confirmed = True
 
-    # Create supplier invoice + AP ledger entry
+    # ── Build invoice line items from linked PO ───────────────────────────────
+    # One SupplierInvoiceItem per PO line.  Only attempted when the shipment
+    # has a linked PO; unlinked shipments fall back to the existing lump total.
+    line_items_data: list[dict] = []
+    if shipment.po_id:
+        po = (
+            db.query(proc_models.PurchaseOrder)
+            .options(selectinload(proc_models.PurchaseOrder.items))
+            .filter_by(po_id=shipment.po_id)
+            .first()
+        )
+        if po and po.items:
+            # First non-deleted receiving detail per variant (one-per-variant assumption).
+            # Shipments with multiple details for the same variant on different locations
+            # will only match the first encountered detail.
+            detail_by_variant: dict[int, proc_models.ReceivingDetail] = {}
+            for d in shipment.receiving_details:
+                if not d.is_deleted and d.variant_id not in detail_by_variant:
+                    detail_by_variant[d.variant_id] = d
+
+            for po_item in po.items:
+                detail = detail_by_variant.get(po_item.variant_id)
+
+                # Prefer the accountant-supplied cost from the payload; fall back
+                # to _resolve_cost when this PO item's variant had no detail costed.
+                if detail and detail.detail_id in cost_by_detail:
+                    unit_cost = cost_by_detail[detail.detail_id]
+                else:
+                    _, _, unit_cost = _resolve_cost(db, po_item.variant_id, po_item)
+
+                recv_qty = (detail.quantity_actual   or Decimal('0')) if detail else Decimal('0')
+                rej_qty  = (detail.quantity_rejected or Decimal('0')) if detail else Decimal('0')
+                line_tot = recv_qty * unit_cost
+
+                line_items_data.append({
+                    'po_item_id':       po_item.po_item_id,
+                    'variant_id':       po_item.variant_id,
+                    'ordered_qty':      po_item.ordered_quantity,
+                    'received_qty':     recv_qty,
+                    'rejected_qty':     rej_qty,
+                    'billed_qty':       recv_qty,
+                    'billed_unit_cost': unit_cost,
+                    'line_total':       line_tot,
+                })
+
+    # When line items were built, replace the running total with their sum so
+    # the invoice and ledger reflect the PO-grounded figures.
+    if line_items_data:
+        invoice_total = sum(d['line_total'] for d in line_items_data)
+
+    # ── Create supplier invoice + AP ledger entry ─────────────────────────────
     supplier = db.query(inv_models.Supplier).filter_by(supplier_id=shipment.supplier_id).first()
     today = date.today()
     due_date = today + timedelta(days=supplier.terms if supplier and supplier.terms else 0)
@@ -548,7 +636,12 @@ def confirm_costs(
         status="Unpaid",
     )
     db.add(invoice)
-    db.flush()
+    db.flush()  # populate invoice.invoice_id before referencing it below
+
+    # Add line items now that invoice_id is available — same transaction as
+    # the invoice and cost layers so any failure rolls everything back.
+    for d in line_items_data:
+        db.add(ap_models.SupplierInvoiceItem(invoice_id=invoice.invoice_id, **d))
 
     db.add(ap_models.ApLedger(
         supplier_id=shipment.supplier_id,

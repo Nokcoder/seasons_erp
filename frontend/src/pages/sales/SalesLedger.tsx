@@ -662,7 +662,9 @@ export default function SalesLedger() {
                         </td>
                         {cols.totalTendered && (() => {
                           if (isReturn) return <td className="px-3 py-2 t-text-4 text-right" onClick={rowNav}>—</td>
-                          const tendered = Number(s.grand_total) + Number(s.audit_variance ?? 0)
+                          const tendered = s.balance_due != null
+                            ? Number(s.grand_total) - Number(s.balance_due)
+                            : Number(s.grand_total) + Number(s.audit_variance ?? 0)
                           return <td className="px-3 py-2 tabular-nums t-text-2 text-right" onClick={rowNav}>₱{fmt(tendered)}</td>
                         })()}
                         {cols.variance   && <td className={`px-3 py-2 tabular-nums font-medium text-right ${variance != null && variance !== 0 ? 'text-yellow-500' : 't-text-4'}`} onClick={rowNav}>

@@ -47,6 +47,9 @@ interface TenderRow {
   memo_code:           string
   memo_valid:          boolean | null
   memo_invalid_reason: string
+  check_number:        string
+  check_date:          string
+  bank_name:           string
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -141,8 +144,10 @@ export default function Workstation() {
     ...stale.transactional,
   })
 
-  // Item 8: Cash = first physical mode named "Cash", then any physical mode, then first active
+  // Item 8: Cash = mode flagged is_cash, fallback to name match, then first physical, then first active
   const cashModePID = useMemo(() => {
+    const byCashFlag = paymentModes.find(m => m.is_cash)
+    if (byCashFlag) return byCashFlag.payment_mode_id
     const byName = paymentModes.find(m => m.name.toLowerCase() === 'cash')
     if (byName) return byName.payment_mode_id
     const physical = paymentModes.find(m => m.is_physical)
@@ -236,7 +241,7 @@ export default function Workstation() {
 
   // ── tenders ───────────────────────────────────────────────────────────────
   const [tenders, setTenders] = useState<TenderRow[]>([
-    { localId: uid(), payment_mode_id: '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' },
+    { localId: uid(), payment_mode_id: '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' },
   ])
 
   // ── ui state ──────────────────────────────────────────────────────────────
@@ -624,6 +629,11 @@ export default function Workstation() {
           flash(`Credit memo is invalid: ${t.memo_invalid_reason || 'validate the code first'}.`, true); return
         }
       }
+      if (mode?.is_pdc) {
+        if (!t.check_number.trim() || !t.check_date.trim() || !t.bank_name.trim()) {
+          flash(`PDC payment "${mode.name}" requires check number, check date, and bank name.`, true); return
+        }
+      }
     }
 
     setLoading(true); setError('')
@@ -637,11 +647,19 @@ export default function Workstation() {
       }
 
       const posted = await salesApi.drafts.post(draftId, {
-        tenders: validTenders.map(t => ({
-          payment_mode_id:  parseInt(t.payment_mode_id),
-          amount:           parseFloat(t.amount),
-          reference_number: t.reference_number || undefined,
-        })),
+        tenders: validTenders.map(t => {
+          const mode = paymentModes.find(m => m.payment_mode_id === parseInt(t.payment_mode_id))
+          return {
+            payment_mode_id:  parseInt(t.payment_mode_id),
+            amount:           parseFloat(t.amount),
+            reference_number: t.reference_number || undefined,
+            ...(mode?.is_pdc ? {
+              check_number: t.check_number || undefined,
+              check_date:   t.check_date   || undefined,
+              bank_name:    t.bank_name    || undefined,
+            } : {}),
+          }
+        }),
         transaction_date: header.saleDate,
       })
 
@@ -650,7 +668,7 @@ export default function Workstation() {
 
       setCartItems([])
       setCartDiscPct('');  setCartDiscFlat('')
-      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
+      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' }])
       setActiveDraftId(null)
       setTxnKey(uid())
       clearOriginSale()
@@ -671,7 +689,7 @@ export default function Workstation() {
       await salesApi.drafts.delete(activeDraftId)
       setCartItems([])
       setCartDiscPct(''); setCartDiscFlat('')
-      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
+      setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' }])
       setActiveDraftId(null)
       clearOriginSale()
       await refreshDrafts()
@@ -687,7 +705,7 @@ export default function Workstation() {
     if (cartItems.length > 0 && !window.confirm('Clear current cart and start a new transaction?')) return
     setCartItems([])
     setCartDiscPct(''); setCartDiscFlat('')
-    setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '' }])
+    setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' }])
     setActiveDraftId(null)
     setTxnKey(uid())
     clearOriginSale()
@@ -1224,13 +1242,34 @@ export default function Workstation() {
                       {mode?.is_ar_credit && availableCredit > 0 && (
                         <span className="text-[10px] text-emerald-400">max ₱{fmt(availableCredit)}</span>
                       )}
-                      {showRef && !mode?.is_credit_memo && (
+                      {showRef && !mode?.is_credit_memo && !mode?.is_pdc && (
                         <input type="text"
                           value={row.reference_number}
                           onChange={e => updateTender(row.localId, 'reference_number', e.target.value)}
                           placeholder="Ref # (GCash, card, transfer…)"
                           className="flex-1 t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1
                                      placeholder:t-text-4 focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                      )}
+                      {mode?.is_pdc && (
+                        <>
+                          <input type="text"
+                            value={row.check_number}
+                            onChange={e => updateTender(row.localId, 'check_number', e.target.value)}
+                            placeholder="Check #"
+                            className="w-24 t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1
+                                       placeholder:t-text-4 focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                          <input type="date"
+                            value={row.check_date}
+                            onChange={e => updateTender(row.localId, 'check_date', e.target.value)}
+                            className="w-32 t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1
+                                       focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                          <input type="text"
+                            value={row.bank_name}
+                            onChange={e => updateTender(row.localId, 'bank_name', e.target.value)}
+                            placeholder="Bank"
+                            className="flex-1 t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1
+                                       placeholder:t-text-4 focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                        </>
                       )}
                       {tenders.length > 1 && (
                         <button onClick={() => removeTender(row.localId)}

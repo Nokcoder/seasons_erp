@@ -57,6 +57,8 @@ class PaymentModeCreate(BaseModel):
     is_ar_charge: bool = False
     is_ar_credit: bool = False
     is_credit_memo: bool = False
+    is_pdc: bool = False
+    is_cash: bool = False
 
 
 class PaymentModePatch(BaseModel):
@@ -66,6 +68,8 @@ class PaymentModePatch(BaseModel):
     is_ar_charge: Optional[bool] = None
     is_ar_credit: Optional[bool] = None
     is_credit_memo: Optional[bool] = None
+    is_pdc: Optional[bool] = None
+    is_cash: Optional[bool] = None
 
 
 class PaymentModeOut(BaseModel):
@@ -76,6 +80,8 @@ class PaymentModeOut(BaseModel):
     is_ar_charge: bool
     is_ar_credit: bool
     is_credit_memo: bool = False
+    is_pdc: bool = False
+    is_cash: bool = False
     class Config: from_attributes = True
 
 
@@ -127,6 +133,7 @@ class CustomerOut(BaseModel):
     terms_days: int
     outstanding_balance: Decimal
     is_deleted: bool
+    has_bounced_check: bool = False
     is_overdue: bool = False
     class Config: from_attributes = True
 
@@ -365,6 +372,10 @@ class SaleTenderIn(BaseModel):
     payment_mode_id: int
     amount: Decimal
     reference_number: Optional[str] = None
+    # PDC fields — required when payment mode has is_pdc=True
+    check_number: Optional[str] = None
+    check_date: Optional[date] = None
+    bank_name: Optional[str] = None
 
 
 class SalePostRequest(BaseModel):
@@ -414,6 +425,11 @@ class CustomerPaymentOut(BaseModel):
     # Populated when payment_mode relationship is eagerly loaded
     payment_mode_name:        Optional[str]  = None
     payment_mode_is_physical: Optional[bool] = None
+    # PDC fields — non-null only when payment mode has is_pdc=True
+    check_number:  Optional[str]  = None
+    check_date:    Optional[date] = None
+    bank_name:     Optional[str]  = None
+    check_status:  Optional[str]  = None
     class Config: from_attributes = True
 
 
@@ -431,6 +447,17 @@ class RecordPaymentIn(BaseModel):
     reference_number: Optional[str] = None
     notes: Optional[str] = None
     sale_id: Optional[int] = None  # when provided, applies payment to this specific sale
+    # PDC fields — required when payment mode has is_pdc=True
+    check_number: Optional[str] = None
+    check_date: Optional[date] = None
+    bank_name: Optional[str] = None
+
+
+class PDCPaymentFields(BaseModel):
+    """Required PDC fields for both POS and AR payment recording."""
+    check_number: str
+    check_date: date
+    bank_name: str
 
 
 class ArLedgerOut(BaseModel):
@@ -616,3 +643,41 @@ class CreditMemoValidateOut(BaseModel):
     status:         Optional[str] = None
     is_valid:       bool
     invalid_reason: Optional[str] = None   # EXPIRED | CANCELLED | REDEEMED | NOT_FOUND
+
+
+# ==========================================
+# PDC VAULT & MATURITY REPORT
+# ==========================================
+
+class PDCEntryOut(BaseModel):
+    payment_id:          int
+    customer_id:         int
+    customer_name:       str
+    check_number:        str
+    check_date:          date
+    bank_name:           str
+    check_status:        str   # IN_VAULT | DEPOSITED | BOUNCED
+    amount:              Decimal
+    payment_date:        Optional[date] = None  # when the payment was recorded / deposited
+    days_until_maturity: int               # negative = overdue, 0 = today, positive = future
+    sale_ids:            List[int]
+
+
+class PDCMaturitySummary(BaseModel):
+    maturing_today:      Decimal   # IN_VAULT checks whose check_date == as_of
+    maturing_next_7_days: Decimal  # IN_VAULT checks whose check_date between as_of and as_of+7
+    total_uncleared:     Decimal   # all IN_VAULT checks
+    total_overdue:       Decimal   # IN_VAULT checks past check_date
+
+
+class PDCMaturityResponse(BaseModel):
+    summary: PDCMaturitySummary
+    entries: List[PDCEntryOut]
+
+
+class PDCDepositIn(BaseModel):
+    deposited_at: date
+
+
+class PDCBounceIn(BaseModel):
+    bounce_notes: Optional[str] = None

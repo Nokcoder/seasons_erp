@@ -124,6 +124,8 @@ export interface PaymentMode {
   is_ar_charge: boolean
   is_ar_credit: boolean
   is_credit_memo: boolean
+  is_pdc: boolean
+  is_cash: boolean
 }
 
 export interface CashRegister {
@@ -243,6 +245,9 @@ export interface SaleTenderIn {
   payment_mode_id: number
   amount: number
   reference_number?: string
+  check_number?: string
+  check_date?: string
+  bank_name?: string
 }
 
 export interface SalePostRequest {
@@ -281,6 +286,10 @@ export interface CustomerPaymentOut {
   applications: { apply_id: number; payment_id: number; sale_id: number; amount_applied: number; applied_at: string }[]
   payment_mode_name: string | null
   payment_mode_is_physical: boolean | null
+  check_number: string | null
+  check_date: string | null
+  bank_name: string | null
+  check_status: string | null
 }
 
 export interface ArLedgerOut {
@@ -334,7 +343,34 @@ export interface CustomerOut {
   terms_days: number
   outstanding_balance: number
   is_deleted: boolean
+  has_bounced_check: boolean
   is_overdue: boolean
+}
+
+export interface PDCEntryOut {
+  payment_id:          number
+  customer_id:         number
+  customer_name:       string
+  check_number:        string
+  check_date:          string   // "YYYY-MM-DD"
+  bank_name:           string
+  check_status:        string   // IN_VAULT | DEPOSITED | BOUNCED
+  amount:              number
+  payment_date:        string | null
+  days_until_maturity: number
+  sale_ids:            number[]
+}
+
+export interface PDCMaturitySummary {
+  maturing_today:       number
+  maturing_next_7_days: number
+  total_uncleared:      number
+  total_overdue:        number
+}
+
+export interface PDCMaturityResponse {
+  summary: PDCMaturitySummary
+  entries: PDCEntryOut[]
 }
 
 export interface SaleOut {
@@ -430,8 +466,8 @@ export interface ShiftPatch   { shift_name?: string; is_active?: boolean }
 export interface RegisterCreate { name: string; location_id: number; is_active?: boolean }
 export interface RegisterPatch  { name?: string; location_id?: number; is_active?: boolean }
 
-export interface PaymentModeCreate { name: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean }
-export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean }
+export interface PaymentModeCreate { name: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean; is_pdc?: boolean; is_cash?: boolean }
+export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_active?: boolean; is_ar_charge?: boolean; is_ar_credit?: boolean; is_credit_memo?: boolean; is_pdc?: boolean; is_cash?: boolean }
 
 // ── SALES API ─────────────────────────────────────────────────────────────────
 
@@ -554,8 +590,10 @@ export const salesApi = {
       const qs = q.toString()
       return get<CustomerPaymentOut[]>(`/sales/customers/${id}/payments${qs ? '?' + qs : ''}`)
     },
-    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string; sale_id?: number }) =>
+    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string; sale_id?: number; check_number?: string; check_date?: string; bank_name?: string }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
+    clearBouncedFlag: (id: number) =>
+                     patch<CustomerOut>(`/sales/customers/${id}/clear-bounced-flag`, {}),
     aging: (params?: { search?: string }) => {
       const qs = params?.search ? `?search=${encodeURIComponent(params.search)}` : ''
       return get<CustomerAgingOut[]>(`/sales/customers/aging${qs}`)
@@ -637,6 +675,22 @@ export const salesApi = {
       const qs = q.toString()
       return get<ArLedgerOut[]>(`/sales/ar-ledger${qs ? '?' + qs : ''}`)
     },
+  },
+  pdc: {
+    list: (params?: { status?: string; bank_name?: string; date_from?: string; date_to?: string; as_of?: string }) => {
+      const q = new URLSearchParams()
+      if (params?.status)    q.set('status',    params.status)
+      if (params?.bank_name) q.set('bank_name', params.bank_name)
+      if (params?.date_from) q.set('date_from', params.date_from)
+      if (params?.date_to)   q.set('date_to',   params.date_to)
+      if (params?.as_of)     q.set('as_of',     params.as_of)
+      const qs = q.toString()
+      return get<PDCMaturityResponse>(`/sales/pdc${qs ? '?' + qs : ''}`)
+    },
+    deposit: (paymentId: number, deposited_at: string) =>
+      patch<CustomerPaymentOut>(`/sales/pdc/${paymentId}/deposit`, { deposited_at }),
+    bounce: (paymentId: number, bounce_notes?: string) =>
+      patch<CustomerPaymentOut>(`/sales/pdc/${paymentId}/bounce`, { bounce_notes: bounce_notes ?? null }),
   },
   creditMemos: {
     list: (params?: {
@@ -1086,6 +1140,8 @@ export interface Shipment {
   reference_number: string | null
   received_at: string | null
   is_confirmed: boolean
+  discrepancy_status: string
+  discrepancy_notes: string | null
   received_by_user_id:      number | null
   inspected_by_user_id:     number | null
   received_by_employee_id:  number | null
@@ -1161,6 +1217,8 @@ export const stockApi = {
       }),
     // Legacy combined confirm — kept for backward compat
     confirm: (id: number) => post<Record<string, unknown>>(`/procurement/shipments/${id}/confirm`, {}),
+    updateDiscrepancy: (id: number, p: { discrepancy_status: string; discrepancy_notes?: string | null }) =>
+      patch<Shipment>(`/procurement/shipments/${id}/discrepancy`, p),
   },
   ledger: {
     list: (params?: {
@@ -1185,6 +1243,219 @@ export const stockApi = {
       const qs = q.toString()
       return get<LedgerEntry[]>(`/products/variants/${vid}/ledger${qs ? '?' + qs : ''}`)
     },
+  },
+}
+
+// ── AP TYPES ──────────────────────────────────────────────────────────────────
+
+export interface InvoiceSupplierRef {
+  supplier_id: number
+  supplier_name: string
+}
+
+export interface SupplierInvoiceItemOut {
+  id: number
+  invoice_id: number
+  po_item_id: number
+  variant_id: number
+  variant_name: string | null
+  variant_sku: string | null
+  ordered_qty: number
+  received_qty: number
+  rejected_qty: number
+  billed_qty: number
+  billed_unit_cost: number
+  line_total: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SupplierInvoiceItemUpdate {
+  billed_qty?: number
+  billed_unit_cost?: number
+}
+
+export interface MatchPoRef {
+  id: number
+  po_pid: string
+  status: string
+  created_at: string
+  supplier_id: number
+  supplier_name: string
+}
+
+export interface MatchShipmentRef {
+  id: number
+  is_confirmed: boolean
+  discrepancy_status: string
+  discrepancy_notes: string | null
+  received_at: string | null
+}
+
+export interface MatchLineOut {
+  variant_id: number
+  variant_name: string | null
+  variant_sku: string | null
+  ordered_qty: number
+  received_qty: number
+  rejected_qty: number
+  billed_qty: number
+  billed_unit_cost: number
+  line_total: number
+  po_line_total: number
+  qty_variance: number
+  cost_variance: number
+  has_variance: boolean
+}
+
+export interface MatchResponse {
+  invoice: InvoiceOut
+  po: MatchPoRef | null
+  shipment: MatchShipmentRef | null
+  lines: MatchLineOut[]
+}
+
+export interface SupplierAgingRow {
+  supplier_id:          number
+  supplier_name:        string
+  supplier_code:        string | null
+  invoice_count:        number
+  has_pending_vetting:  boolean
+  has_rejected:         boolean
+  current:              number
+  bucket_30:            number
+  bucket_60:            number
+  bucket_90:            number
+  bucket_90p:           number
+  total:                number
+}
+
+export interface SupplierAgingResponse {
+  as_of:  string
+  rows:   SupplierAgingRow[]
+  totals: SupplierAgingRow
+}
+
+export interface InvoiceOut {
+  invoice_id: number
+  supplier_id: number
+  shipment_id: number | null
+  invoice_number: string | null
+  invoice_date: string          // "YYYY-MM-DD"
+  due_date: string | null       // "YYYY-MM-DD"
+  total_amount: number
+  amended_amount: number | null
+  amendment_notes: string | null
+  status: string                // Unpaid | Partial | Paid
+  vetting_status: string        // Pending_Review | Approved | Rejected
+  paid_before_received: boolean
+  check_drafted: boolean
+  check_drafted_note: string | null
+  created_at: string
+  supplier: InvoiceSupplierRef | null
+  items: SupplierInvoiceItemOut[]
+}
+
+export interface InvoiceAmend {
+  amended_amount?: number
+  amendment_notes?: string
+}
+
+export interface InvoiceVettingUpdate {
+  vetting_status: string        // Pending_Review | Approved | Rejected
+  override_discrepancy?: boolean
+}
+
+export interface ApVettingWarning {
+  warning: true
+  message: string
+}
+
+export interface InvoiceCheckDraftUpdate {
+  check_drafted: boolean
+  check_drafted_note?: string | null
+}
+
+export interface InvoiceApplicationCreate {
+  invoice_id: number
+  amount_applied: number
+}
+
+export interface ApPaymentCreate {
+  supplier_id: number
+  amount: number
+  payment_date?: string
+  reference_number?: string
+  payment_method?: string
+  applications: InvoiceApplicationCreate[]
+}
+
+export interface InvoicePaymentOut {
+  invoice_id: number
+  payment_id: number
+  amount_applied: number
+}
+
+export interface ApPaymentOut {
+  payment_id: number
+  supplier_id: number
+  amount: number
+  payment_date: string | null
+  reference_number: string | null
+  payment_method: string | null
+  supplier: InvoiceSupplierRef | null
+  invoice_payments: InvoicePaymentOut[]
+}
+
+export interface ApLedgerOut {
+  ap_ledger_id: number
+  supplier_id: number
+  amount_change: number
+  reason: string                // INVOICE | PAYMENT | CREDIT_MEMO | ADJUSTMENT
+  reference_type: string | null
+  reference_id: string | null
+  occurred_at: string
+  supplier_name: string | null
+}
+
+// ── AP API ────────────────────────────────────────────────────────────────────
+
+export const apApi = {
+  invoices: {
+    list: (params?: { supplier_id?: number; status?: string }) => {
+      const q = new URLSearchParams()
+      if (params?.supplier_id) q.set('supplier_id', String(params.supplier_id))
+      if (params?.status)      q.set('status',      params.status)
+      const qs = q.toString()
+      return get<InvoiceOut[]>(`/ap/invoices${qs ? '?' + qs : ''}`)
+    },
+    get:    (id: number)                    => get<InvoiceOut>(`/ap/invoices/${id}`),
+    amend:  (id: number, p: InvoiceAmend)  => patch<InvoiceOut>(`/ap/invoices/${id}`, p),
+    setVetting: (id: number, p: InvoiceVettingUpdate) =>
+      patch<InvoiceOut | ApVettingWarning>(`/ap/invoices/${id}/vetting`, p),
+    setCheckDraft: (id: number, p: InvoiceCheckDraftUpdate) =>
+      patch<InvoiceOut>(`/ap/invoices/${id}/check-draft`, p),
+    getMatch:          (id: number)                                    => get<MatchResponse>(`/ap/invoices/${id}/match`),
+    updateInvoiceItem: (id: number, itemId: number, p: SupplierInvoiceItemUpdate) =>
+      patch<SupplierInvoiceItemOut>(`/ap/invoices/${id}/items/${itemId}`, p),
+  },
+  payments: {
+    list: (supplierId?: number) => {
+      const qs = supplierId ? `?supplier_id=${supplierId}` : ''
+      return get<ApPaymentOut[]>(`/ap/payments${qs}`)
+    },
+    get:    (id: number)           => get<ApPaymentOut>(`/ap/payments/${id}`),
+    create: (p: ApPaymentCreate)   => post<ApPaymentOut>('/ap/payments', p),
+  },
+  ledger: {
+    list: (supplierId?: number) => {
+      const qs = supplierId ? `?supplier_id=${supplierId}` : ''
+      return get<ApLedgerOut[]>(`/ap/ledger${qs}`)
+    },
+  },
+  getAging: (asOf?: string) => {
+    const qs = asOf ? `?as_of=${asOf}` : ''
+    return get<SupplierAgingResponse>(`/ap/aging${qs}`)
   },
 }
 

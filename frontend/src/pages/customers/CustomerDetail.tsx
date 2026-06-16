@@ -182,20 +182,40 @@ export default function CustomerDetail() {
   const [payAmount,    setPayAmount]    = useState('')
   const [payRef,       setPayRef]       = useState('')
   const [payNotes,     setPayNotes]     = useState('')
+  const [payCheckNum,  setPayCheckNum]  = useState('')
+  const [payCheckDate, setPayCheckDate] = useState('')
+  const [payBank,      setPayBank]      = useState('')
   const [paying,       setPaying]       = useState(false)
   const [payErr,       setPayErr]       = useState('')
+  const [clearingBounce, setClearingBounce] = useState(false)
 
   const selectedMode = paymentModes.find((m: PaymentMode) => m.payment_mode_id === parseInt(payMode))
-  const showRef = selectedMode && selectedMode.is_physical === false
+  const showRef = selectedMode && selectedMode.is_physical === false && !selectedMode.is_pdc
 
   function openPaymentModal() {
-    setPayDate(todayLocal()); setPayMode(''); setPayAmount(''); setPayRef(''); setPayNotes(''); setPayErr('')
+    setPayDate(todayLocal()); setPayMode(''); setPayAmount(''); setPayRef(''); setPayNotes('')
+    setPayCheckNum(''); setPayCheckDate(''); setPayBank('')
+    setPayErr('')
     setShowPayment(true)
+  }
+
+  async function handleClearBouncedFlag() {
+    if (!window.confirm('Clear the bounced check flag for this customer?')) return
+    setClearingBounce(true)
+    try {
+      await salesApi.customers.clearBouncedFlag(cid)
+      await qc.invalidateQueries({ queryKey: qk.customer(cid) })
+    } catch { /* ignore */ } finally { setClearingBounce(false) }
   }
 
   async function handleRecordPayment() {
     if (!payMode) { setPayErr('Select a payment mode.'); return }
     if (!payAmount || parseFloat(payAmount) <= 0) { setPayErr('Enter a valid amount.'); return }
+    if (selectedMode?.is_pdc) {
+      if (!payCheckNum.trim() || !payCheckDate.trim() || !payBank.trim()) {
+        setPayErr('PDC payment requires check number, check date, and bank name.'); return
+      }
+    }
     setPaying(true); setPayErr('')
     try {
       await salesApi.customers.recordPayment(cid, {
@@ -204,6 +224,11 @@ export default function CustomerDetail() {
         payment_date:    payDate ? `${payDate}T00:00:00` : undefined,
         reference_number: payRef || undefined,
         notes:           payNotes.trim() || undefined,
+        ...(selectedMode?.is_pdc ? {
+          check_number: payCheckNum.trim() || undefined,
+          check_date:   payCheckDate       || undefined,
+          bank_name:    payBank.trim()     || undefined,
+        } : {}),
       })
       await qc.invalidateQueries({ queryKey: qk.customer(cid) })
       await qc.invalidateQueries({ queryKey: qk.customerArLedger(cid) })
@@ -252,7 +277,18 @@ export default function CustomerDetail() {
       {/* header */}
       <div className="t-bg-surface border t-border rounded-lg p-5 mb-6">
         <div className="flex items-start justify-between mb-4">
-          <h1 className="text-lg font-semibold t-text-1">{customer.customer_name}</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-semibold t-text-1">{customer.customer_name}</h1>
+            {customer.has_bounced_check && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 font-medium">
+                Bounced Check
+                <button onClick={handleClearBouncedFlag} disabled={clearingBounce}
+                  className="ml-1 underline text-[10px] hover:no-underline disabled:opacity-50">
+                  {clearingBounce ? '…' : 'Clear'}
+                </button>
+              </span>
+            )}
+          </div>
           <div className="flex gap-2">
             {!editing && <button onClick={startEdit} className="px-3 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">Edit</button>}
             <button onClick={() => navigate(`/sales/new?customer_id=${cid}`)}
@@ -538,6 +574,22 @@ export default function CustomerDetail() {
                   <input className={inputCls} value={payRef} onChange={e => setPayRef(e.target.value)}
                     placeholder="GCash ref, card approval…" />
                 </div>
+              )}
+              {selectedMode?.is_pdc && (
+                <>
+                  <div>
+                    <label className={lCls}>Check Number <span className="text-red-400">*</span></label>
+                    <input className={inputCls} placeholder="Check #" value={payCheckNum} onChange={e => setPayCheckNum(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={lCls}>Check Date <span className="text-red-400">*</span></label>
+                    <input type="date" className={inputCls} value={payCheckDate} onChange={e => setPayCheckDate(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={lCls}>Bank Name <span className="text-red-400">*</span></label>
+                    <input className={inputCls} placeholder="Bank" value={payBank} onChange={e => setPayBank(e.target.value)} />
+                  </div>
+                </>
               )}
               <div>
                 <label className={lCls}>Notes</label>

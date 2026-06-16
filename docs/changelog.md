@@ -1,5 +1,315 @@
 # Changelog
 
+## 2026-06-16 — Feature: PDC vault tracking and maturity report (frontend)
+
+### `frontend/src/services/api.ts`
+- `PaymentMode`: added `is_pdc: boolean`, `is_cash: boolean`.
+- `SaleTenderIn`: added optional `check_number`, `check_date`, `bank_name`.
+- `CustomerPaymentOut`: added `check_number`, `check_date`, `bank_name`, `check_status` (all string | null).
+- `CustomerOut`: added `has_bounced_check: boolean`.
+- New types: `PDCEntryOut`, `PDCMaturitySummary`, `PDCMaturityResponse`.
+- `PaymentModeCreate/Patch`: added `is_pdc?`, `is_cash?`.
+- `customers.recordPayment`: added optional `check_number`, `check_date`, `bank_name` params.
+- `customers.clearBouncedFlag(id)`: new → `PATCH /sales/customers/${id}/clear-bounced-flag`.
+- `salesApi.pdc`: new section with `list(filters)`, `deposit(id, body)`, `bounce(id, body)`.
+
+### `frontend/src/lib/queryKeys.ts`
+- Added `pdcVault: (filters?) => ['pdc-vault', filters]` key.
+
+### `frontend/src/pages/Settings.tsx`
+- Payment mode form: added `is_pdc` checkbox (Post Dated Check flag).
+- Payment modes table: shows purple "PDC" badge when `is_pdc` is true.
+
+### `frontend/src/pages/sales/Workstation.tsx`
+- `TenderRow` interface: added `check_number`, `check_date`, `bank_name` fields.
+- `cashModePID`: now uses `is_cash` flag as primary lookup, with name/physical fallbacks.
+- All tender reset/init locations: include empty `check_number/check_date/bank_name`.
+- `handlePost`: PDC pre-flight validates check_number, check_date, bank_name when mode.is_pdc.
+- Tenders payload: includes PDC fields when mode.is_pdc.
+- Tender row UI: shows check_number, check_date (date picker), bank_name inputs inline when mode.is_pdc. Reference number input hidden for PDC modes.
+
+### `frontend/src/pages/customers/CustomerARLedger.tsx`
+- Added `payCheckNum`, `payCheckDate`, `payBank` state; reset on open/close.
+- `handlePaySubmit`: validates PDC fields when selectedMode.is_pdc; passes check fields to recordPayment.
+- Payment modal: shows PDC field inputs (check #, check date, bank) when selectedMode.is_pdc. Reference number hidden for PDC modes.
+
+### `frontend/src/pages/customers/CustomerDetail.tsx`
+- Added `payCheckNum`, `payCheckDate`, `payBank`, `clearingBounce` state.
+- Customer header: shows red "Bounced Check" badge with inline "Clear" button when `customer.has_bounced_check` is true.
+- `showRef`: excludes PDC modes from showing reference number input.
+- `handleRecordPayment`: validates PDC fields; passes check fields to recordPayment.
+- Payment modal: shows PDC field inputs when selectedMode.is_pdc.
+
+### `frontend/src/pages/customers/PDCVault.tsx` (new)
+- Summary cards: Maturing Today, Next 7 Days, Overdue, Total Uncleared.
+- Status tab filters (IN_VAULT / DEPOSITED / BOUNCED / ALL) + bank name + date range.
+- Table columns: Check #, Bank, Check Date, Days Until Maturity, Customer, Amount, Sale(s), Status, Actions.
+- Deposit modal: date picker, calls `salesApi.pdc.deposit`.
+- Bounce modal: notes field, warning text, calls `salesApi.pdc.bounce`; invalidates pdc-vault cache.
+- Uses `qk.pdcVault(filters)` query key.
+
+### `frontend/src/pages/Customers.tsx`
+- Added lazy `PDCVault` import.
+- Added "PDC Vault" NavLink tab.
+- Added `<Route path="pdc-vault" element={<PDCVault />} />`.
+
+---
+
+## 2026-06-16 — Feature: PDC vault tracking and maturity report (backend)
+
+Backend-only implementation. No frontend files modified.
+
+### `backend/sales/models.py`
+- `PaymentMode`: added `is_pdc` (Boolean, default False) — True only for Post Dated Check mode; `is_cash` (Boolean, default False) — True only for Cash mode.
+- `Customer`: added `has_bounced_check` (Boolean, default False) — system-set only; True when any of the customer's PDC payments is marked BOUNCED.
+- `CustomerPayment`: added `check_number` (String 50, nullable), `check_date` (Date, nullable), `bank_name` (String 100, nullable), `check_status` (SAEnum IN_VAULT/DEPOSITED/BOUNCED, nullable).
+- New `CheckStatus` Python enum class (for business logic).
+
+### `backend/sales/schemas.py`
+- `PaymentModeCreate`, `PaymentModePatch`, `PaymentModeOut`: added `is_pdc` and `is_cash` fields.
+- `CustomerOut`: added `has_bounced_check: bool = False`.
+- `CustomerPaymentOut`: added `check_number`, `check_date`, `bank_name`, `check_status` fields.
+- `SaleTenderIn`: added optional `check_number`, `check_date`, `bank_name` fields.
+- `RecordPaymentIn`: added optional `check_number`, `check_date`, `bank_name` fields.
+- New `PDCPaymentFields`, `PDCEntryOut`, `PDCMaturitySummary`, `PDCMaturityResponse`, `PDCDepositIn`, `PDCBounceIn` schemas.
+
+### `backend/sales/router.py`
+- `create_payment_mode`: now sets `is_ar_charge`, `is_ar_credit`, `is_pdc`, `is_cash` from payload (pre-existing omission of ar flags corrected in same handler; new pdc/cash flags added).
+- `update_payment_mode`: added `is_pdc` and `is_cash` to PATCH handler.
+- `post_draft`: validates PDC check fields before creating any payments; sets `check_number`, `check_date`, `bank_name`, `check_status = "IN_VAULT"` on the CustomerPayment when mode.is_pdc. PDC tenders count toward `standard_applied` (treated as collected funds).
+- `record_customer_payment`: loads payment mode before creating payment; validates PDC fields; sets check columns and `check_status = "IN_VAULT"` when mode.is_pdc.
+- New `GET /sales/pdc`: PDC vault list and maturity summary. Filters by status (default IN_VAULT), bank_name, date range, as_of date.
+- New `PATCH /sales/pdc/{payment_id}/deposit`: marks a check DEPOSITED, updates `payment_date` to actual deposit date. Rejects if not IN_VAULT.
+- New `PATCH /sales/pdc/{payment_id}/bounce`: marks a check BOUNCED, reverses all applied payments (restores `balance_due`/`payment_status` on each sale, writes negative PAYMENT entries to ArLedger, restores `outstanding_balance`), sets `customer.has_bounced_check = True`. Rejects if not IN_VAULT.
+- New `PATCH /sales/customers/{customer_id}/clear-bounced-flag`: clears `has_bounced_check` manually after resolution.
+
+### `backend/main.py`
+- New `_seed_payment_mode_flags()` seeder: idempotently sets `is_pdc=True` on "Post Dated Check", `is_cash=True` on "Cash", and `is_pdc=False` on "On Date Check". Silently skips any name not found.
+
+### `backend/alembic/versions/i9d0e1f2g3h4_pdc_vault_tracking.py`
+- New migration (`down_revision = h8c9d0e1f2g3`): adds `is_pdc`/`is_cash` to `sales.payment_modes`; creates `sales.check_status` enum type; adds `check_number`/`check_date`/`bank_name`/`check_status` to `sales.customer_payments`; adds `has_bounced_check` to `sales.customers`. All additions use `IF NOT EXISTS`. Downgrade fully reverses all changes.
+
+## 2026-06-15 — Bug fix: charged sales appearing as paid in AR ledger
+
+Two surgical fixes for the confirmed charged-sales display bug. No schema changes, no new endpoints, no refactoring.
+
+### `backend/sales/router.py`
+- `get_ar_ledger_sale_payments` (`GET /customers/ar-ledger/{sale_id}/payments`, ~line 595): added a second join from `CustomerPayment` → `PaymentMode` and a filter `PaymentMode.is_ar_charge == False`. AR Charge `CustomerPaymentApplied` records now excluded from the payment-detail expansion in the AR ledger. Follows the identical join/filter pattern used in the aging report endpoint (~line 445–455). Database records unchanged — this is a read-only filter.
+
+### `frontend/src/pages/sales/SalesLedger.tsx`
+- "Total Tendered" column (~line 665): replaced `grand_total + audit_variance` with `grand_total - balance_due` when `balance_due` is non-null. For a pure charge sale (`balance_due = grand_total`) this now shows ₱0 tendered instead of the misleading `grand_total`. Falls back to the original `grand_total + audit_variance` formula for older records where `balance_due` is null.
+
+## 2026-06-15 — AP module audit (read-only verification)
+
+No files modified. Full read-only audit of all 10 fixes applied in the AP gap-fix batch. All 10 previously identified issues confirmed FIXED. TypeScript (`tsc --noEmit`) and ESLint (`--max-warnings 0`) both clean. Three observations recorded for future tracking:
+
+- `manage_ap_ledger` is a new permission string with no seeded DB row — must be seeded before the JWT auth stub is replaced with real enforcement.
+- Surplus ADJUSTMENT ledger entries have no free-text description field; the link to the originating payment is carried only via `reference_type`/`reference_id`. Acceptable given the current schema; would benefit from a `notes` column if `ApLedger` is extended.
+- `_serialize(entry)` in `create_manual_ledger_entry` is called after `db.refresh()` post-commit — correct behavior, observation only.
+
+## 2026-06-15 — Migration: ap.supplier_invoices shipment_id nullable
+
+### `backend/alembic/versions/h8c9d0e1f2g3_ap_supplier_invoices_shipment_nullable.py`
+- New migration (`down_revision = g7b8c9d0e1f2`) that runs `ALTER TABLE ap.supplier_invoices ALTER COLUMN shipment_id DROP NOT NULL`. The column was already nullable in the original DDL so this is a no-op on all existing environments; the migration documents the intent formally and anchors it in the version chain. Downgrade restores `SET NOT NULL` with a warning that rows with `shipment_id = NULL` must be cleared first.
+
+## 2026-06-15 — Docs: shipment_id optional on supplier_invoices
+
+### `docs/requirements.md`
+- §10.1 Supplier Invoices rewritten to document two invoice creation paths: **Automatic (GRN-linked)** via Stage 2 cost confirmation (shipment_id populated, line items created, 3-way match available) and **Manual (standalone)** via `POST /ap/invoices` with `shipment_id = null` (no line items, empty 3-way match). Common rules extracted into a shared bullet list below the split.
+
+### `docs/schema.dbml`
+- `supplier_invoices.shipment_id`: changed from `int [ref: > ...]` to `int [null, ref: > ...]` to mark the column nullable. FK reference to `inventory_shipments.shipment_id` retained.
+
+## 2026-06-15 — AP module gap fixes (audit remediation)
+
+### Overview
+Seven targeted fixes addressing confirmed gaps from the AP module audit: security hardening on two endpoints, unapplied payment surplus accounting, optional shipment on manual invoices, corrected 3-way match cost variance definition, supplier name in AP ledger, post-payment cache invalidation, and dead `qk.apSummary` removal.
+
+### `backend/ap/router.py`
+- `amend_invoice` (`PATCH /ap/invoices/{id}`): added `require_permission("manage_invoices")` auth guard; added `write_audit()` with old/new values after commit
+- `create_manual_ledger_entry` (`POST /ap/ledger`): added `require_permission("manage_ap_ledger")` auth guard; added `write_audit()` after commit
+- `create_payment` (`POST /ap/payments`): after writing the main PAYMENT ledger entry, computes `surplus = payment.amount - sum(applications.amount_applied)`; if `surplus > 0`, writes an additional `ADJUSTMENT` AP ledger entry (positive) so net AP effect equals actual applications only; both entries in the same transaction
+- `get_invoice_match` (`GET /ap/invoices/{id}/match`): changed `po_line_total` from `ordered_qty × po_unit_cost` to `received_qty × po_unit_cost`; cost variance now answers "was the supplier billed correctly for what was received?"
+- `list_ap_ledger` (`GET /ap/ledger`): added `selectinload(models.ApLedger.supplier)` to eager-load supplier name
+
+### `backend/ap/schemas.py`
+- `InvoiceCreate.shipment_id`: changed from `int` (required) to `Optional[int] = None`; standalone invoices without a GRN link can now be created
+- `ApLedgerOut`: added `supplier_name: Optional[str] = None` with `_flatten_supplier` model_validator (same pattern as `SupplierInvoiceItemOut`)
+- `MatchLineOut.po_line_total` comment updated to reflect `received_qty × po unit_cost`
+
+### `frontend/src/services/api.ts`
+- `ApLedgerOut`: added `supplier_name: string | null`
+
+### `frontend/src/pages/ap/ApLedger.tsx`
+- Replaced "Supplier ID" column (raw number) with "Supplier" column showing `supplier_name`; falls back to `#supplier_id` (muted mono) when null
+
+### `frontend/src/pages/ap/ApPayments.tsx`
+- `createMut.onSuccess`: added `['ap', 'ledger']` and `['ap', 'aging']` invalidations alongside existing `['payments']` and `['invoices']`
+
+### `frontend/src/lib/queryKeys.ts`
+- Removed dead `qk.apSummary` factory (no backend endpoint, no frontend consumer confirmed by grep)
+
+## 2026-06-15 — Supplier AP Aging Report
+
+### Overview
+Added a full supplier aging report (`GET /ap/aging`) and a dedicated "Aging" tab in the AP sub-nav shell. Outstanding AP balances are bucketed by days past due, grouped per supplier, and returned with a backend-computed totals row. Clicking a supplier row navigates to the Invoices tab pre-filtered by that supplier.
+
+### `backend/ap/schemas.py`
+- Added `SupplierAgingRow` (supplier_id, supplier_name, supplier_code, invoice_count, has_pending_vetting, has_rejected, current, bucket_30, bucket_60, bucket_90, bucket_90p, total)
+- Added `SupplierAgingResponse` (as_of: date, rows: List[SupplierAgingRow], totals: SupplierAgingRow)
+
+### `backend/ap/router.py`
+- Added `date` to datetime imports
+- Added `GET /ap/aging` endpoint (auth: `manage_invoices`): loads Unpaid/Partial invoices across all vetting statuses via `selectinload(supplier, invoice_payments)`; computes each invoice's `balance = effective_amount − total_applied`; buckets by `(as_of − due_date).days`; groups by supplier; builds backend-side `totals` synthetic row; sorts by total descending
+
+### `frontend/src/services/api.ts`
+- Added `SupplierAgingRow` and `SupplierAgingResponse` interfaces
+- Added `apApi.getAging(asOf?: string)` → `GET /ap/aging?as_of={asOf}`
+
+### `frontend/src/lib/queryKeys.ts`
+- Added `apAging: (asOf?) => ['ap', 'aging', asOf ?? 'today']`
+
+### `frontend/src/pages/ap/InvoiceList.tsx`
+- Added `useSearchParams` to read `?supplier_id=` from URL as the initial value of the supplier filter state, enabling click-through pre-filtering from the aging report
+
+### `frontend/src/pages/ap/SupplierAging.tsx` (new)
+- Sidebar layout with "As of" date picker (defaults to today); follows CustomerAging.tsx pattern
+- Table: Supplier (with muted supplier_code sub-line) | Invoices | Current | 1–30 | 31–60 | 61–90 | 90+ | Total
+- Supplier column: amber "Pending" badge when `has_pending_vetting`; red "Rejected" badge when `has_rejected`; both can appear simultaneously
+- Zero-value bucket cells render as "—" (muted); non-zero cells show `₱{amount}`
+- Cell tinting by age: 31–60 = `bg-amber-50 text-amber-700`; 61–90 = `bg-amber-100 text-amber-900`; 90+ = `bg-red-50 text-red-700`
+- Total column always visible; bold
+- Footer row sourced from `SupplierAgingResponse.totals` (backend-computed, not client-aggregated)
+- Row click navigates to `/ap?supplier_id={id}` (Invoices tab, pre-filtered)
+- SkeletonTable while loading; inline error + Retry on failure
+- "Export XLSX" button: `ap_aging_{date}.xlsx`, includes all data rows and the totals row
+
+### `frontend/src/pages/AP.tsx`
+- Added `SupplierAging` lazy import
+- Added "Aging" NavLink to sub-nav (`/ap/aging`)
+- Added `<Route path="aging" element={<SupplierAging />} />`
+
+---
+
+## 2026-06-15 — AP 3-way match tab in InvoiceDetail
+
+### Overview
+Added a "3-Way Match" tab to `InvoiceDetail.tsx` that fetches the match view lazily (only when the tab is active) and displays PO vs. GRN vs. supplier bill comparisons with inline-editable billed quantities and unit costs.
+
+### `frontend/src/services/api.ts`
+- Added `SupplierInvoiceItemOut` interface (id, invoice_id, po_item_id, variant_id, variant_name, variant_sku, ordered/received/rejected/billed quantities, billed_unit_cost, line_total, created_at, updated_at)
+- Added `SupplierInvoiceItemUpdate` interface (billed_qty?, billed_unit_cost?)
+- Added `MatchPoRef`, `MatchShipmentRef`, `MatchLineOut`, `MatchResponse` interfaces
+- Added `items: SupplierInvoiceItemOut[]` to existing `InvoiceOut` interface
+- Added `apApi.invoices.getMatch(id)` → `GET /ap/invoices/{id}/match`
+- Added `apApi.invoices.updateInvoiceItem(id, itemId, p)` → `PATCH /ap/invoices/{id}/items/{itemId}`
+
+### `frontend/src/lib/queryKeys.ts`
+- Added `invoiceMatch: (id) => ['ap', 'invoices', id, 'match']`
+
+### `frontend/src/pages/ap/InvoiceDetail.tsx` (full rewrite)
+- Added `Details | 3-Way Match` tab bar below the always-visible invoice header card; `max-w-5xl` outer container
+- Existing sections (vetting, check-draft, amendment, linked shipment) moved into the Details tab with their own `max-w-3xl` cap
+- Added `MatchTab` internal function component:
+  - Lazy-fetches via `useQuery({ enabled: isActive })` — fires only when the tab is first opened
+  - Three summary cards (PO, Shipment/GRN, Invoice) in a responsive 3-column grid
+  - Open-discrepancy warning banner inside the shipment card when `discrepancy_status` is Flagged or Supplier_Notified
+  - Ledger divergence note shown only when `any line.has_variance === true`; explains AP ledger immutability
+  - Empty state for invoices with no line items
+  - 11-column table: SKU, Item, Ordered, Received, Rejected, Billed Qty *(editable)*, Unit Cost *(editable)*, Line Total, PO Total, Qty Var, Cost Var
+  - Inline editing: click cell → input appears with `autoFocus`; blur or Enter commits; Escape cancels; per-row loading opacity; on success invalidates `invoiceMatch` and `invoice` queries; on error cell reverts (falls back to query data) and a per-row error row appears
+  - Variance columns: signed, green for positive / red for negative / muted for zero
+  - Rows with `has_variance === true` get a `bg-red-50/50` tint
+  - Footer row shows Line Total, PO Total, and total Cost Variance
+  - SkeletonTable while loading; inline error + Retry on failure
+
+---
+
+## 2026-06-15 — AP line-item billing + 3-way match (backend only)
+
+### Overview
+Added `supplier_invoice_items` to enable PO-vs-GRN-vs-supplier-bill 3-way matching.
+Stage 2 (`confirm-costs`) now auto-creates one line item per PO line within the
+same transaction. Two new AP endpoints expose item editing and the full match view.
+
+### `backend/ap/models.py`
+- Added `SupplierInvoiceItem` (table `ap.supplier_invoice_items`): stores
+  ordered/received/rejected/billed quantities, billed unit cost, and computed
+  `line_total`; has FK to invoice, PO item, and variant
+- Added `SupplierInvoice.items` relationship (cascade all/delete-orphan)
+
+### `backend/ap/schemas.py`
+- Added `SupplierInvoiceItemOut` with `model_validator` that flattens
+  `variant_name` and `variant_sku` from the loaded ORM relationship
+- Added `SupplierInvoiceItemUpdate` (billed_qty, billed_unit_cost both optional)
+- Updated `InvoiceOut`: added `items: List[SupplierInvoiceItemOut] = []`
+- Added `MatchPoRef`, `MatchShipmentRef`, `MatchLineOut`, `MatchResponse`
+
+### `backend/procurement/router.py` — `confirm_costs`
+- After cost layers are written, loads the linked PO and builds one
+  `SupplierInvoiceItem` per PO line item within the same transaction
+- Overrides `invoice_total` with `sum(line_total)` when line items are present
+  so the invoice, AP ledger, and line items are always consistent
+- Unlinked shipments (no `po_id`) behave identically to before
+
+### `backend/ap/router.py`
+- Updated `_load_invoice` and `list_invoices` to selectinload `items` → `variant`
+  (prevents N+1 queries now that `InvoiceOut` includes `items[]`)
+- Added `PATCH /ap/invoices/{invoice_id}/items/{item_id}` — edits `billed_qty`
+  and/or `billed_unit_cost`, recomputes `line_total` and `invoice.total_amount`,
+  recalculates Paid/Partial/Unpaid status, writes audit log
+- Added `GET /ap/invoices/{invoice_id}/match` — read-only 3-way match view
+  returning invoice + po + shipment + per-line variances
+
+## 2026-06-14 — AP frontend: invoice vetting, check-draft, discrepancy, payments, ledger
+
+### Overview
+Replaced the AP stub page with a fully functional sub-nav shell (Invoices / Payments / AP Ledger). Surfaces all new backend endpoints added in the previous session: invoice vetting (with discrepancy warning + override), check-draft flag, shipment discrepancy management, and supplier payment recording with invoice application.
+
+### Backend model changes (previous session — recorded here for completeness)
+- `ap/models.py` — `SupplierInvoice`: added `vetting_status`, `paid_before_received`, `check_drafted`, `check_drafted_note`
+- `procurement/models.py` — `InventoryShipment`: added `discrepancy_status`, `discrepancy_notes`
+- `ap/schemas.py` — extended `InvoiceOut`; added `InvoiceVettingUpdate`, `InvoiceCheckDraftUpdate`
+- `procurement/schemas.py` — extended `ShipmentOut`; added `ShipmentDiscrepancyUpdate`
+- `ap/router.py` — added `PATCH /ap/invoices/{id}/vetting`, `PATCH /ap/invoices/{id}/check-draft`; gated `POST /ap/payments` on vetting approval; added `paid_before_received` anomaly flag
+- `procurement/router.py` — added `PATCH /procurement/shipments/{id}/discrepancy`
+
+### Frontend — `frontend/src/services/api.ts`
+- Extended `Shipment` interface: added `discrepancy_status: string`, `discrepancy_notes: string | null`
+- Added `stockApi.shipments.updateDiscrepancy()` → `PATCH /procurement/shipments/{id}/discrepancy`
+- Added AP types: `InvoiceSupplierRef`, `InvoiceOut`, `InvoiceAmend`, `InvoiceVettingUpdate`, `ApVettingWarning`, `InvoiceCheckDraftUpdate`, `InvoiceApplicationCreate`, `ApPaymentCreate`, `InvoicePaymentOut`, `ApPaymentOut`, `ApLedgerOut`
+- Added `apApi` object: `invoices.{list, get, amend, setVetting, setCheckDraft}`, `payments.{list, get, create}`, `ledger.list`
+
+### Frontend — `frontend/src/lib/queryKeys.ts`
+- Added `invoice(id)` and `apLedger(supplierId?)` keys
+
+### Frontend — `frontend/src/pages/AP.tsx`
+- Replaced stub with sub-nav shell: tabs for Invoices, Payments, AP Ledger; lazy-loaded sub-pages
+
+### Frontend — `frontend/src/pages/ap/InvoiceList.tsx` (new)
+- Filterable invoice table: supplier, payment status, vetting status filters (vetting filter is client-side)
+- Badges: payment status (Unpaid/Partial/Paid), vetting status (Pending/Approved/Rejected)
+- Flag chips: PBR (paid before received), CHK (check drafted)
+- Click row → navigate to `/ap/invoices/:id`
+
+### Frontend — `frontend/src/pages/ap/InvoiceDetail.tsx` (new)
+- Invoice header: all fields, effective amount (with amended indicator), anomaly badges
+- Vetting panel: Approve / Reject / Reset buttons; handles `{warning: true}` response with override checkbox flow
+- Check-draft panel: mark drafted with note, or clear flag
+- Amendment panel: set amended amount and notes
+- Linked shipment section: shows discrepancy status; inline select/input to update discrepancy via `PATCH /procurement/shipments/{id}/discrepancy`
+
+### Frontend — `frontend/src/pages/ap/ApPayments.tsx` (new)
+- Payment list with supplier filter
+- Inline "Record Payment" form: supplier, amount, date, reference, method
+- Invoice application sub-section: loads open invoices for selected supplier; per-invoice amount inputs
+- Shows applied invoices inline in the list table
+
+### Frontend — `frontend/src/pages/ap/ApLedger.tsx` (new)
+- Read-only AP ledger table with supplier filter
+- Colour-coded reason badges (INVOICE / PAYMENT / CREDIT_MEMO / ADJUSTMENT)
+- Amount sign: positive = liability increase (red), negative = reduction (green)
+
 ## 2026-06-13 — Credit Memo page spec compliance
 
 ### Overview

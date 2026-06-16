@@ -317,19 +317,19 @@ function PaymentModesTab() {
   })
   const [showForm, setShowForm]   = useState(false)
   const [editing, setEditing]     = useState<PaymentMode | null>(null)
-  const [form, setForm]           = useState({ name: '', is_physical: 'true', is_ar_charge: false, is_ar_credit: false })
+  const [form, setForm]           = useState({ name: '', is_physical: 'true', is_ar_charge: false, is_ar_credit: false, is_pdc: false })
   const [loading, setLoading]     = useState(false)
   const [arError, setArError]     = useState('')
 
   function openNew() {
     setEditing(null)
-    setForm({ name: '', is_physical: 'true', is_ar_charge: false, is_ar_credit: false })
+    setForm({ name: '', is_physical: 'true', is_ar_charge: false, is_ar_credit: false, is_pdc: false })
     setArError('')
     setShowForm(true)
   }
   function openEdit(m: PaymentMode) {
     setEditing(m)
-    setForm({ name: m.name, is_physical: m.is_physical ? 'true' : 'false', is_ar_charge: m.is_ar_charge, is_ar_credit: m.is_ar_credit })
+    setForm({ name: m.name, is_physical: m.is_physical ? 'true' : 'false', is_ar_charge: m.is_ar_charge, is_ar_credit: m.is_ar_credit, is_pdc: m.is_pdc })
     setArError('')
     setShowForm(true)
   }
@@ -348,6 +348,7 @@ function PaymentModesTab() {
         is_physical: form.is_physical === 'true',
         is_ar_charge: form.is_ar_charge,
         is_ar_credit: form.is_ar_credit,
+        is_pdc: form.is_pdc,
       }
       editing
         ? await salesApi.paymentModes.patch(editing.payment_mode_id, p)
@@ -392,6 +393,13 @@ function PaymentModesTab() {
                 <span className="block text-xs t-text-2 mt-0.5">Selecting this mode at the POS draws from the customer's existing credit balance (e.g. from prior returns or overpayments). Only visible when customer has available credit.</span>
               </span>
             </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" className="mt-0.5" checked={form.is_pdc} onChange={e => setForm(f => ({ ...f, is_pdc: e.target.checked }))} />
+              <span className="text-sm t-text-1">
+                <span className="font-medium">Post Dated Check (PDC)</span>
+                <span className="block text-xs t-text-2 mt-0.5">Marks this mode as a post-dated check. Requires check number, check date, and bank name at the point of sale. Tracked in the PDC Vault.</span>
+              </span>
+            </label>
             {arError && <p className="text-xs text-red-500 mt-1">{arError}</p>}
           </div>
         </InlineForm>
@@ -408,6 +416,7 @@ function PaymentModesTab() {
                 <div className="flex flex-wrap gap-1">
                   {m.is_ar_charge && <span className="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">AR Charge</span>}
                   {m.is_ar_credit && <span className="px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">AR Credit</span>}
+                  {m.is_pdc && <span className="px-1.5 py-0.5 rounded text-xs bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300">PDC</span>}
                 </div>
               </td>
               <td className="px-3 py-2"><StatusBadge active={m.is_active} /></td>

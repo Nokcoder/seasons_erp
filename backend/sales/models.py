@@ -1,10 +1,18 @@
 # sales/models.py
+import enum as _py_enum
+
 from sqlalchemy import (Column, Integer, BigInteger, String, Boolean, Numeric,
                          Date, DateTime, ForeignKey, UniqueConstraint,
                          Enum as SAEnum)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func, text
 from core.database import Base
+
+
+class CheckStatus(_py_enum.Enum):
+    IN_VAULT  = "IN_VAULT"
+    DEPOSITED = "DEPOSITED"
+    BOUNCED   = "BOUNCED"
 
 
 # ==========================================
@@ -21,6 +29,10 @@ class PaymentMode(Base):
     is_ar_charge    = Column(Boolean, default=False, nullable=False)
     is_ar_credit    = Column(Boolean, default=False, nullable=False)
     is_credit_memo  = Column(Boolean, default=False, nullable=False,
+                             server_default='false')
+    is_pdc          = Column(Boolean, default=False, nullable=False,
+                             server_default='false')
+    is_cash         = Column(Boolean, default=False, nullable=False,
                              server_default='false')
 
 
@@ -53,6 +65,8 @@ class Customer(Base):
     terms_days          = Column(Integer, default=0, nullable=False)
     outstanding_balance = Column(Numeric(15, 2), default=0, nullable=False)
     is_deleted          = Column(Boolean, default=False, nullable=False)
+    has_bounced_check   = Column(Boolean, default=False, nullable=False,
+                                 server_default='false')
 
 
 # ==========================================
@@ -216,6 +230,14 @@ class CustomerPayment(Base):
     reference_number = Column(String(100), nullable=True)
     notes            = Column(String(500), nullable=True)
     unapplied_amount = Column(Numeric(15, 2), default=0, nullable=False)
+    check_number     = Column(String(50), nullable=True)
+    check_date       = Column(Date, nullable=True)
+    bank_name        = Column(String(100), nullable=True)
+    check_status     = Column(
+        SAEnum("IN_VAULT", "DEPOSITED", "BOUNCED",
+               name="check_status", schema="sales"),
+        nullable=True,
+    )
 
     customer     = relationship("Customer")
     payment_mode = relationship("PaymentMode")

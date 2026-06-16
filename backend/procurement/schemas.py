@@ -147,6 +147,8 @@ class ShipmentOut(BaseModel):
     reference_number: Optional[str] = None
     received_at: Optional[datetime] = None
     is_confirmed: bool = False
+    discrepancy_status: str = "None"
+    discrepancy_notes: Optional[str] = None
     received_by_user_id:      Optional[int] = None
     inspected_by_user_id:     Optional[int] = None
     received_by_employee_id:  Optional[int] = None
@@ -156,6 +158,12 @@ class ShipmentOut(BaseModel):
     inspected_by_employee: Optional[EmployeeRefOut] = None
     receiving_details: List[ReceivingDetailOut] = []
     class Config: from_attributes = True
+
+
+class ShipmentDiscrepancyUpdate(BaseModel):
+    """Payload for PATCH /procurement/shipments/{id}/discrepancy."""
+    discrepancy_status: str           # None | Flagged | Supplier_Notified | Resolved | Waived
+    discrepancy_notes: Optional[str] = None
 
 
 # ── CONFIRM COSTS (Stage 2) ───────────────────────────────────────────────────

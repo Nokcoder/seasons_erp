@@ -109,6 +109,35 @@ def _seed_store_credit():
 _seed_store_credit()
 
 
+def _seed_payment_mode_flags():
+    """Idempotently set is_pdc and is_cash flags on known payment modes.
+
+    Identifies modes by name match.  If a name is not found, silently skips
+    (the mode may not exist in all environments).  Safe to run on every startup.
+    """
+    from core.database import SessionLocal
+    from sales.models import PaymentMode
+
+    UPDATES = [
+        ("Post Dated Check", {"is_pdc": True,  "is_physical": True}),
+        ("Cash",             {"is_cash": True, "is_physical": True}),
+        ("On Date Check",    {"is_pdc": False, "is_physical": True}),
+    ]
+    db = SessionLocal()
+    try:
+        for name, flags in UPDATES:
+            mode = db.query(PaymentMode).filter_by(name=name).first()
+            if not mode:
+                continue
+            for attr, val in flags.items():
+                setattr(mode, attr, val)
+        db.commit()
+    finally:
+        db.close()
+
+_seed_payment_mode_flags()
+
+
 def _seed_admin_user():
     """Idempotently create the initial ADMIN user from INIT_ADMIN_* env vars."""
     username = os.getenv("INIT_ADMIN_USERNAME")
