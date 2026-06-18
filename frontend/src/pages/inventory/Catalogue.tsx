@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback } from 'react'
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query'
 import { useAuth } from '../../context/AuthContext'
@@ -253,6 +253,11 @@ export default function Catalogue() {
   const [attrFilters,    setAttrFilters]    = useState<Record<string, string>>({})
   const [negativeStock,  setNegativeStock]  = useState(false)
 
+  // ── pagination ────────────────────────────────────────────────────────────
+  const ROWS_PER_PAGE_OPTIONS = [10, 30, 50, 100, 500] as const
+  const [pageSize, setPageSize] = useState(50)
+  const [page,     setPage]     = useState(1)
+
   // ── column visibility ─────────────────────────────────────────────────────
   const [cols,       setCols]      = useState<ColVis>(loadCols)
   const [pickerOpen, setPickerOpen]= useState(false)
@@ -331,6 +336,14 @@ export default function Catalogue() {
     })
     return sortRows(base, sort)
   }, [allRows, searchTags, liveInput, catFilter, typeFilter, statusFilter, supFilter, attrFilters, negativeStock, sort])
+
+  // ── pagination over filtered rows ─────────────────────────────────────────
+  useEffect(() => { setPage(1) }, [filteredRows, pageSize])
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const pagedRows  = useMemo(
+    () => filteredRows.slice((page - 1) * pageSize, page * pageSize),
+    [filteredRows, page, pageSize]
+  )
 
   // ── derived location lists ────────────────────────────────────────────────
   const physLocs    = locations.filter(l => l.location_type !== 'Virtual')
@@ -468,6 +481,29 @@ export default function Catalogue() {
           <span className="text-xs t-text-3">
             {loading ? 'Loading…' : `${filteredRows.length} variant${filteredRows.length !== 1 ? 's' : ''}`}
           </span>
+
+          {/* rows-per-page + page nav */}
+          <div className="flex items-center gap-2 ml-3">
+            <label className="text-xs t-text-3">Rows per page</label>
+            <select
+              className="t-bg-input border t-border-strong rounded px-2 py-1 text-xs t-text-1 focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors"
+              value={pageSize}
+              onChange={e => setPageSize(Number(e.target.value))}>
+              {ROWS_PER_PAGE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}
+                className="px-2 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong hover:t-text-1 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                ‹ Prev
+              </button>
+              <span className="text-xs t-text-3 px-1">Page {page} of {totalPages}</span>
+              <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
+                className="px-2 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong hover:t-text-1 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                Next ›
+              </button>
+            </div>
+          </div>
+
           <div className="ml-auto flex items-center gap-2">
 
             {/* column picker */}
@@ -574,7 +610,7 @@ export default function Catalogue() {
                   </td>
                 </tr>
               )}
-              {!loading && filteredRows.map(({ product: p, variant: v, isBundle }) => {
+              {!loading && pagedRows.map(({ product: p, variant: v, isBundle }) => {
                 const isDefault = v.is_default
                 const rowCls = `border-b t-border hover:t-bg-surface cursor-pointer transition-colors group${isDefault ? '' : ' opacity-80'}`
                 return (

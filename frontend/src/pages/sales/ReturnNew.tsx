@@ -149,7 +149,7 @@ export default function ReturnNew() {
           normalize(item.product_brand).includes(normalize(catalogSearch))
         ) {
           results.push({ item, variant: v })
-          if (results.length >= 20) return results
+          if (results.length >= 10) return results
         }
       }
     }

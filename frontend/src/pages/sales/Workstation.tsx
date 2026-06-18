@@ -289,9 +289,9 @@ export default function Workstation() {
           normalize(v.PID).includes(normalize(search)) ||
           v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
         if (hit) out.push({ item, variant: v })
-        if (out.length >= 80) break
+        if (out.length >= 10) break
       }
-      if (out.length >= 80) break
+      if (out.length >= 10) break
     }
     return out
   }, [search, catalog])

@@ -88,7 +88,7 @@ export default function ReceivingNew() {
           normalize(v.sku ?? '').includes(normalize(search)) ||
           v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
         ) out.push({ product: p, variant: v })
-        if (out.length >= 20) return out
+        if (out.length >= 10) return out
       }
     }
     return out
