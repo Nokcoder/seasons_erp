@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
@@ -35,6 +36,7 @@ function phToday() {
 
 export default function PDCVault() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('IN_VAULT')
   const [bankFilter,   setBankFilter]   = useState('')
@@ -129,10 +131,10 @@ export default function PDCVault() {
       {summary && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            { label: 'Maturing Today',  value: summary.maturing_today,  color: 'text-amber-400' },
-            { label: 'Next 7 Days',     value: summary.next_7_days,     color: 'text-blue-400' },
-            { label: 'Overdue',         value: summary.overdue,         color: 'text-red-400' },
-            { label: 'Total Uncleared', value: summary.total_uncleared, color: 't-text-1' },
+            { label: 'Maturing Today',  value: summary.maturing_today,       color: 'text-amber-400' },
+            { label: 'Next 7 Days',     value: summary.maturing_next_7_days, color: 'text-blue-400' },
+            { label: 'Overdue',         value: summary.total_overdue,        color: 'text-red-400' },
+            { label: 'Total Uncleared', value: summary.total_uncleared,      color: 't-text-1' },
           ].map(c => (
             <div key={c.label} className="t-bg-surface border t-border rounded-lg p-3">
               <p className="text-[10px] uppercase tracking-wide t-text-3 mb-1">{c.label}</p>
@@ -172,7 +174,7 @@ export default function PDCVault() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b t-border t-bg-elevated">
-              {['Check #','Bank','Check Date','Days','Customer','Amount','Sale(s)','Status','Actions'].map(h => (
+              {['Check #','Bank','Check Date','Days','Customer','Amount','Invoice(s)','Status','Actions'].map(h => (
                 <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wide t-text-3 whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -199,8 +201,20 @@ export default function PDCVault() {
                   <td className="px-3 py-2 t-text-2 whitespace-nowrap">{fmtDateOnly(e.check_date)}</td>
                   <td className={`px-3 py-2 tabular-nums font-medium ${daysColor}`}>{daysLabel}</td>
                   <td className="px-3 py-2 t-text-1">{e.customer_name}</td>
-                  <td className="px-3 py-2 tabular-nums text-right t-text-1">₱{fmt(e.amount_applied)}</td>
-                  <td className="px-3 py-2 t-text-3">{e.sale_pids?.join(', ') ?? '—'}</td>
+                  <td className="px-3 py-2 tabular-nums text-right t-text-1">₱{fmt(e.amount)}</td>
+                  <td className="px-3 py-2 t-text-3">
+                    {e.sale_ids?.length
+                      ? e.sale_ids.map((sid, i) => (
+                          <span key={sid}>
+                            {i > 0 && ', '}
+                            <button onClick={() => navigate(`/sales/ledger/${sid}`)}
+                              className="text-blue-400 hover:underline font-mono">
+                              {e.sale_refs?.[i] ?? sid}
+                            </button>
+                          </span>
+                        ))
+                      : '—'}
+                  </td>
                   <td className="px-3 py-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${statusColor[e.check_status ?? ''] ?? ''}`}>
                       {e.check_status?.replace('_', ' ') ?? '—'}

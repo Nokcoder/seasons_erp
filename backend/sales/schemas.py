@@ -661,6 +661,7 @@ class PDCEntryOut(BaseModel):
     payment_date:        Optional[date] = None  # when the payment was recorded / deposited
     days_until_maturity: int               # negative = overdue, 0 = today, positive = future
     sale_ids:            List[int]
+    sale_refs:           List[str]
 
 
 class PDCMaturitySummary(BaseModel):

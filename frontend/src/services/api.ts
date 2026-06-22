@@ -359,6 +359,7 @@ export interface PDCEntryOut {
   payment_date:        string | null
   days_until_maturity: number
   sale_ids:            number[]
+  sale_refs:           string[]
 }
 
 export interface PDCMaturitySummary {

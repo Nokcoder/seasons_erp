@@ -940,7 +940,7 @@ def get_pdc_vault(
 
     q = (
         db.query(models.CustomerPayment)
-        .options(selectinload(models.CustomerPayment.applications))
+        .options(selectinload(models.CustomerPayment.applications).joinedload(models.CustomerPaymentApplied.sale))
         .filter(
             models.CustomerPayment.payment_mode_id.in_(pdc_mode_ids),
             models.CustomerPayment.check_status == status_filter,
@@ -975,6 +975,7 @@ def get_pdc_vault(
             payment_date=p.payment_date.date() if p.payment_date else None,
             days_until_maturity=(p.check_date - today).days if p.check_date else 0,
             sale_ids=[a.sale_id for a in p.applications],
+            sale_refs=[a.sale.sale_pid or f"SALE-{a.sale_id:05d}" for a in p.applications],
         )
         for p in payments
     ]

@@ -68,21 +68,21 @@ export default function KeywordSearch({
   return (
     <div className={className}>
       {/* Tag container + inline input */}
-      <div className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5
+      <div className="t-bg-input border t-border-strong rounded px-2 py-1.5
                       flex flex-wrap items-center gap-1 min-h-[34px]
-                      focus-within:ring-1 focus-within:ring-blue-500 transition-colors">
+                      focus-within:ring-1 focus-within:ring-[var(--accent)] transition-colors">
         {tags.map(tag => (
           <span
             key={tag}
             className="inline-flex items-center gap-1 text-[11px] font-medium
-                       bg-blue-950 text-blue-300 border border-blue-800 rounded
+                       bg-[var(--accent)]/10 t-accent-text border border-[var(--accent)]/30 rounded
                        px-1.5 py-0.5 leading-none whitespace-nowrap"
           >
             {tag}
             <button
               type="button"
               onClick={() => removeTag(tag)}
-              className="text-blue-500 hover:text-white leading-none ml-0.5"
+              className="t-accent-text hover:t-text-1 leading-none ml-0.5"
               aria-label={`Remove "${tag}"`}
             >
               ×
@@ -97,20 +97,20 @@ export default function KeywordSearch({
           onKeyDown={handleKeyDown}
           placeholder={tags.length === 0 ? placeholder : '+ keyword…'}
           className="flex-1 min-w-[80px] bg-transparent border-0 outline-none
-                     text-xs text-gray-200 placeholder-gray-600"
+                     text-xs t-text-1 placeholder:t-text-3"
         />
       </div>
 
       {/* Clear All — only when there is something active */}
       {hasActive && (
         <div className="flex items-center justify-between mt-1">
-          <span className="text-[10px] text-gray-600">
+          <span className="text-[10px] t-text-3">
             {tags.length > 0 && `${tags.length} keyword${tags.length > 1 ? 's' : ''} active · AND`}
           </span>
           <button
             type="button"
             onClick={clearAll}
-            className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"
+            className="text-[10px] t-text-3 hover:t-text-2 transition-colors"
           >
             Clear all
           </button>

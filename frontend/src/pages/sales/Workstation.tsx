@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar } from '../../components/Skeleton'
+import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -55,6 +56,18 @@ interface TenderRow {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function uid() { return Math.random().toString(36).slice(2, 10) }
+
+// Matches a catalog item/variant against every normalized keyword term (AND).
+// No "sku" field exists on POSVariant — brand/name/PID/barcode are the
+// identifiers actually available.
+function matchesAllTerms(item: POSCatalogItem, v: POSVariant, terms: string[]): boolean {
+  return terms.every(term =>
+    normalize(item.product_brand).includes(term)
+    || normalize(v.variant_name).includes(term)
+    || normalize(v.PID).includes(term)
+    || v.barcodes.some(b => normalize(b.barcode).includes(term))
+  )
+}
 
 // Local calendar date as YYYY-MM-DD — `toISOString()` returns the UTC date,
 // which lands on the wrong day during the PH-local late-night/early-morning hours.
@@ -246,6 +259,8 @@ export default function Workstation() {
 
   // ── ui state ──────────────────────────────────────────────────────────────
   const [search,        setSearch]        = useState('')
+  const [filterTags,    setFilterTags]    = useState<string[]>([])
+  const [filterInput,   setFilterInput]   = useState('')
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null)
   const [trayOpen,      setTrayOpen]      = useState(false)
   const [loading,       setLoading]       = useState(false)
@@ -278,6 +293,7 @@ export default function Workstation() {
   }, [catalog])
 
   // ── search results ────────────────────────────────────────────────────────
+  // Barcode scan field's own match — unchanged from before the split.
   const searchResults = useMemo(() => {
     if (!search.trim()) return [] as Array<{ item: POSCatalogItem; variant: POSVariant }>
     const out: Array<{ item: POSCatalogItem; variant: POSVariant }> = []
@@ -295,6 +311,33 @@ export default function Workstation() {
     }
     return out
   }, [search, catalog])
+
+  // ── keyword filter (AND across tags + live partial) ─────────────────────────
+  // Standalone — browses the full catalog independent of the barcode field —
+  // and additionally narrows searchResults when the barcode field also has text.
+  const handleFilterTagsChange = useCallback((tags: string[]) => setFilterTags(tags), [])
+  const handleFilterPartialChange = useCallback((v: string) => setFilterInput(v), [])
+
+  const filterTerms = useMemo(() => [
+    ...filterTags.map(t => normalize(t)),
+    ...(filterInput.trim() ? [normalize(filterInput)] : []),
+  ], [filterTags, filterInput])
+
+  const filteredResults = useMemo(() => {
+    if (filterTerms.length === 0) return searchResults
+    if (!search.trim()) {
+      const out: Array<{ item: POSCatalogItem; variant: POSVariant }> = []
+      for (const item of catalog) {
+        for (const v of item.variants) {
+          if (matchesAllTerms(item, v, filterTerms)) out.push({ item, variant: v })
+          if (out.length >= 10) break
+        }
+        if (out.length >= 10) break
+      }
+      return out
+    }
+    return searchResults.filter(({ item, variant: v }) => matchesAllTerms(item, v, filterTerms))
+  }, [searchResults, filterTerms, search, catalog])
 
   // ── initialise sale PID from backend next-pid endpoint ───────────────────
   useEffect(() => {
@@ -950,26 +993,32 @@ export default function Workstation() {
 
         {/* ── LEFT PANEL — Item Search ── */}
         <div className="w-72 shrink-0 flex flex-col border-r t-border t-bg-surface">
-          <div className="p-3 border-b t-border">
+          <div className="p-3 border-b t-border flex flex-col gap-2">
             <input
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
               onKeyDown={handleSearchEnter}
-              placeholder="Search product, PID, barcode… (Enter to scan)"
+              placeholder="Scan barcode or exact PID…"
               className="w-full t-bg-input border t-border-strong rounded px-3 py-1.5 text-sm t-text-1
                          placeholder:t-text-3 focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors"
             />
+            <div>
+              <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Keyword Filter</span>
+              <KeywordSearch tags={filterTags} onTagsChange={handleFilterTagsChange}
+                onPartialChange={handleFilterPartialChange}
+                placeholder="Brand, name, PID, SKU…" />
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {searchResults.length === 0 && search.trim() && (
-              <p className="text-xs t-text-3 text-center mt-8 px-4">No results for "{search}"</p>
+            {filteredResults.length === 0 && (search.trim() || filterTerms.length > 0) && (
+              <p className="text-xs t-text-3 text-center mt-8 px-4">No results{search.trim() ? ` for "${search}"` : ''}</p>
             )}
-            {searchResults.length === 0 && !search.trim() && (
+            {filteredResults.length === 0 && !search.trim() && filterTerms.length === 0 && (
               <p className="text-xs t-text-4 text-center mt-8">Type to search the catalog</p>
             )}
-            {searchResults.map(({ item, variant }) => {
+            {filteredResults.map(({ item, variant }) => {
               const isPromo = variant.promo_price != null
               return (
                 <button

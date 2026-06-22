@@ -1,9 +1,11 @@
-import { Fragment, useState, useMemo, useRef } from 'react'
+import { Fragment, useState, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
+import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { normalize } from '../../lib/normalize'
 import {
   salesApi, inventoryApi, authApi,
   type SaleOut, type SaleItemOut, type CustomerPaymentOut, type Location,
@@ -254,7 +256,8 @@ export default function SalesLedger() {
   const navigate = useNavigate()
 
   // ── filter state ──────────────────────────────────────────────────────────
-  const [search,         setSearch]         = useState('')
+  const [searchTags,     setSearchTags]     = useState<string[]>([])
+  const [liveInput,      setLiveInput]      = useState('')
   const [dateFrom,       setDateFrom]       = useState(todayLocal)
   const [dateTo,         setDateTo]         = useState(todayLocal)
   const [locFilter,      setLocFilter]      = useState('')
@@ -311,12 +314,15 @@ export default function SalesLedger() {
 
   const tableParams = useMemo(() => ({
     ...scopeParams,
-    search:         search.trim() || undefined,
     payment_status: payStatus    || undefined,
     has_variance:   hasVariance  || undefined,
     has_uncosted:   hasUncosted  || undefined,
     limit:          200,
-  }), [scopeParams, search, payStatus, hasVariance, hasUncosted])
+  }), [scopeParams, payStatus, hasVariance, hasUncosted])
+
+  // ── keyword search (client-side AND filter over the fetched page) ─────────
+  const handleTagsChange = useCallback((tags: string[]) => setSearchTags(tags), [])
+  const handlePartialChange = useCallback((v: string) => setLiveInput(v), [])
 
   // ── queries ────────────────────────────────────────────────────────────────
   const { data: summary, isLoading: summaryLoading, isFetching: summaryFetching } = useQuery({
@@ -345,6 +351,25 @@ export default function SalesLedger() {
 
   function cashierName(s: SaleOut) { return s.employee_id ? (employeeMap.get(s.employee_id) ?? `EMP-${s.employee_id}`) : '—' }
   function customerName(s: SaleOut) { return s.customer_id ? (customerMap.get(s.customer_id) ?? `CUS-${s.customer_id}`) : 'Walk-in' }
+
+  // ── keyword-filtered rows — ALL active tags (+ live partial) must match ────
+  const filteredSales = useMemo(() => {
+    const allTerms = [
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
+    ]
+    if (allTerms.length === 0) return sales
+    return sales.filter((s: SaleOut) => {
+      const hit = (term: string) =>
+        normalize(s.sale_pid ?? '').includes(term)
+        || normalize(cashierName(s)).includes(term)
+        || normalize(customerName(s)).includes(term)
+        // No literal "sku" field exists on SaleItemOut/VariantRefOut — PID is the
+        // closest variant identifier the API exposes on sale line items.
+        || (s.items ?? []).some(item => normalize(item.variant?.PID ?? '').includes(term))
+      return allTerms.every(hit)
+    })
+  }, [sales, searchTags, liveInput, employeeMap, customerMap])
 
   // ── export (two sheets) ───────────────────────────────────────────────────
   async function handleExport() {
@@ -445,7 +470,7 @@ export default function SalesLedger() {
   }
 
   function clearAll() {
-    setSearch(''); setDateFrom(todayLocal()); setDateTo(todayLocal()); setLocFilter(''); setShiftFilter('')
+    setSearchTags([]); setLiveInput(''); setDateFrom(todayLocal()); setDateTo(todayLocal()); setLocFilter(''); setShiftFilter('')
     setRegisterFilter(''); setEmpFilter(''); setCustFilter(''); setSaleStatus('Posted')
     setPayStatus(''); setHasVariance(false); setHasUncosted(false)
   }
@@ -476,7 +501,9 @@ export default function SalesLedger() {
         <aside className="w-52 shrink-0 border-r t-border t-bg-surface flex flex-col overflow-y-auto p-3 gap-3">
           <p className="text-[10px] font-semibold uppercase tracking-widest t-text-4">Filters</p>
           <div><label className={lCls}>Search</label>
-            <input className={iCls} placeholder="Sale PID, cashier, customer…" value={search} onChange={e => setSearch(e.target.value)} /></div>
+            <KeywordSearch tags={searchTags} onTagsChange={handleTagsChange}
+              onPartialChange={handlePartialChange}
+              placeholder="Sale #, customer, reference…" /></div>
           <div><label className={lCls}>Date From</label>
             <input type="date" className={iCls} value={dateFrom} onChange={e => setDateFrom(e.target.value)} /></div>
           <div><label className={lCls}>Date To</label>
@@ -610,10 +637,10 @@ export default function SalesLedger() {
               </thead>
               <tbody>
                 {tableLoading && <SkeletonTable rows={10} cols={visibleCols} />}
-                {!tableLoading && sales.length === 0 && (
+                {!tableLoading && filteredSales.length === 0 && (
                   <tr><td colSpan={visibleCols} className="px-3 py-10 text-center t-text-4">No sales found for the current filters.</td></tr>
                 )}
-                {!tableLoading && sales.map((s: SaleOut) => {
+                {!tableLoading && filteredSales.map((s: SaleOut) => {
                   const isReturn  = s.row_type === 'return'
                   const rowNav    = isReturn
                     ? () => navigate(`/sales/returns/${s.return_id}`)
