@@ -189,6 +189,7 @@ export interface POSVariant {
   variant_id: number
   PID: string
   variant_name: string
+  sku?: string | null
   price: number | null
   promo_price: number | null
   attributes: Record<string, unknown> | null
@@ -270,7 +271,7 @@ export interface SaleItemOut {
   supplier_discount: number | null
   net_unit_cost: number | null
   cost_source: string | null
-  variant?: { variant_id: number; PID: string; variant_name: string; product_brand?: string | null; product_type?: string | null }
+  variant?: { variant_id: number; PID: string; variant_name: string; sku?: string | null; product_brand?: string | null; product_type?: string | null }
   already_returned?: number  // set by /sale/:id/items-for-return
 }
 

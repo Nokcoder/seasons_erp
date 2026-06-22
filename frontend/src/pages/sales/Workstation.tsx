@@ -58,13 +58,12 @@ interface TenderRow {
 function uid() { return Math.random().toString(36).slice(2, 10) }
 
 // Matches a catalog item/variant against every normalized keyword term (AND).
-// No "sku" field exists on POSVariant — brand/name/PID/barcode are the
-// identifiers actually available.
 function matchesAllTerms(item: POSCatalogItem, v: POSVariant, terms: string[]): boolean {
   return terms.every(term =>
     normalize(item.product_brand).includes(term)
     || normalize(v.variant_name).includes(term)
     || normalize(v.PID).includes(term)
+    || normalize(v.sku ?? '').includes(term)
     || v.barcodes.some(b => normalize(b.barcode).includes(term))
   )
 }
@@ -303,6 +302,7 @@ export default function Workstation() {
           normalize(item.product_brand).includes(normalize(search)) ||
           normalize(v.variant_name).includes(normalize(search)) ||
           normalize(v.PID).includes(normalize(search)) ||
+          normalize(v.sku ?? '').includes(normalize(search)) ||
           v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
         if (hit) out.push({ item, variant: v })
         if (out.length >= 10) break

@@ -364,9 +364,10 @@ export default function SalesLedger() {
         normalize(s.sale_pid ?? '').includes(term)
         || normalize(cashierName(s)).includes(term)
         || normalize(customerName(s)).includes(term)
-        // No literal "sku" field exists on SaleItemOut/VariantRefOut — PID is the
-        // closest variant identifier the API exposes on sale line items.
-        || (s.items ?? []).some(item => normalize(item.variant?.PID ?? '').includes(term))
+        || (s.items ?? []).some(item =>
+          normalize(item.variant?.PID ?? '').includes(term)
+          || normalize(item.variant?.sku ?? '').includes(term)
+        )
       return allTerms.every(hit)
     })
   }, [sales, searchTags, liveInput, employeeMap, customerMap])

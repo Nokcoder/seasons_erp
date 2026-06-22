@@ -437,6 +437,7 @@ def get_pos_catalog(db: Session = Depends(get_db)):
                 variant_id=v.variant_id,
                 PID=v.PID,
                 variant_name=v.variant_name,
+                sku=v.sku,
                 price=resolved_price,
                 promo_price=v.promo_price,
                 attributes=v.attributes,

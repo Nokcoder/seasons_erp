@@ -350,6 +350,7 @@ class POSVariantOut(BaseModel):
     variant_id: int
     PID: str
     variant_name: str
+    sku: Optional[str] = None
     price: Optional[Decimal]        # resolved: own price or default sibling's price
     promo_price: Optional[Decimal]  # takes precedence over price for display if set
     attributes: Optional[Dict[str, Any]]

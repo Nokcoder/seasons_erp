@@ -20,6 +20,7 @@ class VariantRefOut(BaseModel):
     variant_id:    int
     PID:           str
     variant_name:  str
+    sku:           Optional[str] = None
     product_brand: Optional[str] = None
     product_type:  Optional[str] = None
     class Config: from_attributes = True
