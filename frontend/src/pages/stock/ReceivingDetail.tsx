@@ -1,10 +1,10 @@
+import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type ReceivingDetail } from '../../services/api'
-import * as XLSX from 'xlsx'
 
 function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
@@ -27,21 +27,17 @@ export default function ReceivingDetail() {
     enabled: !!sid,
   })
 
-  function handleExport() {
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
+
+  async function handleExport() {
     if (!shipment) return
-    const rows = (shipment.receiving_details ?? []).map((d: ReceivingDetail) => ({
-      'Brand':        d.variant?.product?.brand ?? '',
-      'Variant':      d.variant?.variant_name ?? '',
-      'PID':          d.variant?.PID ?? '',
-      'Qty Declared': d.quantity_declared ?? '',
-      'Qty Actual':   d.quantity_actual ?? '',
-      'Qty Rejected': d.quantity_rejected ?? '',
-      'QC Status':    d.qc_status ?? '',
-    }))
-    const ws = XLSX.utils.json_to_sheet(rows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Receiving')
-    XLSX.writeFile(wb, `shipment_${shipment.shipment_pid ?? sid}_details.xlsx`)
+    setExporting(true); setExportError('')
+    try {
+      await stockApi.shipments.exportInvoice(sid, `${shipment.shipment_pid ?? sid}_invoice.xlsx`)
+    } catch (e: unknown) {
+      setExportError(e instanceof Error ? e.message : 'Export failed')
+    } finally { setExporting(false) }
   }
 
   if (isLoading) return (
@@ -87,10 +83,12 @@ export default function ReceivingDetail() {
       <div className="flex items-center justify-between mb-2">
         <p className="text-[10px] font-semibold uppercase tracking-widest t-text-4">Receiving Details</p>
         <div className="flex gap-2">
-          <button onClick={handleExport}
-            className="px-2.5 py-1 text-xs border t-border rounded t-text-3 hover:t-border-strong">
-            Export XLSX
-          </button>
+          {isConfirmed && (
+            <button onClick={handleExport} disabled={exporting}
+              className="px-2.5 py-1 text-xs border t-border rounded t-text-3 hover:t-border-strong disabled:opacity-40">
+              {exporting ? 'Exporting…' : 'Export Invoice'}
+            </button>
+          )}
           {!isConfirmed && (
             <button
               onClick={() => navigate(`/stock/receiving/${sid}/confirm`)}
@@ -101,6 +99,8 @@ export default function ReceivingDetail() {
           )}
         </div>
       </div>
+
+      {exportError && <div className="text-xs text-red-400 bg-red-950 border border-red-900 rounded px-3 py-2 mb-3">{exportError}</div>}
 
       {!isConfirmed && (
         <p className="text-[10px] text-yellow-600 mb-3">
@@ -113,14 +113,17 @@ export default function ReceivingDetail() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b t-border">
-              {['Brand','Variant','PID','Qty Declared','Qty Actual','Qty Rejected','Variance','QC Status'].map(h => (
+              {[
+                'Brand','Variant','PID','Qty Declared','Qty Actual','Qty Rejected','Variance','QC Status',
+                ...(isConfirmed ? ['Gross Cost','Discount %','Net Unit Cost'] : []),
+              ].map(h => (
                 <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {details.length === 0 && (
-              <tr><td colSpan={8} className="px-2 py-6 text-center t-text-4">No details.</td></tr>
+              <tr><td colSpan={isConfirmed ? 11 : 8} className="px-2 py-6 text-center t-text-4">No details.</td></tr>
             )}
             {details.map((d: ReceivingDetail) => {
               const actual   = parseFloat(String(d.quantity_actual   ?? 0)) || 0
@@ -138,6 +141,13 @@ export default function ReceivingDetail() {
                     {variance > 0 ? `+${variance.toFixed(2)}` : variance.toFixed(2)}
                   </td>
                   <td className="px-2 py-1.5 t-text-3">{d.qc_status ?? '—'}</td>
+                  {isConfirmed && (
+                    <>
+                      <td className="px-2 py-1.5 tabular-nums t-text-2">{fmt(d.cost_layer?.gross_cost)}</td>
+                      <td className="px-2 py-1.5 tabular-nums t-text-3">{fmt(d.cost_layer?.supplier_discount)}</td>
+                      <td className="px-2 py-1.5 tabular-nums t-text-2">{fmt(d.cost_layer?.net_unit_cost)}</td>
+                    </>
+                  )}
                 </tr>
               )
             })}

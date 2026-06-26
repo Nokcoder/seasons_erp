@@ -308,6 +308,7 @@ def list_products(
     negative_stock: bool = Query(default=False),
     sort_by: Optional[str] = Query(default=None),
     sort_dir: str = Query(default="asc"),
+    ordering_only: bool = Query(default=False),
 ):
     q = (
         db.query(models.Product)
@@ -351,6 +352,18 @@ def list_products(
             .subquery()
         )
         q = q.filter(models.Product.product_id.in_(neg_product_ids_sq))
+
+    if ordering_only:
+        orderable_product_ids_sq = (
+            db.query(models.Variant.product_id)
+            .filter(
+                models.Variant.is_deleted == False,
+                models.Variant.include_in_ordering == True,
+            )
+            .distinct()
+            .subquery()
+        )
+        q = q.filter(models.Product.product_id.in_(orderable_product_ids_sq))
 
     products = q.all()
     _enrich_bundle_stock(products)
@@ -759,6 +772,7 @@ def add_variant(
         promo_price=payload.promo_price,
         is_default=payload.is_default,
         attributes=payload.attributes,
+        include_in_ordering=payload.include_in_ordering,
     )
     db.add(new_variant)
     db.flush()  # get variant_id before enforcing exclusivity

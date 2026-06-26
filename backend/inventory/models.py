@@ -132,7 +132,8 @@ class Variant(Base):
     attributes  = Column(JSONB, nullable=True)
     price       = Column(Numeric(15, 2), nullable=True)
     promo_price = Column(Numeric(15, 2), nullable=True)
-    is_deleted  = Column(Boolean, default=False)
+    is_deleted          = Column(Boolean, default=False)
+    include_in_ordering = Column(Boolean, nullable=False, default=True, server_default="TRUE")
 
     product          = relationship("Product", back_populates="variants")
     current_stock    = relationship("CurrentStock", back_populates="variant")

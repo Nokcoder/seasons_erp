@@ -1,16 +1,26 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Transfer } from '../../services/api'
+import KeywordSearch from '../../components/KeywordSearch'
 import * as XLSX from 'xlsx'
 import { normalize } from '../../lib/normalize'
 
 function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
   return new Date(s).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function transferSkus(t: Transfer): string {
+  const skus = [...new Set(
+    (t.items ?? [])
+      .map(i => i.variant?.sku)
+      .filter((s): s is string => !!s),
+  )]
+  return skus.length > 0 ? skus.join(', ') : '—'
 }
 
 export default function Transfers() {
@@ -21,26 +31,41 @@ export default function Transfers() {
     ...stale.transactional,
   })
 
-  const [search,       setSearch]       = useState('')
+  const [searchTags, setSearchTags] = useState<string[]>([])
+  const [liveInput,  setLiveInput]  = useState('')
+  const handleTagsChange    = useCallback((tags: string[]) => setSearchTags(tags), [])
+  const handlePartialChange = useCallback((v: string) => setLiveInput(v), [])
+
   const [locFilter,    setLocFilter]    = useState('')
   const [dateFrom,     setDateFrom]     = useState('')
   const [dateTo,       setDateTo]       = useState('')
   const [statusFilter, setStatusFilter] = useState('')
 
   const filtered = useMemo(() => {
+    const allTerms = [
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
+    ]
     return transfers.filter(t => {
-      if (search.trim() && !(
-        normalize(t.transfer_pid ?? '').includes(normalize(search)) ||
-        normalize(t.from_location?.location_name ?? '').includes(normalize(search)) ||
-        normalize(t.to_location?.location_name   ?? '').includes(normalize(search))
-      )) return false
+      if (allTerms.length > 0) {
+        const hit = (term: string) =>
+          normalize(t.transfer_pid ?? '').includes(term) ||
+          normalize(t.from_location?.location_name ?? '').includes(term) ||
+          normalize(t.to_location?.location_name ?? '').includes(term) ||
+          (t.items ?? []).some(i =>
+            normalize(i.variant?.PID ?? '').includes(term) ||
+            normalize(i.variant?.sku ?? '').includes(term) ||
+            normalize(i.variant?.variant_name ?? '').includes(term),
+          )
+        if (!allTerms.every(hit)) return false
+      }
       if (locFilter && t.from_location?.location_name !== locFilter && t.to_location?.location_name !== locFilter) return false
       if (statusFilter && (t.status ?? 'Posted') !== statusFilter) return false
       if (dateFrom && t.occurred_at < dateFrom) return false
       if (dateTo   && t.occurred_at.slice(0, 10) > dateTo) return false
       return true
     })
-  }, [transfers, search, locFilter, statusFilter, dateFrom, dateTo])
+  }, [transfers, searchTags, liveInput, locFilter, statusFilter, dateFrom, dateTo])
 
   const allLocs = useMemo(() => {
     const s = new Set<string>()
@@ -53,11 +78,12 @@ export default function Transfers() {
 
   function handleExport() {
     const rows = filtered.map(t => ({
-      'Transfer PID':   t.transfer_pid ?? '',
-      'From':           t.from_location?.location_name ?? '',
-      'To':             t.to_location?.location_name ?? '',
-      'Date':           fmtDate(t.occurred_at),
-      'Bundle Count':   t.total_bundle_count ?? '',
+      'Transfer PID': t.transfer_pid ?? '',
+      'SKU':          transferSkus(t),
+      'From':         t.from_location?.location_name ?? '',
+      'To':           t.to_location?.location_name ?? '',
+      'Date':         fmtDate(t.occurred_at),
+      'Bundle Count': t.total_bundle_count ?? '',
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
     const wb = XLSX.utils.book_new()
@@ -74,8 +100,13 @@ export default function Transfers() {
       {/* toolbar */}
       <div className="flex items-center gap-3 mb-4 flex-wrap">
         <h1 className="text-sm font-semibold t-text-1">Transfers</h1>
-        <input className={`${inputCls} w-48`} placeholder="Search PID, location…"
-          value={search} onChange={e => setSearch(e.target.value)} />
+        <KeywordSearch
+          className="w-64"
+          tags={searchTags}
+          onTagsChange={handleTagsChange}
+          onPartialChange={handlePartialChange}
+          placeholder="Search PID, location, SKU…"
+        />
         <select className={`${inputCls} w-36`} value={locFilter} onChange={e => setLocFilter(e.target.value)}>
           <option value="">All locations</option>
           {allLocs.map(l => <option key={l}>{l}</option>)}
@@ -104,21 +135,22 @@ export default function Transfers() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b t-border">
-              {['Transfer PID','Route','Date','Bundle Count','Status','Actions'].map(h => (
+              {['Transfer PID','SKU','Route','Date','Bundle Count','Status','Actions'].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {isLoading && <SkeletonTable rows={8} cols={5} />}
+            {isLoading && <SkeletonTable rows={8} cols={7} />}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-8 text-center t-text-4">No transfers found.</td></tr>
+              <tr><td colSpan={7} className="px-3 py-8 text-center t-text-4">No transfers found.</td></tr>
             )}
             {!isLoading && filtered.map((t: Transfer) => (
               <tr key={t.transfer_id}
                 onClick={() => navigate(`/stock/transfers/${t.transfer_id}`)}
                 className="border-b t-border hover:t-bg-surface cursor-pointer transition-colors">
                 <td className="px-3 py-2 font-mono t-text-2">{t.transfer_pid ?? `TRF-${t.transfer_id}`}</td>
+                <td className="px-3 py-2 font-mono t-text-3 whitespace-nowrap max-w-[160px] truncate">{transferSkus(t)}</td>
                 <td className="px-3 py-2 t-text-3">
                   {t.from_location?.location_name ?? '—'} <span className="t-text-4">→</span> {t.to_location?.location_name ?? '—'}
                 </td>

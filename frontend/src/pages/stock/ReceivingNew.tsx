@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar } from '../../components/Skeleton'
@@ -10,6 +10,7 @@ import {
 } from '../../services/api'
 import * as XLSX from 'xlsx'
 import { normalize } from '../../lib/normalize'
+import KeywordSearch from '../../components/KeywordSearch'
 
 // ui_standards §10 — onFocus selects all numeric input value
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -68,31 +69,39 @@ export default function ReceivingNew() {
   const [receivedByEmpId,   setReceivedByEmpId]   = useState('')
 
   // ── line items ─────────────────────────────────────────────────────────────
-  const [lines,      setLines]      = useState<LineItem[]>([])
-  const [search,     setSearch]     = useState('')
+  const [lines,        setLines]        = useState<LineItem[]>([])
+  const [searchTags,   setSearchTags]   = useState<string[]>([])
+  const [liveInput,    setLiveInput]    = useState('')
+  const handleTagsChange    = useCallback((tags: string[]) => setSearchTags(tags), [])
+  const handlePartialChange = useCallback((v: string) => setLiveInput(v), [])
   const [importErrs, setImportErrs] = useState<Record<string, string>>({})
   const [saving,     setSaving]     = useState(false)
   const [error,      setError]      = useState('')
 
   const searchResults = useMemo(() => {
-    if (!search.trim()) return []
+    const allTerms = [
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
+    ]
+    if (allTerms.length === 0) return []
     const out: { product: InvProduct; variant: InvVariant }[] = []
     for (const p of products) {
       for (const v of p.variants) {
         if (v.is_deleted) continue
         if (v.bundle_components && v.bundle_components.length > 0) continue  // bundles blocked
-        if (
-          normalize(p.brand).includes(normalize(search)) ||
-          normalize(v.variant_name).includes(normalize(search)) ||
-          normalize(v.PID).includes(normalize(search)) ||
-          normalize(v.sku ?? '').includes(normalize(search)) ||
-          v.barcodes.some(b => normalize(b.barcode).includes(normalize(search)))
-        ) out.push({ product: p, variant: v })
+        const matches = allTerms.every(term =>
+          normalize(p.brand).includes(term) ||
+          normalize(v.variant_name).includes(term) ||
+          normalize(v.PID).includes(term) ||
+          normalize(v.sku ?? '').includes(term) ||
+          v.barcodes.some(b => normalize(b.barcode).includes(term))
+        )
+        if (matches) out.push({ product: p, variant: v })
         if (out.length >= 10) return out
       }
     }
     return out
-  }, [products, search])
+  }, [products, searchTags, liveInput])
 
   function addLine(product: InvProduct, variant: InvVariant) {
     if (lines.some(l => l.variant.variant_id === variant.variant_id)) return
@@ -225,8 +234,12 @@ export default function ReceivingNew() {
       <aside className="w-72 shrink-0 border-r t-border t-bg-surface flex flex-col overflow-hidden">
         <div className="p-3 border-b t-border">
           <label className={lCls}>Search Items</label>
-          <input className={iCls} placeholder="Brand, name, PID, SKU…"
-            value={search} onChange={e => setSearch(e.target.value)} />
+          <KeywordSearch
+            tags={searchTags}
+            onTagsChange={handleTagsChange}
+            onPartialChange={handlePartialChange}
+            placeholder="Brand, PID, SKU…"
+          />
         </div>
         <div className="flex-1 overflow-y-auto">
           {searchResults.map(({ product: p, variant: v }) => {
@@ -240,8 +253,8 @@ export default function ReceivingNew() {
               </button>
             )
           })}
-          {search.trim() && searchResults.length === 0 && <p className="px-3 py-4 text-xs t-text-4">No items match.</p>}
-          {!search.trim() && <p className="px-3 py-4 text-xs t-text-4">Start typing to search.</p>}
+          {(searchTags.length > 0 || liveInput.trim()) && searchResults.length === 0 && <p className="px-3 py-4 text-xs t-text-4">No items match.</p>}
+          {searchTags.length === 0 && !liveInput.trim() && <p className="px-3 py-4 text-xs t-text-4">Start typing to search.</p>}
         </div>
       </aside>
 
@@ -290,14 +303,14 @@ export default function ReceivingNew() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b t-border">
-                  {['Brand','Variant','PID','Bundle Count','Qty Declared','Qty Actual','Qty Rejected','QC Status',''].map(h => (
+                  {['Brand','Variant','PID','SKU','Bundle Count','Qty Declared','Qty Actual','Qty Rejected','QC Status',''].map(h => (
                     <th key={h} className="text-left px-2 py-2 text-[10px] font-bold uppercase tracking-widest t-text-4 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {lines.length === 0 && (
-                  <tr><td colSpan={9} className="px-2 py-8 text-center t-text-4">Add items from the search panel.</td></tr>
+                  <tr><td colSpan={10} className="px-2 py-8 text-center t-text-4">Add items from the search panel.</td></tr>
                 )}
                 {lines.map(line => {
                   const wb = getWarehouseBundle(line.variant)
@@ -306,6 +319,7 @@ export default function ReceivingNew() {
                       <td className="px-2 py-1.5 t-text-3 whitespace-nowrap">{line.product.brand}</td>
                       <td className="px-2 py-1.5 t-text-2 whitespace-nowrap max-w-[160px] truncate">{line.variant.variant_name}</td>
                       <td className="px-2 py-1.5 font-mono t-text-4 whitespace-nowrap">{line.variant.PID}</td>
+                      <td className="px-2 py-1.5 font-mono t-text-4 whitespace-nowrap">{line.variant.sku ?? '—'}</td>
 
                       {/* Bundle Count — only if warehouse bundle conversion exists */}
                       {wb ? (

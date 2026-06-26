@@ -1,6 +1,6 @@
 # procurement/schemas.py
 from __future__ import annotations
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
 from decimal import Decimal
 from datetime import datetime, date
@@ -12,6 +12,7 @@ class SupplierRefOut(BaseModel):
     supplier_id: int
     supplier_code: str = ""
     supplier_name: str
+    terms: int = 0
     class Config: from_attributes = True
 
 class LocationRefOut(BaseModel):
@@ -49,17 +50,21 @@ class EmployeeRefOut(BaseModel):
 class POItemCreate(BaseModel):
     variant_id: int
     ordered_quantity: Decimal
-    unit_cost: Decimal          # gross cost per unit at time of ordering
+    gross_cost: Decimal               # supplier's catalog price per unit
+    discount_pct: Decimal = Decimal('0')   # negotiated discount percentage
 
 class POItemUpdate(BaseModel):
     ordered_quantity: Optional[Decimal] = None
-    unit_cost: Optional[Decimal] = None
+    gross_cost: Optional[Decimal] = None
+    discount_pct: Optional[Decimal] = None
 
 class POItemOut(BaseModel):
     po_item_id: int
     variant_id: int
     ordered_quantity: Decimal
     received_quantity: Decimal
+    gross_cost: Decimal
+    discount_pct: Decimal
     unit_cost: Decimal
     variant: Optional[VariantRefOut] = None
     class Config: from_attributes = True
@@ -77,6 +82,10 @@ class POCreate(BaseModel):
 
 class POStatusUpdate(BaseModel):
     status: str     # Draft | Open | Partially_Received | Closed | Cancelled
+
+class VariantSupplierCostOut(BaseModel):
+    gross_cost: Decimal
+    discount_pct: Decimal
 
 class POOut(BaseModel):
     po_id: int
@@ -108,6 +117,13 @@ class ReceivingDetailCreate(BaseModel):
     quantity_rejected: Decimal = Decimal('0')
     qc_status: str = "Pending"  # Pending | Passed | Failed | Partially_Passed
 
+class CostLayerRefOut(BaseModel):
+    gross_cost: Decimal
+    supplier_discount: Decimal
+    net_unit_cost: Decimal
+    class Config: from_attributes = True
+
+
 class ReceivingDetailOut(BaseModel):
     detail_id: int
     shipment_id: int
@@ -123,7 +139,14 @@ class ReceivingDetailOut(BaseModel):
     qc_status: str
     is_deleted: bool
     variant: Optional[VariantWithProductRef] = None
+    cost_layer: Optional[CostLayerRefOut] = None   # populated only for confirmed shipments
     class Config: from_attributes = True
+
+
+class PurchaseOrderRefOut(BaseModel):
+    po_id: int
+    po_pid: str | None = None
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ── INVENTORY SHIPMENTS ───────────────────────────────────────────────────────
@@ -157,7 +180,10 @@ class ShipmentOut(BaseModel):
     received_by_employee:  Optional[EmployeeRefOut] = None
     inspected_by_employee: Optional[EmployeeRefOut] = None
     receiving_details: List[ReceivingDetailOut] = []
-    class Config: from_attributes = True
+    po: Optional[PurchaseOrderRefOut] = Field(None, validation_alias='purchase_order')
+    class Config:
+        from_attributes = True
+        populate_by_name = True
 
 
 class ShipmentDiscrepancyUpdate(BaseModel):
@@ -168,13 +194,26 @@ class ShipmentDiscrepancyUpdate(BaseModel):
 
 # ── CONFIRM COSTS (Stage 2) ───────────────────────────────────────────────────
 
-class ConfirmCostLine(BaseModel):
+class ConfirmCostsItem(BaseModel):
     detail_id: int
-    unit_cost: Decimal
+    gross_cost: Decimal
+    discount_pct: Decimal = Decimal('0')
+    # net_unit_cost is always server-computed — never accepted from caller
 
 class ConfirmCostsRequest(BaseModel):
-    lines: List[ConfirmCostLine]
+    invoice_number: str
+    invoice_date: date
+    due_date: Optional[date] = None   # override; defaults to invoice_date + supplier.terms
+    items: List[ConfirmCostsItem]
     inspected_by_employee_id: Optional[int] = None
+
+class CostAutofillItem(BaseModel):
+    detail_id: int
+    variant_id: int
+    gross_cost: Optional[Decimal] = None
+    discount_pct: Optional[Decimal] = None
+    net_unit_cost: Optional[Decimal] = None
+    source: str   # 'cost_layer' | 'variant_suppliers' | 'none'
 
 class ReceiveResult(BaseModel):
     shipment_id: int

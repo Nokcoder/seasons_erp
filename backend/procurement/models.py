@@ -50,6 +50,8 @@ class PurchaseOrderItem(Base):
     variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"))
     ordered_quantity   = Column(Numeric(15, 4), nullable=False)
     received_quantity  = Column(Numeric(15, 4), default=0)
+    gross_cost         = Column(Numeric(15, 2), nullable=False)
+    discount_pct       = Column(Numeric(5, 2), nullable=False, default=0, server_default="0")
     unit_cost          = Column(Numeric(15, 2), nullable=False)
 
     purchase_order = relationship("PurchaseOrder", back_populates="items")
@@ -123,3 +125,20 @@ class ReceivingDetail(Base):
     variant   = relationship("Variant")
     location  = relationship("Location")
     po_item   = relationship("PurchaseOrderItem")
+
+    @property
+    def cost_layer(self):
+        """The cost_layer written for this line at Stage 2 confirm-costs, if any.
+        No FK exists (cost_layers only ties back to the shipment), so this is
+        resolved by variant_id + location_id + shipment_id via the live session."""
+        from sqlalchemy.orm import object_session
+        from inventory.models import CostLayer
+        session = object_session(self)
+        if session is None:
+            return None
+        return (
+            session.query(CostLayer)
+            .filter_by(shipment_id=self.shipment_id, variant_id=self.variant_id, location_id=self.location_id)
+            .order_by(CostLayer.layer_id.desc())
+            .first()
+        )

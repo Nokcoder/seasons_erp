@@ -87,7 +87,7 @@ export default function PDCVault() {
     if (!depositDate) { setDepositErr('Enter a deposit date.'); return }
     setDepositing(true); setDepositErr('')
     try {
-      await salesApi.pdc.deposit(depositTarget.payment_id, { deposit_date: depositDate })
+      await salesApi.pdc.deposit(depositTarget.payment_id, depositDate)
       await qc.invalidateQueries({ queryKey: ['pdc-vault'] })
       closeDeposit()
     } catch (e: unknown) {
@@ -110,7 +110,7 @@ export default function PDCVault() {
     if (!bounceTarget) return
     setBouncing(true); setBounceErr('')
     try {
-      await salesApi.pdc.bounce(bounceTarget.payment_id, { notes: bounceNotes.trim() || undefined })
+      await salesApi.pdc.bounce(bounceTarget.payment_id, bounceNotes.trim() || undefined)
       await qc.invalidateQueries({ queryKey: ['pdc-vault'] })
       closeBounce()
     } catch (e: unknown) {

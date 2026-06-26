@@ -120,6 +120,7 @@ Table variants {
   price decimal(15,2)
   promo_price decimal(15,2)
   is_deleted boolean
+  include_in_ordering boolean [not null, default: true, note: 'When false, variant is excluded from PO creation and ordering forms. Does not affect sales, receiving, or transfers.']
 }
 
 Table variant_barcodes {

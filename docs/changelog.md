@@ -1,5 +1,168 @@
 # Changelog
 
+## 2026-06-27 — Fix: PO Reference column always blank in Receiving list
+
+### Root cause
+`ShipmentOut` exposed `po_id: int` but no nested PO object, and `list_shipments` did not eagerly load the `purchase_order` relationship. The frontend `Shipment` type already had `po?: { po_id; po_pid }` but it was always `undefined` in practice.
+
+### `backend/procurement/schemas.py`
+- New `PurchaseOrderRefOut` schema: `po_id`, `po_pid` (uses `ConfigDict(from_attributes=True)`).
+- `ShipmentOut`: added `po: Optional[PurchaseOrderRefOut] = Field(None, validation_alias='purchase_order')`. `validation_alias` maps the `purchase_order` ORM relationship to the `po` JSON key without affecting serialization of other fields. Added `populate_by_name = True` to `ShipmentOut.Config`.
+
+### `backend/procurement/router.py`
+- `list_shipments`: added `selectinload(proc_models.InventoryShipment.purchase_order)` to the options block.
+
+### `frontend/src/pages/stock/Receiving.tsx`
+- PO Reference column already read `s.po?.po_pid ?? '—'`; now populated correctly once the backend returns the nested object.
+
+---
+
+## 2026-06-27 — Enhancement: KeywordSearch + SKU column on Transfers and Receiving
+
+### `frontend/src/pages/stock/Transfers.tsx`
+- Replaced the plain `<input>` search box with the `<KeywordSearch>` component (multi-tag AND logic, same as Catalogue).
+- Search fields expanded: `transfer_pid`, `from_location.location_name`, `to_location.location_name`, and item-level `variant.PID`, `variant.sku`, `variant.variant_name`.
+- Added **SKU** column after Transfer PID: comma-separated list of unique SKUs across all items on that transfer row; shows `—` when none are set.
+- Export XLSX updated to include the SKU column.
+- All existing filters kept: Location dropdown, Status dropdown, Date From, Date To.
+
+### `frontend/src/pages/stock/Receiving.tsx`
+- Replaced the plain `<input>` search box with `<KeywordSearch>` (multi-tag AND logic).
+- Search fields expanded: `shipment_pid`, `supplier.supplier_name`, `reference_number`, `po?.po_pid`, and detail-level `variant.PID`, `variant.sku`, `variant.variant_name`.
+- Added **SKU** column after Shipment PID: comma-separated unique SKUs from `receiving_details[].variant.sku`; shows `—` when none are set.
+- Export XLSX updated to include the SKU column.
+- Supplier dropdown filter kept.
+
+---
+
+## 2026-06-27 — Fix: CSS contrast — --tx-3 and --tx-4 tokens (all three themes)
+
+`--tx-3` was failing WCAG AA in all three themes (as low as 2.2:1) despite being used for labels, table headers, and form descriptions. `--tx-4` was near-invisible (as low as 1.2:1).
+
+### `frontend/src/index.css`
+
+| Theme | Token | Before | After | Approx ratio on bg-surface |
+|---|---|---|---|---|
+| Dark | `--tx-3` | `#4b5563` (gray-600) | `#6b7280` (gray-500) | ~4.6:1 ✓ |
+| Dark | `--tx-4` | `#374151` (gray-700) | `#4b5563` (gray-600) | dim but visible |
+| Light | `--tx-3` | `#9ca3af` (gray-400) | `#6b7280` (gray-500) | ~4.6:1 ✓ |
+| Light | `--tx-4` | `#d1d5db` (gray-300) | `#9ca3af` (gray-400) | subtle but visible |
+| Carbon | `--tx-3` | `#52525b` (zinc-600) | `#71717a` (zinc-500) | ~4.5:1 ✓ |
+| Carbon | `--tx-4` | `#3f3f46` (zinc-700) | `#52525b` (zinc-600) | dim but visible |
+
+No component files were changed; all 316 uses of `t-text-3` and 229 uses of `t-text-4` inherit the fix automatically.
+
+---
+
+## 2026-06-27 — Feature: include_in_ordering toggle on variant detail page
+
+### `frontend/src/services/api.ts`
+- `InvVariant` interface: added `include_in_ordering: boolean`.
+
+### `frontend/src/pages/inventory/Detail.tsx`
+- Added `include_in_ordering` checkbox in the Variant Fields section, after the `is_default` field.
+- Hidden for bundle variants (`isBundleType`). Edit permission guard matches `is_default` (roles: ADMIN, STORE_MANAGER, WAREHOUSE_MANAGER).
+- Uses the `vEdit` batch-edit pattern — saved via the existing "Save Changes" bar calling `PUT /products/variants/{id}`.
+
+---
+
+## 2026-06-26 — Feature: include_in_ordering flag on inventory.variants
+
+Controls whether a variant appears in ordering workflows (PO creation, ordering forms). Independent of `product.status` and `is_deleted` — a variant can be Active and non-deleted but still excluded from ordering (e.g. bundles, phased-out items). No existing behaviour changed.
+
+### `backend/alembic/versions/m3h4i5j6k7l8_add_include_in_ordering_to_variants.py` (new)
+- Migration (`down_revision = l2g3h4i5j6k7`): `ALTER TABLE inventory.variants ADD COLUMN IF NOT EXISTS include_in_ordering BOOLEAN NOT NULL DEFAULT TRUE`. All 1,005 existing variants default to `TRUE` — no ordering exclusions on day one.
+
+### `backend/inventory/models.py`
+- `Variant`: added `include_in_ordering = Column(Boolean, nullable=False, default=True, server_default="TRUE")`.
+
+### `backend/inventory/schemas.py`
+- `VariantCreate`: added `include_in_ordering: bool = True`.
+- `VariantUpdate`: added `include_in_ordering: Optional[bool] = None`.
+- `VariantOut`: added `include_in_ordering: bool`.
+
+### `backend/inventory/router.py`
+- `add_variant`: passes `payload.include_in_ordering` to the `Variant` constructor (the handler builds the model explicitly by field, so the new field required an explicit entry).
+- `list_products` (`GET /products/`): new optional query param `ordering_only: bool = False`. When `True`, restricts results to products that have at least one non-deleted, orderable variant via a subquery on `inventory.variants`. Default `False` leaves the catalogue listing completely unaffected.
+
+### `docs/schema.dbml`
+- `variants` table: added `include_in_ordering boolean [not null, default: true, note: '...']`.
+
+---
+
+## 2026-06-26 — Bug fix: confirm-costs and all AP invoice queries failing with UndefinedColumn
+
+### Root cause
+`ap/models.py` `SupplierInvoice` had four columns — `vetting_status`, `paid_before_received`, `check_drafted`, `check_drafted_note` — added to the SQLAlchemy model in the 2026-06-14 AP frontend session but never backed by a database migration. Because `vetting_status` carries a Python-side `default`, SQLAlchemy included it in every INSERT, making confirm-costs fail at the `db.flush()` step. The same missing columns caused every SELECT on `ap.supplier_invoices` (invoice list, aging report, 3-way match) to fail with `psycopg2.errors.UndefinedColumn`.
+
+### `backend/alembic/versions/l2g3h4i5j6k7_add_vetting_columns_to_supplier_invoices.py` (new)
+- New migration (`down_revision = k1f2g3h4i5j6`): creates the `ap.invoice_vetting_status` enum type (`Pending_Review`, `Approved`, `Rejected`) idempotently, then adds all four missing columns to `ap.supplier_invoices` with safe defaults for existing rows (`vetting_status DEFAULT 'Pending_Review'`, `paid_before_received DEFAULT FALSE`, `check_drafted DEFAULT FALSE`, `check_drafted_note` nullable). Downgrade drops all four columns and the enum type.
+
+---
+
+## 2026-06-25 — Feature: Confirm Costs revamp (backend + frontend)
+
+### `backend/procurement/schemas.py`
+- Replaced `ConfirmCostLine`/old `ConfirmCostsRequest` (single `unit_cost` per line) with `ConfirmCostsItem` (`gross_cost` + `discount_pct` per line) and a new `ConfirmCostsRequest` carrying `invoice_number`, `invoice_date`, an optional `due_date` override, and `items`.
+- New `CostAutofillItem` response schema for the cost auto-fill endpoint.
+- New `CostLayerRefOut` nested schema; `ReceivingDetailOut` now exposes an optional `cost_layer` (gross cost, discount, net unit cost) once a shipment is confirmed.
+- `SupplierRefOut` now exposes `terms`, needed by the frontend to compute the invoice due date.
+
+### `backend/procurement/models.py`
+- `ReceivingDetail`: added a `cost_layer` property that resolves the matching `cost_layers` row (by shipment + variant + location) via the live session — there's no FK, since `cost_layers` only ties back to the shipment.
+
+### `backend/procurement/router.py`
+- New `GET /procurement/shipment-cost-autofill?shipment_id=` — pre-fills `gross_cost`/`discount_pct` per receiving-detail line from the most recent matching `cost_layers` row (variant + shipment's supplier), falling back to `variant_suppliers`, else nulls.
+- Rewrote `POST /procurement/shipments/{id}/confirm-costs`: validates `gross_cost > 0` and `0 ≤ discount_pct ≤ 100` per line (400 on violation); computes `net_unit_cost` server-side; writes `cost_layers.supplier_discount` (previously hardcoded to 0); upserts `variant_suppliers` (gross_cost + supplier_discount, creating the record if missing — previously only updated `gross_cost` and only if a record already existed); records the caller-supplied `invoice_number`/`invoice_date`; `due_date` defaults to `invoice_date + supplier.terms` (per requirements.md §10.1) but can be overridden by the caller; invoice total now sums `quantity_actual × net_unit_cost` (previously preferred `quantity_declared`).
+- New `GET /procurement/shipments/{id}/export` — 404 if the shipment isn't confirmed; streams a two-sheet XLSX (Invoice Summary, Line Items) via `xlsxwriter`, filename `{shipment_pid}_invoice.xlsx`.
+
+### `frontend/src/services/api.ts`
+- New types `ConfirmCostsItem`, `ConfirmCostsPayload`, `CostAutofillItem`; `ReceivingDetail.cost_layer` and `Shipment.supplier.terms` added.
+- `stockApi.shipments.confirmCosts` now takes the new payload shape; added `costAutofill` and `exportInvoice` (downloads the blob client-side, reading the filename from `Content-Disposition`).
+
+### `frontend/src/pages/stock/ReceivingConfirm.tsx`
+- Rebuilt: added Invoice Number/Invoice Date inputs, an editable Due Date (auto-computed from invoice date + supplier terms, overridable), and a Destination Location header field.
+- Line items grid now has Gross Cost + Discount % (auto-filled from the new autofill endpoint, with a source badge: "Prior shipment" / "Supplier record" / "No prior data"), with client-computed Net Unit Cost and Line Total, plus a Grand Total footer.
+- "Confirm & Record Invoice" button disabled until invoice number/date are filled and every line has Gross Cost > 0. Kept the existing "Inspected By" field (not part of the revamp spec, but additive).
+
+### `frontend/src/pages/stock/ReceivingDetail.tsx`
+- Replaced the old always-visible client-side "Export XLSX" (raw receiving-detail rows) with a confirmed-only "Export Invoice" button calling the new backend export endpoint.
+- Line items table now shows Gross Cost / Discount % / Net Unit Cost columns once the shipment is confirmed.
+
+## 2026-06-24 — Feature: Purchase Orders module (backend + frontend)
+
+### Database / `backend/alembic/versions/k1f2g3h4i5j6_add_discount_to_po_items.py`
+- New migration adding `gross_cost NUMERIC(15,2) NOT NULL` and `discount_pct NUMERIC(5,2) NOT NULL DEFAULT 0` to `procurement.purchase_order_items`. Existing rows backfilled with `gross_cost = unit_cost`, `discount_pct = 0` (preserves existing `unit_cost` values exactly).
+
+### `backend/procurement/models.py`
+- `PurchaseOrderItem`: added `gross_cost`, `discount_pct` columns. `unit_cost` remains but is now always a server-computed value.
+
+### `backend/procurement/schemas.py`
+- `POItemCreate`/`POItemUpdate`: now accept `gross_cost`, `discount_pct`; `unit_cost` removed from input (server-computed only).
+- `POItemOut`: exposes `gross_cost`, `discount_pct`, `unit_cost`.
+- New `VariantSupplierCostOut` schema for the cost auto-fill endpoint.
+
+### `backend/procurement/router.py`
+- `_compute_po_unit_cost(gross_cost, discount_pct)` helper — `unit_cost = gross_cost × (1 − discount_pct / 100)`.
+- `create_purchase_order` and `update_po_item`: compute and store `unit_cost` server-side instead of accepting it from the caller.
+- New `GET /procurement/variant-supplier-cost?variant_id=&supplier_id=` — returns the primary `variant_suppliers` gross cost/discount for a variant+supplier pair, or 404. Used by the Create PO modal to auto-populate line item costs.
+- `receive_shipment` (Stage 1): now updates `purchase_order_items.received_quantity` for every receiving detail linked to a `po_item_id` (`quantity_actual − quantity_rejected`), then calls the previously-unused `_recalculate_po_status` helper to auto-advance the PO to `Partially_Received` or `Closed` when applicable (Requirements §8, backlog "PO lifecycle enforcement" follow-up).
+
+### `frontend/src/services/api.ts`
+- New `purchaseOrderApi`: `list`, `get`, `create`, `updateItem`, `updateStatus`, `variantSupplierCost`.
+- New types: `POItemCreate`, `POItemUpdate`, `POItemOut`, `POCreate`, `POStatusUpdate`, `POOut`, `VariantSupplierCostOut`, plus `POVariantRef`/`POSupplierRef`/`POLocationRef`.
+
+### `frontend/src/pages/procurement/PurchaseOrders.tsx`
+- Replaced stub with full list page: keyword search (PO #, supplier) + status filter, status badges, React Query + skeleton loading, "New PO" button.
+- `CreatePOModal`: supplier/location/expected-arrival fields, variant search (top 5, bundles excluded), auto-populates gross cost/discount from `variant-supplier-cost` when a supplier is already selected, client-computed net cost and grand total, validation before "Save as Draft".
+
+### `frontend/src/pages/procurement/PurchaseOrderDetail.tsx` (new)
+- Header (PO #, status badge, supplier, destination, dates), status action bar (Draft → Confirm Order/Cancel; Open/Partially_Received → Cancel only; Closed/Cancelled → none), editable line items (gross cost, discount %, qty) when Draft/Open with on-blur save, read-only received-qty progress, grand total footer, back navigation.
+- Note: `POOut` has no `created_by` field (matches the agreed API contract), so the "Created by" row from the original spec is omitted on this page.
+
+### `frontend/src/pages/Procurement.tsx`
+- Lazy-loaded `PurchaseOrderDetail`, added route `purchase-orders/:po_id`.
+
 ## 2026-06-16 — Feature: PDC vault tracking and maturity report (frontend)
 
 ### `frontend/src/services/api.ts`

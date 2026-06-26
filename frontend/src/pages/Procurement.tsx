@@ -1,8 +1,9 @@
 import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate, NavLink } from 'react-router-dom'
 
-const Suppliers      = lazy(() => import('./procurement/Suppliers'))
-const PurchaseOrders = lazy(() => import('./procurement/PurchaseOrders'))
+const Suppliers           = lazy(() => import('./procurement/Suppliers'))
+const PurchaseOrders      = lazy(() => import('./procurement/PurchaseOrders'))
+const PurchaseOrderDetail = lazy(() => import('./procurement/PurchaseOrderDetail'))
 
 const TAB_CLS = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-1.5 text-xs font-medium rounded transition-colors ${isActive ? 't-bg-elevated t-text-1' : 't-text-4 hover:t-text-2'}`
@@ -20,6 +21,7 @@ export default function Procurement() {
             <Route index element={<Navigate to="suppliers" replace />} />
             <Route path="suppliers"       element={<Suppliers />} />
             <Route path="purchase-orders" element={<PurchaseOrders />} />
+            <Route path="purchase-orders/:po_id" element={<PurchaseOrderDetail />} />
             <Route path="*"              element={<Navigate to="suppliers" replace />} />
           </Routes>
         </Suspense>

@@ -5,7 +5,11 @@ from decimal import Decimal
 from datetime import datetime, timezone, date, timedelta
 from uuid import uuid4
 
+import io
+
+import xlsxwriter
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -61,6 +65,10 @@ def _load_shipment(shipment_id: int, db: Session) -> proc_models.InventoryShipme
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
     return shipment
+
+
+def _compute_po_unit_cost(gross_cost: Decimal, discount_pct: Decimal) -> Decimal:
+    return gross_cost * (Decimal('1') - discount_pct / Decimal('100'))
 
 
 def _upsert_stock(db: Session, variant_id: int, location_id: int, delta: Decimal):
@@ -150,6 +158,27 @@ def _recalculate_po_status(
 # PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@router.get("/variant-supplier-cost", response_model=schemas.VariantSupplierCostOut)
+def get_variant_supplier_cost(
+    variant_id: int,
+    supplier_id: int,
+    db: Session = Depends(get_db),
+):
+    """Returns the primary variant_suppliers cost record for a variant/supplier pair,
+    used to auto-populate gross_cost and discount_pct when adding a line item to a PO."""
+    vs = (
+        db.query(inv_models.VariantSupplier)
+        .filter_by(variant_id=variant_id, supplier_id=supplier_id, is_primary=True)
+        .first()
+    )
+    if not vs:
+        raise HTTPException(status_code=404, detail="No primary supplier cost record found")
+    return schemas.VariantSupplierCostOut(
+        gross_cost=vs.gross_cost or Decimal('0'),
+        discount_pct=vs.supplier_discount or Decimal('0'),
+    )
+
+
 @router.get("/orders", response_model=List[schemas.POOut])
 def list_purchase_orders(db: Session = Depends(get_db)):
     return (
@@ -198,13 +227,16 @@ def create_purchase_order(
 
     grand_total = Decimal('0')
     for item in payload.items:
-        grand_total += item.unit_cost * item.ordered_quantity
+        unit_cost = _compute_po_unit_cost(item.gross_cost, item.discount_pct)
+        grand_total += unit_cost * item.ordered_quantity
         db.add(proc_models.PurchaseOrderItem(
             po_id=po.po_id,
             variant_id=item.variant_id,
             ordered_quantity=item.ordered_quantity,
             received_quantity=Decimal('0'),
-            unit_cost=item.unit_cost,
+            gross_cost=item.gross_cost,
+            discount_pct=item.discount_pct,
+            unit_cost=unit_cost,
         ))
 
     po.total_amount = grand_total
@@ -258,6 +290,9 @@ def update_po_item(
     for key, value in updates.items():
         setattr(item, key, value)
 
+    # unit_cost is always server-computed, never accepted from the caller
+    item.unit_cost = _compute_po_unit_cost(item.gross_cost, item.discount_pct)
+
     # recalculate PO total
     all_items = (
         db.query(proc_models.PurchaseOrderItem)
@@ -306,6 +341,7 @@ def list_shipments(db: Session = Depends(get_db)):
         db.query(proc_models.InventoryShipment)
         .options(
             selectinload(proc_models.InventoryShipment.supplier),
+            selectinload(proc_models.InventoryShipment.purchase_order),
             selectinload(proc_models.InventoryShipment.received_by_employee),
             selectinload(proc_models.InventoryShipment.inspected_by_employee),
             selectinload(proc_models.InventoryShipment.receiving_details)
@@ -501,8 +537,97 @@ def receive_shipment(
         ledger_count += 1
         _upsert_stock(db, detail.variant_id, detail.location_id, qty)
 
+        if detail.po_item_id:
+            po_item = (
+                db.query(proc_models.PurchaseOrderItem)
+                .filter_by(po_item_id=detail.po_item_id)
+                .first()
+            )
+            if po_item:
+                net_received = qty - (detail.quantity_rejected or Decimal("0"))
+                po_item.received_quantity = (po_item.received_quantity or Decimal("0")) + net_received
+
+    if shipment.po_id:
+        po = (
+            db.query(proc_models.PurchaseOrder)
+            .filter_by(po_id=shipment.po_id)
+            .first()
+        )
+        if po:
+            new_status = _recalculate_po_status(db, po)
+            if new_status:
+                po.status = new_status
+
     db.commit()
     return schemas.ReceiveResult(shipment_id=shipment_id, ledger_entries_written=ledger_count)
+
+
+# ── Stage 2 autofill — pre-fills gross_cost / discount_pct per line ───────────
+
+@router.get("/shipment-cost-autofill", response_model=List[schemas.CostAutofillItem])
+def shipment_cost_autofill(shipment_id: int, db: Session = Depends(get_db)):
+    """For each receiving_detail on the shipment, resolve a starting gross_cost +
+    discount_pct so the Confirm Costs page can pre-fill the line items.
+
+    Priority:
+      1. Most recent cost_layer for this variant + the shipment's supplier
+         (joined via inventory_shipments.supplier_id), newest created_at first.
+      2. The matching variant_suppliers record (variant_id, supplier_id).
+      3. Nulls — caller must enter costs manually.
+    """
+    shipment = _load_shipment(shipment_id, db)
+    results: list[schemas.CostAutofillItem] = []
+
+    for detail in shipment.receiving_details:
+        if detail.is_deleted:
+            continue
+
+        layer = (
+            db.query(inv_models.CostLayer)
+            .join(
+                proc_models.InventoryShipment,
+                inv_models.CostLayer.shipment_id == proc_models.InventoryShipment.shipment_id,
+            )
+            .filter(
+                inv_models.CostLayer.variant_id == detail.variant_id,
+                proc_models.InventoryShipment.supplier_id == shipment.supplier_id,
+            )
+            .order_by(inv_models.CostLayer.created_at.desc())
+            .first()
+        )
+
+        if layer is not None:
+            gross_cost    = layer.gross_cost
+            discount_pct  = layer.supplier_discount or Decimal('0')
+            source        = "cost_layer"
+        else:
+            vs = (
+                db.query(inv_models.VariantSupplier)
+                .filter_by(variant_id=detail.variant_id, supplier_id=shipment.supplier_id)
+                .first()
+            )
+            if vs is not None and vs.gross_cost is not None:
+                gross_cost   = vs.gross_cost
+                discount_pct = vs.supplier_discount or Decimal('0')
+                source       = "variant_suppliers"
+            else:
+                gross_cost = discount_pct = None
+                source     = "none"
+
+        net_unit_cost = None
+        if gross_cost is not None:
+            net_unit_cost = gross_cost * (Decimal('1') - discount_pct / Decimal('100'))
+
+        results.append(schemas.CostAutofillItem(
+            detail_id=detail.detail_id,
+            variant_id=detail.variant_id,
+            gross_cost=gross_cost,
+            discount_pct=discount_pct,
+            net_unit_cost=net_unit_cost,
+            source=source,
+        ))
+
+    return results
 
 
 # ── Stage 2: confirm-costs — creates cost layers and supplier invoice ──────────
@@ -513,20 +638,34 @@ def confirm_costs(
     payload: schemas.ConfirmCostsRequest,
     db: Session = Depends(get_db),
 ):
-    """Stage 2 cost confirmation: create FIFO cost layers at the provided unit costs,
-    update variant_suppliers.gross_cost, create supplier invoice and AP ledger entry,
-    mark shipment as is_confirmed=True."""
+    """Stage 2 cost confirmation: create FIFO cost layers at the provided gross
+    cost + discount per line, update variant_suppliers (gross_cost + discount),
+    record the supplier invoice (invoice_number/invoice_date/due_date) and AP
+    ledger entry, mark shipment as is_confirmed=True."""
     shipment = _load_shipment(shipment_id, db)
 
     if shipment.is_confirmed:
         raise HTTPException(status_code=400, detail="Shipment is already confirmed")
 
+    for item in payload.items:
+        if item.gross_cost <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gross cost must be greater than 0 for detail {item.detail_id}",
+            )
+        if not (Decimal('0') <= item.discount_pct <= Decimal('100')):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Discount % must be between 0 and 100 for detail {item.detail_id}",
+            )
+
     detail_map = {d.detail_id: d for d in shipment.receiving_details if not d.is_deleted}
-    cost_by_detail = {line.detail_id: line.unit_cost for line in payload.lines}
+    items_by_detail = {item.detail_id: item for item in payload.items}
+    net_unit_cost_by_detail: dict[int, Decimal] = {}
 
     invoice_total = Decimal("0")
 
-    for detail_id, unit_cost in cost_by_detail.items():
+    for detail_id, item in items_by_detail.items():
         detail = detail_map.get(detail_id)
         if not detail:
             continue
@@ -543,28 +682,39 @@ def confirm_costs(
         if not variant_obj or variant_obj.product.product_type in ("Non-Inventory", "Service"):
             continue
 
-        net_unit_cost = unit_cost
+        net_unit_cost = item.gross_cost * (Decimal('1') - item.discount_pct / Decimal('100'))
+        net_unit_cost_by_detail[detail_id] = net_unit_cost
+
         db.add(inv_models.CostLayer(
             variant_id=detail.variant_id,
             location_id=detail.location_id,
             shipment_id=shipment_id,
             original_quantity=qty,
             quantity_remaining=qty,
-            gross_cost=unit_cost,
-            supplier_discount=Decimal("0"),
+            gross_cost=item.gross_cost,
+            supplier_discount=item.discount_pct,
             net_unit_cost=net_unit_cost,
         ))
 
-        # Update variant_suppliers.gross_cost for this supplier
+        # Update variant_suppliers (gross_cost + supplier_discount) for this supplier,
+        # creating the record if it doesn't exist yet.
         vs = (
             db.query(inv_models.VariantSupplier)
             .filter_by(variant_id=detail.variant_id, supplier_id=shipment.supplier_id)
             .first()
         )
         if vs:
-            vs.gross_cost = unit_cost
+            vs.gross_cost = item.gross_cost
+            vs.supplier_discount = item.discount_pct
+        else:
+            db.add(inv_models.VariantSupplier(
+                variant_id=detail.variant_id,
+                supplier_id=shipment.supplier_id,
+                gross_cost=item.gross_cost,
+                supplier_discount=item.discount_pct,
+            ))
 
-        invoice_total += (detail.quantity_declared or qty) * net_unit_cost
+        invoice_total += qty * net_unit_cost
 
     # Update inspected_by if provided
     if payload.inspected_by_employee_id is not None:
@@ -597,8 +747,8 @@ def confirm_costs(
 
                 # Prefer the accountant-supplied cost from the payload; fall back
                 # to _resolve_cost when this PO item's variant had no detail costed.
-                if detail and detail.detail_id in cost_by_detail:
-                    unit_cost = cost_by_detail[detail.detail_id]
+                if detail and detail.detail_id in net_unit_cost_by_detail:
+                    unit_cost = net_unit_cost_by_detail[detail.detail_id]
                 else:
                     _, _, unit_cost = _resolve_cost(db, po_item.variant_id, po_item)
 
@@ -624,13 +774,15 @@ def confirm_costs(
 
     # ── Create supplier invoice + AP ledger entry ─────────────────────────────
     supplier = db.query(inv_models.Supplier).filter_by(supplier_id=shipment.supplier_id).first()
-    today = date.today()
-    due_date = today + timedelta(days=supplier.terms if supplier and supplier.terms else 0)
+    due_date = payload.due_date or (
+        payload.invoice_date + timedelta(days=supplier.terms if supplier and supplier.terms else 0)
+    )
 
     invoice = ap_models.SupplierInvoice(
         supplier_id=shipment.supplier_id,
         shipment_id=shipment_id,
-        invoice_date=today,
+        invoice_number=payload.invoice_number,
+        invoice_date=payload.invoice_date,
         due_date=due_date,
         total_amount=invoice_total,
         status="Unpaid",
@@ -653,6 +805,93 @@ def confirm_costs(
 
     db.commit()
     return _load_shipment(shipment_id, db)
+
+
+# ── Export confirmed shipment as an invoice XLSX ───────────────────────────────
+
+@router.get("/shipments/{shipment_id}/export")
+def export_shipment_invoice(shipment_id: int, db: Session = Depends(get_db)):
+    """Export a confirmed shipment as a two-sheet invoice workbook
+    (Invoice Summary, Line Items). 404 if the shipment isn't confirmed yet."""
+    shipment = _load_shipment(shipment_id, db)
+    if not shipment.is_confirmed:
+        raise HTTPException(status_code=404, detail="Shipment is not confirmed")
+
+    invoice = (
+        db.query(ap_models.SupplierInvoice)
+        .filter_by(shipment_id=shipment_id)
+        .order_by(ap_models.SupplierInvoice.invoice_id.desc())
+        .first()
+    )
+
+    layers = (
+        db.query(inv_models.CostLayer)
+        .options(
+            selectinload(inv_models.CostLayer.variant)
+                .selectinload(inv_models.Variant.product),
+        )
+        .filter_by(shipment_id=shipment_id)
+        .all()
+    )
+    layers.sort(key=lambda l: (l.variant.PID if l.variant else ""))
+
+    output = io.BytesIO()
+    wb = xlsxwriter.Workbook(output, {"in_memory": True})
+    hdr = wb.add_format({"bold": True, "bg_color": "#1f2937", "font_color": "#f3f4f6",
+                          "border": 1, "border_color": "#374151"})
+    money = wb.add_format({"num_format": "#,##0.00"})
+    pct = wb.add_format({"num_format": "0.00"})
+
+    # Sheet 1 — Invoice Summary
+    ws1 = wb.add_worksheet("Invoice Summary")
+    summary_rows = [
+        ("Shipment PID",   shipment.shipment_pid or ""),
+        ("Supplier",       shipment.supplier.supplier_name if shipment.supplier else ""),
+        ("Invoice Number", invoice.invoice_number if invoice else ""),
+        ("Invoice Date",   invoice.invoice_date.isoformat() if invoice and invoice.invoice_date else ""),
+        ("Date Received",  shipment.received_at.isoformat() if shipment.received_at else ""),
+        ("Due Date",       invoice.due_date.isoformat() if invoice and invoice.due_date else ""),
+        ("Total Amount",   float(invoice.total_amount) if invoice and invoice.total_amount is not None else 0),
+    ]
+    for i, (label, _) in enumerate(summary_rows):
+        ws1.write(0, i, label, hdr)
+    for i, (_, value) in enumerate(summary_rows):
+        if isinstance(value, float):
+            ws1.write_number(1, i, value, money)
+        else:
+            ws1.write(1, i, value)
+    for i, (label, _) in enumerate(summary_rows):
+        ws1.set_column(i, i, max(len(label) + 4, 16))
+
+    # Sheet 2 — Line Items
+    ws2 = wb.add_worksheet("Line Items")
+    headers = ["PID", "Variant Name", "Brand", "Qty Received", "Gross Cost",
+               "Discount %", "Net Unit Cost", "Line Total"]
+    for i, h in enumerate(headers):
+        ws2.write(0, i, h, hdr)
+        ws2.set_column(i, i, max(len(h) + 4, 14))
+
+    for row, layer in enumerate(layers, start=1):
+        variant = layer.variant
+        qty = layer.original_quantity or Decimal('0')
+        line_total = qty * (layer.net_unit_cost or Decimal('0'))
+        ws2.write(row, 0, variant.PID if variant else "")
+        ws2.write(row, 1, variant.variant_name if variant else "")
+        ws2.write(row, 2, (variant.product.brand if variant and variant.product else "") or "")
+        ws2.write_number(row, 3, float(qty), money)
+        ws2.write_number(row, 4, float(layer.gross_cost or 0), money)
+        ws2.write_number(row, 5, float(layer.supplier_discount or 0), pct)
+        ws2.write_number(row, 6, float(layer.net_unit_cost or 0), money)
+        ws2.write_number(row, 7, float(line_total), money)
+
+    wb.close()
+    output.seek(0)
+    filename = f"{shipment.shipment_pid or shipment_id}_invoice.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

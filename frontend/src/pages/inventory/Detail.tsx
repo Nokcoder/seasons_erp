@@ -690,6 +690,31 @@ export default function Detail() {
               : <input className={iCls} value={variant.is_default ? 'Yes' : 'No'} readOnly />
             }
           </div>
+          {!isBundleType && (
+            <div>
+              <label className={lCls}>Include in Ordering</label>
+              {canEdit ? (
+                <label
+                  className="flex items-center gap-2 mt-1 cursor-pointer"
+                  title="Uncheck to exclude this variant from purchase order forms. Use for bundles and phased-out items you still carry on hand."
+                >
+                  <input
+                    type="checkbox"
+                    checked={variant.include_in_ordering}
+                    onChange={e => vEdit('include_in_ordering', e.target.checked as never)}
+                  />
+                  <span className="text-xs text-gray-400">
+                    {variant.include_in_ordering ? 'Yes' : 'No'}
+                  </span>
+                </label>
+              ) : (
+                <input className={iCls} value={variant.include_in_ordering ? 'Yes' : 'No'} readOnly />
+              )}
+              <p className="text-[10px] text-gray-600 mt-0.5">
+                Uncheck to exclude from purchase order forms. Use for phased-out items you still carry on hand.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* ── PRICING ── */}

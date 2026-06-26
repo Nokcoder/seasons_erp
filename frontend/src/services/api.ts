@@ -807,6 +807,7 @@ export interface InvVariant {
   promo_price: number | null
   is_default: boolean
   is_deleted: boolean
+  include_in_ordering: boolean
   attributes: Record<string, unknown> | null
   current_stock: StockEntry[]
   suppliers: InvVariantSupplier[]
@@ -1150,7 +1151,7 @@ export interface Shipment {
   inspected_by_employee_id: number | null
   received_by_employee?:  { employee_id: number; first_name: string; last_name: string } | null
   inspected_by_employee?: { employee_id: number; first_name: string; last_name: string } | null
-  supplier?: { supplier_id: number; supplier_name: string }
+  supplier?: { supplier_id: number; supplier_name: string; terms?: number }
   po?: { po_id: number; po_pid: string }
   receiving_details?: ReceivingDetail[]
 }
@@ -1170,6 +1171,30 @@ export interface ReceivingDetail {
   qc_status: string | null
   variant?: { variant_id: number; PID: string; variant_name: string; sku: string | null
               product?: { brand: string } }
+  cost_layer?: { gross_cost: number; supplier_discount: number; net_unit_cost: number } | null
+}
+
+export interface ConfirmCostsItem {
+  detail_id: number
+  gross_cost: number
+  discount_pct: number
+}
+
+export interface ConfirmCostsPayload {
+  invoice_number: string
+  invoice_date: string   // ISO date string
+  due_date?: string | null   // override; defaults server-side to invoice_date + supplier.terms
+  items: ConfirmCostsItem[]
+  inspected_by_employee_id?: number | null
+}
+
+export interface CostAutofillItem {
+  detail_id: number
+  variant_id: number
+  gross_cost: number | null
+  discount_pct: number | null
+  net_unit_cost: number | null
+  source: 'cost_layer' | 'variant_suppliers' | 'none'
 }
 
 export interface LedgerEntry {
@@ -1185,6 +1210,82 @@ export interface LedgerEntry {
   variant?: { variant_id: number; PID: string; variant_name: string
               product?: { brand: string } }
   location?: { location_id: number; location_name: string }
+}
+
+// ── PURCHASE ORDER TYPES ───────────────────────────────────────────────────────
+
+export interface POVariantRef { variant_id: number; PID: string; variant_name: string }
+export interface POSupplierRef { supplier_id: number; supplier_code: string; supplier_name: string }
+export interface POLocationRef { location_id: number; location_name: string }
+
+export interface POItemCreate {
+  variant_id: number
+  ordered_quantity: number
+  gross_cost: number
+  discount_pct?: number
+}
+
+export interface POItemUpdate {
+  ordered_quantity?: number
+  gross_cost?: number
+  discount_pct?: number
+}
+
+export interface POItemOut {
+  po_item_id: number
+  variant_id: number
+  ordered_quantity: number
+  received_quantity: number
+  gross_cost: number
+  discount_pct: number
+  unit_cost: number
+  variant?: POVariantRef
+}
+
+export interface POCreate {
+  po_pid?: string
+  supplier_id: number
+  location_id?: number | null
+  expected_arrival_date?: string | null
+  items: POItemCreate[]
+}
+
+export interface POStatusUpdate {
+  status: string
+}
+
+export interface POOut {
+  po_id: number
+  po_pid: string
+  supplier_id: number
+  location_id: number | null
+  status: string
+  total_amount: number
+  order_date: string
+  expected_arrival_date: string | null
+  created_at: string
+  supplier?: POSupplierRef
+  location?: POLocationRef
+  items: POItemOut[]
+}
+
+export interface VariantSupplierCostOut {
+  gross_cost: number
+  discount_pct: number
+}
+
+// ── PURCHASE ORDER API ────────────────────────────────────────────────────────
+
+export const purchaseOrderApi = {
+  list:   ()                  => get<POOut[]>('/procurement/orders'),
+  get:    (po_id: number)     => get<POOut>(`/procurement/orders/${po_id}`),
+  create: (p: POCreate)       => post<POOut>('/procurement/orders', p),
+  updateItem: (po_id: number, po_item_id: number, p: POItemUpdate) =>
+    request<POOut>('PUT', `/procurement/orders/${po_id}/items/${po_item_id}`, p),
+  updateStatus: (po_id: number, p: POStatusUpdate) =>
+    patch<POOut>(`/procurement/orders/${po_id}/status`, p),
+  variantSupplierCost: (variant_id: number, supplier_id: number) =>
+    get<VariantSupplierCostOut>(`/procurement/variant-supplier-cost?variant_id=${variant_id}&supplier_id=${supplier_id}`),
 }
 
 // ── STOCK MOVEMENT API ────────────────────────────────────────────────────────
@@ -1211,16 +1312,31 @@ export const stockApi = {
       post<{ shipment_id: number; ledger_entries_written: number }>(
         `/procurement/shipments/${id}/receive`, {}
       ),
-    // Stage 2: create cost layers with user-supplied unit costs
-    confirmCosts: (id: number, lines: { detail_id: number; unit_cost: number }[], inspected_by_employee_id?: number | null) =>
-      post<Shipment>(`/procurement/shipments/${id}/confirm-costs`, {
-        lines,
-        inspected_by_employee_id: inspected_by_employee_id ?? null,
-      }),
+    // Stage 2: pre-fill gross_cost/discount_pct per line from prior cost layers or variant_suppliers
+    costAutofill: (id: number) =>
+      get<CostAutofillItem[]>(`/procurement/shipment-cost-autofill?shipment_id=${id}`),
+    // Stage 2: create cost layers from gross_cost + discount_pct, record the invoice
+    confirmCosts: (id: number, payload: ConfirmCostsPayload) =>
+      post<Shipment>(`/procurement/shipments/${id}/confirm-costs`, payload),
     // Legacy combined confirm — kept for backward compat
     confirm: (id: number) => post<Record<string, unknown>>(`/procurement/shipments/${id}/confirm`, {}),
     updateDiscrepancy: (id: number, p: { discrepancy_status: string; discrepancy_notes?: string | null }) =>
       patch<Shipment>(`/procurement/shipments/${id}/discrepancy`, p),
+    // Confirmed shipments only — downloads the two-sheet invoice workbook
+    exportInvoice: async (id: number, filenameFallback?: string): Promise<void> => {
+      const resp = await fetch(`${BASE_URL}/procurement/shipments/${id}/export`, { headers: authHeader() })
+      if (!resp.ok) throw new Error('Export failed')
+      const blob = await resp.blob()
+      const cd = resp.headers.get('Content-Disposition') || ''
+      const match = cd.match(/filename="?([^"]+)"?/)
+      const filename = match?.[1] || filenameFallback || `shipment_${id}_invoice.xlsx`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    },
   },
   ledger: {
     list: (params?: {

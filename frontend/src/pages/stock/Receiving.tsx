@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Shipment } from '../../services/api'
+import KeywordSearch from '../../components/KeywordSearch'
 import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
 
@@ -19,6 +20,15 @@ function shipmentStatus(s: Shipment): string {
   return 'Pending'
 }
 
+function shipmentSkus(s: Shipment): string {
+  const skus = [...new Set(
+    (s.receiving_details ?? [])
+      .map(d => d.variant?.sku)
+      .filter((v): v is string => !!v),
+  )]
+  return skus.length > 0 ? skus.join(', ') : '—'
+}
+
 export default function Receiving() {
   const navigate = useNavigate()
   const { data: shipments = [], isLoading, isFetching } = useQuery({
@@ -27,7 +37,11 @@ export default function Receiving() {
     ...stale.transactional,
   })
 
-  const [search,    setSearch]    = useState('')
+  const [searchTags, setSearchTags] = useState<string[]>([])
+  const [liveInput,  setLiveInput]  = useState('')
+  const handleTagsChange    = useCallback((tags: string[]) => setSearchTags(tags), [])
+  const handlePartialChange = useCallback((v: string) => setLiveInput(v), [])
+
   const [supFilter, setSupFilter] = useState('')
 
   const allSuppliers = useMemo(() => {
@@ -37,20 +51,33 @@ export default function Receiving() {
   }, [shipments])
 
   const filtered = useMemo(() => {
+    const allTerms = [
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
+    ]
     return shipments.filter(s => {
-      if (search.trim() && !(
-        normalize(s.shipment_pid ?? '').includes(normalize(search)) ||
-        normalize(s.supplier?.supplier_name ?? '').includes(normalize(search)) ||
-        normalize(s.reference_number ?? '').includes(normalize(search))
-      )) return false
+      if (allTerms.length > 0) {
+        const hit = (term: string) =>
+          normalize(s.shipment_pid ?? '').includes(term) ||
+          normalize(s.supplier?.supplier_name ?? '').includes(term) ||
+          normalize(s.reference_number ?? '').includes(term) ||
+          normalize(s.po?.po_pid ?? '').includes(term) ||
+          (s.receiving_details ?? []).some(d =>
+            normalize(d.variant?.PID ?? '').includes(term) ||
+            normalize(d.variant?.sku ?? '').includes(term) ||
+            normalize(d.variant?.variant_name ?? '').includes(term),
+          )
+        if (!allTerms.every(hit)) return false
+      }
       if (supFilter && s.supplier?.supplier_name !== supFilter) return false
       return true
     })
-  }, [shipments, search, supFilter])
+  }, [shipments, searchTags, liveInput, supFilter])
 
   function handleExport() {
     const rows = filtered.map(s => ({
       'Shipment PID':  s.shipment_pid ?? '',
+      'SKU':           shipmentSkus(s),
       'Supplier':      s.supplier?.supplier_name ?? '',
       'Document ID':   s.reference_number ?? '',
       'Date Received': fmtDate(s.received_at),
@@ -71,8 +98,13 @@ export default function Receiving() {
 
       <div className="flex items-center gap-3 mb-4 flex-wrap">
         <h1 className="text-sm font-semibold t-text-1">Receiving</h1>
-        <input className={`${inputCls} w-48`} placeholder="Search PID, supplier…"
-          value={search} onChange={e => setSearch(e.target.value)} />
+        <KeywordSearch
+          className="w-64"
+          tags={searchTags}
+          onTagsChange={handleTagsChange}
+          onPartialChange={handlePartialChange}
+          placeholder="Search PID, supplier, SKU…"
+        />
         <select className={`${inputCls} w-40`} value={supFilter} onChange={e => setSupFilter(e.target.value)}>
           <option value="">All suppliers</option>
           {allSuppliers.map(s => <option key={s}>{s}</option>)}
@@ -93,15 +125,15 @@ export default function Receiving() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b t-border">
-              {['Shipment PID','Supplier','Document ID','Date Received','PO Reference','Status','Actions'].map(h => (
+              {['Shipment PID','SKU','Supplier','Document ID','Date Received','PO Reference','Status','Actions'].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {isLoading && <SkeletonTable rows={8} cols={7} />}
+            {isLoading && <SkeletonTable rows={8} cols={8} />}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={7} className="px-3 py-8 text-center t-text-4">No shipments found.</td></tr>
+              <tr><td colSpan={8} className="px-3 py-8 text-center t-text-4">No shipments found.</td></tr>
             )}
             {!isLoading && filtered.map((s: Shipment) => {
               const status = shipmentStatus(s)
@@ -110,6 +142,7 @@ export default function Receiving() {
                   onClick={() => navigate(`/stock/receiving/${s.shipment_id}`)}
                   className="border-b t-border hover:t-bg-surface cursor-pointer transition-colors">
                   <td className="px-3 py-2 font-mono t-text-2">{s.shipment_pid ?? `SHP-${s.shipment_id}`}</td>
+                  <td className="px-3 py-2 font-mono t-text-3 whitespace-nowrap max-w-[160px] truncate">{shipmentSkus(s)}</td>
                   <td className="px-3 py-2 t-text-3">{s.supplier?.supplier_name ?? '—'}</td>
                   <td className="px-3 py-2 t-text-4">{s.reference_number ?? '—'}</td>
                   <td className="px-3 py-2 t-text-4">{fmtDate(s.received_at)}</td>

@@ -259,6 +259,7 @@ class VariantCreate(BaseModel):
     promo_price: Optional[Decimal] = None
     is_default: bool = False
     attributes: Optional[Dict[str, Any]] = None
+    include_in_ordering: bool = True
 
 class VariantUpdate(BaseModel):
     variant_name: Optional[str] = None
@@ -267,6 +268,7 @@ class VariantUpdate(BaseModel):
     promo_price: Optional[Decimal] = None
     is_default: Optional[bool] = None
     attributes: Optional[Dict[str, Any]] = None
+    include_in_ordering: Optional[bool] = None
 
 class BundleAvailableStock(BaseModel):
     """Computed available bundle count at one physical location."""
@@ -285,6 +287,7 @@ class VariantOut(BaseModel):
     promo_price: Optional[Decimal] = None
     is_default: bool
     is_deleted: bool
+    include_in_ordering: bool
     attributes: Optional[Dict[str, Any]] = None
     current_stock: List[CurrentStockOut] = []
     suppliers: List[VariantSupplierOut] = []
