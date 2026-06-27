@@ -281,7 +281,7 @@ def list_roles(
 def create_role(
     payload: schemas.RoleCreate,
     db: Session = Depends(get_db),
-    _actor: models.User = Depends(require_permission("manage_users")),
+    _actor: models.User = Depends(require_permission("manage_roles")),
 ):
     name = payload.role_name.strip().upper()
     if db.query(models.Role).filter(models.Role.role_name == name).first():
@@ -300,7 +300,7 @@ def update_role(
     role_id: int,
     payload: schemas.RolePatch,
     db: Session = Depends(get_db),
-    _actor: models.User = Depends(require_permission("manage_users")),
+    _actor: models.User = Depends(require_permission("manage_roles")),
 ):
     role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
     if not role:
@@ -319,7 +319,7 @@ def update_role(
 def delete_role(
     role_id: int,
     db: Session = Depends(get_db),
-    _actor: models.User = Depends(require_permission("manage_users")),
+    _actor: models.User = Depends(require_permission("manage_roles")),
 ):
     role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
     if not role:
@@ -400,3 +400,193 @@ def update_employee(
                 actor_user_id=_actor.user_id, old_values=old, new_values=_serialize(emp))
     db.commit()
     return emp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RBAC — PROGRAMS & ACTIONS CATALOGUE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/programs", response_model=List[schemas.ModuleGroup])
+def list_programs(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(get_current_user),
+):
+    """Return all programs grouped by module, each with their actions.
+
+    Any authenticated user may call this endpoint. The frontend uses the
+    full catalogue to render the permission matrix in Settings → Roles and
+    to resolve which nav items to show for the logged-in user's roles.
+    """
+    programs = (
+        db.query(models.Program)
+        .options(joinedload(models.Program.actions))
+        .order_by(models.Program.module, models.Program.sort_order)
+        .all()
+    )
+
+    # Group by module preserving sort_order within each module
+    module_map: dict[str, list[models.Program]] = {}
+    for p in programs:
+        module_map.setdefault(p.module, []).append(p)
+
+    # Stable module ordering: use the first program's position as proxy
+    MODULE_ORDER = ["Sales", "Inventory", "Stock", "Procurement", "AP", "Customers", "Settings"]
+    ordered_modules = sorted(
+        module_map.keys(),
+        key=lambda m: MODULE_ORDER.index(m) if m in MODULE_ORDER else 99,
+    )
+
+    return [
+        schemas.ModuleGroup(
+            module=mod,
+            programs=[
+                schemas.ProgramOut(
+                    program_id=p.program_id,
+                    program_key=p.program_key,
+                    display_name=p.display_name,
+                    sort_order=p.sort_order,
+                    actions=[
+                        schemas.ActionOut(
+                            action_id=a.action_id,
+                            action_key=a.action_key,
+                            display_name=a.display_name,
+                        )
+                        for a in sorted(p.actions, key=lambda a: a.action_id)
+                    ],
+                )
+                for p in sorted(module_map[mod], key=lambda p: p.sort_order)
+            ],
+        )
+        for mod in ordered_modules
+    ]
+
+
+@router.get("/actions", response_model=List[schemas.ActionWithProgramOut])
+def list_actions(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(get_current_user),
+):
+    """Return a flat list of all actions with their program_key.
+
+    Any authenticated user may call this endpoint.
+    """
+    rows = (
+        db.query(models.Action, models.Program.program_key)
+        .join(models.Program, models.Program.program_id == models.Action.program_id)
+        .order_by(models.Program.module, models.Program.sort_order, models.Action.action_id)
+        .all()
+    )
+    return [
+        schemas.ActionWithProgramOut(
+            action_id=a.action_id,
+            action_key=a.action_key,
+            display_name=a.display_name,
+            program_key=pk,
+        )
+        for a, pk in rows
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RBAC — ROLE PERMISSION MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_role(role_id: int, db: Session) -> models.Role:
+    role = (
+        db.query(models.Role)
+        .options(
+            joinedload(models.Role.programs),
+            joinedload(models.Role.actions),
+        )
+        .filter(models.Role.role_id == role_id)
+        .first()
+    )
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return role
+
+
+@router.get("/roles/{role_id}/permissions", response_model=schemas.RolePermissionsOut)
+def get_role_permissions(
+    role_id: int,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_roles")),
+):
+    """Return the full set of program and action keys assigned to this role."""
+    role = _load_role(role_id, db)
+    return schemas.RolePermissionsOut(
+        program_keys=[p.program_key for p in role.programs],
+        action_keys=[a.action_key for a in role.actions],
+    )
+
+
+@router.put("/roles/{role_id}/permissions", response_model=schemas.RolePermissionsOut)
+def set_role_permissions(
+    role_id: int,
+    payload: schemas.RolePermissionsIn,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_roles")),
+):
+    """Replace the complete program and action set for a role atomically.
+
+    Validation: every supplied action_key must belong to a program whose
+    program_key is also in the supplied program_keys list. Actions whose
+    program is not in program_keys are rejected with HTTP 422.
+    """
+    role = _load_role(role_id, db)
+
+    # Resolve supplied program_keys → Program rows
+    programs = (
+        db.query(models.Program)
+        .filter(models.Program.program_key.in_(payload.program_keys))
+        .all()
+    ) if payload.program_keys else []
+
+    found_program_keys = {p.program_key for p in programs}
+    missing_progs = set(payload.program_keys) - found_program_keys
+    if missing_progs:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown program_keys: {sorted(missing_progs)}",
+        )
+
+    # Resolve supplied action_keys → Action rows (with their program)
+    actions = (
+        db.query(models.Action)
+        .options(joinedload(models.Action.program))
+        .filter(models.Action.action_key.in_(payload.action_keys))
+        .all()
+    ) if payload.action_keys else []
+
+    found_action_keys = {a.action_key for a in actions}
+    missing_acts = set(payload.action_keys) - found_action_keys
+    if missing_acts:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown action_keys: {sorted(missing_acts)}",
+        )
+
+    # Validate: every action's program must be in the supplied program set
+    orphaned = [
+        a.action_key for a in actions
+        if a.program.program_key not in found_program_keys
+    ]
+    if orphaned:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Actions {sorted(orphaned)} belong to programs not included in "
+                f"program_keys. Add the parent program or remove the action."
+            ),
+        )
+
+    # Replace assignments atomically
+    role.programs = programs
+    role.actions  = actions
+    db.commit()
+    db.refresh(role)
+
+    return schemas.RolePermissionsOut(
+        program_keys=[p.program_key for p in role.programs],
+        action_keys=[a.action_key for a in role.actions],
+    )

@@ -80,6 +80,32 @@ export interface UserCreate {
   role_names?: string[]
 }
 
+// ── RBAC types ────────────────────────────────────────────────────────────────
+
+export interface ActionEntry {
+  action_id:    number
+  action_key:   string
+  display_name: string
+}
+
+export interface ProgramEntry {
+  program_id:   number
+  program_key:  string
+  display_name: string
+  sort_order:   number
+  actions:      ActionEntry[]
+}
+
+export interface ModuleGroup {
+  module:   string
+  programs: ProgramEntry[]
+}
+
+export interface RolePermissions {
+  program_keys: string[]
+  action_keys:  string[]
+}
+
 export const authApi = {
   login: (username: string, password: string) =>
     request<LoginResponse>('POST', '/auth/login', { username, password }, false),
@@ -105,6 +131,12 @@ export const authApi = {
     create: (role_name: string)             => post<RoleEntry>('/auth/roles', { role_name }),
     patch:  (id: number, role_name: string) => patch<RoleEntry>(`/auth/roles/${id}`, { role_name }),
     delete: (id: number)                    => del<void>(`/auth/roles/${id}`),
+    getPermissions:  (id: number)                    => get<RolePermissions>(`/auth/roles/${id}/permissions`),
+    setPermissions:  (id: number, payload: RolePermissions) =>
+      request<RolePermissions>('PUT', `/auth/roles/${id}/permissions`, payload),
+  },
+  programs: {
+    list: () => get<ModuleGroup[]>('/auth/programs'),
   },
 }
 

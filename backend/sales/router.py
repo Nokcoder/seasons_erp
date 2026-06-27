@@ -15,7 +15,7 @@ from sqlalchemy.sql import func
 
 from core.audit import write_audit, _serialize
 from core.database import get_db
-from auth.dependencies import get_current_user, require_permission, ROLE_PERMISSIONS
+from auth.dependencies import get_current_user, require_permission, has_action
 from auth.models import User as AuthUser
 from sales import models, schemas
 from inventory import models as inv_models
@@ -777,7 +777,7 @@ def record_customer_payment(
     customer_id: int,
     payload: schemas.RecordPaymentIn,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_payments")),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
     """Record a standalone customer payment — reduces outstanding_balance via AR ledger."""
     customer = _load_customer(customer_id, db)
@@ -2403,7 +2403,7 @@ def _apply_and_update(
 def create_payment(
     payload: schemas.CustomerPaymentCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_payments")),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
     """Record a customer payment and apply it to one or more sales.
 
@@ -2527,11 +2527,11 @@ def apply_unapplied_payment(
     payment_id: int,
     payload: schemas.ManualPaymentApplyIn,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_payments")),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
     """Manually apply unapplied credit from a payment to a sale.
 
-    Requires manage_payments permission — not available to floor cashier roles.
+    Requires manage_customers permission — not available to floor cashier roles.
     """
     payment = _load_payment(payment_id, db)
 
@@ -2589,12 +2589,6 @@ def apply_unapplied_payment(
 # SALES RETURNS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _has_permission(user: AuthUser, perm: str) -> bool:
-    """Check whether a user holds a specific permission via any of their roles."""
-    user_perms: set[str] = set()
-    for role in user.roles:
-        user_perms.update(ROLE_PERMISSIONS.get(role.role_name, []))
-    return perm in user_perms
 
 
 def _load_return(return_id: int, db: Session) -> models.SalesReturn:
@@ -2644,7 +2638,7 @@ def _do_return(
     resolved_return_date = payload.return_date if payload.return_date is not None else _ph_today()
 
     if is_blind:
-        if not _has_permission(current_user, "process_blind_returns"):
+        if not has_action(current_user, "process_blind_returns", db):
             raise HTTPException(status_code=403, detail="Missing permission: process_blind_returns")
         if payload.location_id is None:
             raise HTTPException(status_code=400, detail="location_id is required for blind returns")

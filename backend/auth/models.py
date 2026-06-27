@@ -8,6 +8,54 @@ from core.database import Base
 
 
 # ==========================================
+# RBAC — PROGRAMS & ACTIONS
+# ==========================================
+
+role_programs_table = Table(
+    "role_programs",
+    Base.metadata,
+    Column("role_id",    Integer, ForeignKey("auth.roles.role_id",    ondelete="CASCADE"), primary_key=True),
+    Column("program_id", Integer, ForeignKey("auth.programs.program_id", ondelete="CASCADE"), primary_key=True),
+    schema="auth",
+)
+
+role_actions_table = Table(
+    "role_actions",
+    Base.metadata,
+    Column("role_id",   Integer, ForeignKey("auth.roles.role_id",   ondelete="CASCADE"), primary_key=True),
+    Column("action_id", Integer, ForeignKey("auth.actions.action_id", ondelete="CASCADE"), primary_key=True),
+    schema="auth",
+)
+
+
+class Program(Base):
+    __tablename__ = "programs"
+    __table_args__ = {"schema": "auth"}
+
+    program_id   = Column(Integer, primary_key=True)
+    program_key  = Column(String, unique=True, nullable=False)
+    display_name = Column(String, nullable=False)
+    module       = Column(String, nullable=False)
+    sort_order   = Column(Integer, nullable=False, default=0)
+
+    actions = relationship("Action", back_populates="program", order_by="Action.action_id")
+    roles   = relationship("Role", secondary="auth.role_programs", back_populates="programs")
+
+
+class Action(Base):
+    __tablename__ = "actions"
+    __table_args__ = {"schema": "auth"}
+
+    action_id    = Column(Integer, primary_key=True)
+    action_key   = Column(String, unique=True, nullable=False)
+    display_name = Column(String, nullable=False)
+    program_id   = Column(Integer, ForeignKey("auth.programs.program_id"), nullable=False)
+
+    program = relationship("Program", back_populates="actions")
+    roles   = relationship("Role", secondary="auth.role_actions", back_populates="actions")
+
+
+# ==========================================
 # 1. EMPLOYEES
 # ==========================================
 class Employee(Base):
@@ -56,7 +104,9 @@ class Role(Base):
     role_id   = Column(Integer, primary_key=True)
     role_name = Column(String, unique=True, nullable=False)
 
-    users = relationship("User", secondary="auth.user_roles", back_populates="roles")
+    users    = relationship("User",    secondary="auth.user_roles",    back_populates="roles")
+    programs = relationship("Program", secondary="auth.role_programs", back_populates="roles")
+    actions  = relationship("Action",  secondary="auth.role_actions",  back_populates="roles")
 
 
 user_roles_table = Table(

@@ -104,3 +104,52 @@ class UserRolesUpdate(BaseModel):
 
 class UserPasswordChange(BaseModel):
     new_password: str
+
+
+# ==========================================
+# RBAC — PROGRAMS & ACTIONS
+# ==========================================
+
+class ActionOut(BaseModel):
+    action_id:    int
+    action_key:   str
+    display_name: str
+
+    class Config:
+        from_attributes = True
+
+
+class ActionWithProgramOut(BaseModel):
+    action_id:    int
+    action_key:   str
+    display_name: str
+    program_key:  str
+
+    class Config:
+        from_attributes = True
+
+
+class ProgramOut(BaseModel):
+    program_id:   int
+    program_key:  str
+    display_name: str
+    sort_order:   int
+    actions:      List[ActionOut]
+
+    class Config:
+        from_attributes = True
+
+
+class ModuleGroup(BaseModel):
+    module:   str
+    programs: List[ProgramOut]
+
+
+class RolePermissionsOut(BaseModel):
+    program_keys: List[str]
+    action_keys:  List[str]
+
+
+class RolePermissionsIn(BaseModel):
+    program_keys: List[str]
+    action_keys:  List[str]

@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-27 — Feature: DB-driven RBAC (Programs & Actions)
+
+Replaced the hardcoded `ROLE_PERMISSIONS` dict with a fully database-driven permission system per `/docs/rbac_programs_actions.md`.
+
+### Migration: `n4o5p6q7r8s9_rbac_programs_actions`
+- Creates `auth.programs`, `auth.actions`, `auth.role_programs`, `auth.role_actions`.
+
+### `backend/auth/models.py`
+- Added `Program`, `Action`, `role_programs_table`, `role_actions_table` ORM models.
+- Updated `Role` with `programs` and `actions` relationships.
+
+### `backend/auth/dependencies.py`
+- Deleted `ROLE_PERMISSIONS` dict.
+- Rewrote `require_permission(action_key)`: queries `role_actions JOIN actions` via DB; caches result set on the SQLAlchemy session for the lifetime of the request.
+- Added `require_program(program_key)`: same pattern for program-level gating.
+- Added `has_action(user, action_key, db) -> bool`: non-raising check for inline use inside business logic.
+
+### `backend/main.py`
+- Added `_seed_rbac()`: idempotently seeds all 19 programs, 54 actions, 6 default roles, and their default program/action assignments. All inserts use `ON CONFLICT DO NOTHING`.
+
+### Router audit
+- `ap/router.py`: `manage_ap_ledger` → `manage_invoices` (no matching action in new spec).
+- `auth/router.py`: role CRUD endpoints `manage_users` → `manage_roles`.
+- `sales/router.py`: removed `ROLE_PERMISSIONS` import and `_has_permission` helper; replaced inline blind-return check with `has_action()`; `manage_payments` (customer payments) → `manage_customers`.
+
+### `backend/auth/schemas.py`
+- Added: `ActionOut`, `ActionWithProgramOut`, `ProgramOut`, `ModuleGroup`, `RolePermissionsOut`, `RolePermissionsIn`.
+
+### `backend/auth/router.py`
+- `GET /auth/programs`: returns all programs grouped by module with their actions. Any authenticated user.
+- `GET /auth/actions`: flat list of all actions with their program_key. Any authenticated user.
+- `GET /auth/roles/{role_id}/permissions`: returns `{ program_keys, action_keys }`. Requires `manage_roles`.
+- `PUT /auth/roles/{role_id}/permissions`: replaces program/action set atomically. Validates orphaned actions. Requires `manage_roles`.
+
+### Frontend
+- `api.ts`: added `ModuleGroup`, `ProgramEntry`, `ActionEntry`, `RolePermissions` types; extended `authApi.roles` with `getPermissions` / `setPermissions`; added `authApi.programs.list`.
+- `queryKeys.ts`: added `qk.programs()` and `qk.rolePermissions(id)`.
+- `Settings.tsx`: added `PermissionMatrix` sub-component to the Roles tab. Program checkboxes expand to action sub-checkboxes. Unchecking a program auto-unchecks its actions. Checking an action auto-checks its parent program. Save calls `PUT /auth/roles/{id}/permissions`.
+
+---
+
 ## 2026-06-27 — Fix: PO Reference column always blank in Receiving list
 
 ### Root cause

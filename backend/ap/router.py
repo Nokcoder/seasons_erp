@@ -782,7 +782,7 @@ def get_supplier_aging(
 def create_manual_ledger_entry(
     payload: schemas.ManualApLedgerCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_ap_ledger")),
+    _actor: AuthUser = Depends(require_permission("manage_invoices")),
 ):
     """Write a manual CREDIT_MEMO or ADJUSTMENT entry to the AP ledger.
 

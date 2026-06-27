@@ -74,8 +74,10 @@ export const qk = {
   pdcVault:             (filters?: Record<string, unknown>) => ['pdc-vault', filters] as const,
 
   // ── auth / settings ───────────────────────────────────────────────────
-  users:           () => ['users'] as const,
-  usersActive:     () => ['users', 'active'] as const,
-  inventoryPolicy: () => ['inventoryPolicy'] as const,
-  storeName:       () => ['storeName']       as const,
+  users:            () => ['users'] as const,
+  usersActive:      () => ['users', 'active'] as const,
+  inventoryPolicy:  () => ['inventoryPolicy'] as const,
+  storeName:        () => ['storeName']       as const,
+  programs:         () => ['programs']        as const,
+  rolePermissions:  (id: number) => ['roles', id, 'permissions'] as const,
 } as const

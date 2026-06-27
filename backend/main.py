@@ -179,6 +179,253 @@ def _seed_admin_user():
 _seed_admin_user()
 
 
+def _seed_rbac():
+    """Idempotently seed programs, actions, and default role-permission assignments.
+
+    All inserts use ON CONFLICT DO NOTHING so this is safe to run on every startup.
+    Role rows are created if absent (covers environments where the default roles
+    were never manually created).
+    """
+    from core.database import SessionLocal
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        # ── Programs ─────────────────────────────────────────────────────────────
+        PROGRAMS = [
+            # (program_key, display_name, module, sort_order)
+            ("sales_workstation",          "POS Workstation",    "Sales",       1),
+            ("sales_ledger",               "Sales Ledger",       "Sales",       2),
+            ("sales_returns",              "Returns",            "Sales",       3),
+            ("inventory_catalogue",        "Product Catalogue",  "Inventory",   1),
+            ("stock_transfers",            "Stock Transfers",    "Stock",       1),
+            ("stock_receiving",            "Receiving",          "Stock",       2),
+            ("stock_ledger",               "Stock Ledger",       "Stock",       3),
+            ("procurement_suppliers",      "Suppliers",          "Procurement", 1),
+            ("procurement_purchase_orders","Purchase Orders",    "Procurement", 2),
+            ("ap_invoices",                "AP Invoices",        "AP",          1),
+            ("ap_payments",                "AP Payments",        "AP",          2),
+            ("ap_ledger",                  "AP Ledger",          "AP",          3),
+            ("ap_aging",                   "Supplier Aging",     "AP",          4),
+            ("customers_list",             "Customer List",      "Customers",   1),
+            ("customers_aging",            "Customer Aging",     "Customers",   2),
+            ("customers_ar_ledger",        "AR Ledger",          "Customers",   3),
+            ("customers_credit_memo",      "Credit Memos",       "Customers",   4),
+            ("customers_pdc_vault",        "PDC Vault",          "Customers",   5),
+            ("settings",                   "Settings",           "Settings",    1),
+        ]
+        for pk, dn, mod, so in PROGRAMS:
+            db.execute(text("""
+                INSERT INTO auth.programs (program_key, display_name, module, sort_order)
+                VALUES (:pk, :dn, :mod, :so)
+                ON CONFLICT (program_key) DO NOTHING
+            """), {"pk": pk, "dn": dn, "mod": mod, "so": so})
+
+        db.flush()
+
+        # ── Actions ──────────────────────────────────────────────────────────────
+        ACTIONS = [
+            # (action_key, display_name, program_key)
+            # Sales
+            ("process_sale",           "Process Sale",             "sales_workstation"),
+            ("process_returns",        "Process Returns",          "sales_workstation"),
+            ("process_blind_returns",  "Process Blind Returns",    "sales_workstation"),
+            ("apply_discount",         "Apply Discount",           "sales_workstation"),
+            ("view_sales_ledger",      "View Sales Ledger",        "sales_ledger"),
+            ("export_sales",           "Export Sales",             "sales_ledger"),
+            ("view_returns",           "View Returns",             "sales_returns"),
+            ("export_returns",         "Export Returns",           "sales_returns"),
+            # Inventory
+            ("view_inventory",         "View Inventory",           "inventory_catalogue"),
+            ("manage_products",        "Manage Products",          "inventory_catalogue"),
+            ("export_products",        "Export Products",          "inventory_catalogue"),
+            ("import_products",        "Import Products",          "inventory_catalogue"),
+            # Stock
+            ("view_transfers",         "View Transfers",           "stock_transfers"),
+            ("create_transfer",        "Create Transfer",          "stock_transfers"),
+            ("edit_transfer_header",   "Edit Transfer Header",     "stock_transfers"),
+            ("receive_transfer",       "Receive Transfer",         "stock_transfers"),
+            ("view_receiving",         "View Receiving",           "stock_receiving"),
+            ("create_shipment",        "Create Shipment",          "stock_receiving"),
+            ("confirm_shipment",       "Confirm Shipment",         "stock_receiving"),
+            ("view_stock_ledger",      "View Stock Ledger",        "stock_ledger"),
+            ("export_stock_ledger",    "Export Stock Ledger",      "stock_ledger"),
+            # Procurement
+            ("view_suppliers",         "View Suppliers",           "procurement_suppliers"),
+            ("manage_suppliers",       "Manage Suppliers",         "procurement_suppliers"),
+            ("view_purchase_orders",   "View Purchase Orders",     "procurement_purchase_orders"),
+            ("manage_purchase_orders", "Manage Purchase Orders",   "procurement_purchase_orders"),
+            # AP
+            ("view_invoices",          "View Invoices",            "ap_invoices"),
+            ("manage_invoices",        "Manage Invoices",          "ap_invoices"),
+            ("view_ap_payments",       "View AP Payments",         "ap_payments"),
+            ("manage_payments",        "Manage AP Payments",       "ap_payments"),
+            ("view_ap_ledger",         "View AP Ledger",           "ap_ledger"),
+            ("export_ap_ledger",       "Export AP Ledger",         "ap_ledger"),
+            ("view_ap_aging",          "View Supplier Aging",      "ap_aging"),
+            ("export_ap_aging",        "Export Supplier Aging",    "ap_aging"),
+            # Customers
+            ("view_customers",         "View Customers",           "customers_list"),
+            ("manage_customers",       "Manage Customers",         "customers_list"),
+            ("view_customer_aging",    "View Customer Aging",      "customers_aging"),
+            ("export_customer_aging",  "Export Customer Aging",    "customers_aging"),
+            ("view_ar_ledger",         "View AR Ledger",           "customers_ar_ledger"),
+            ("export_ar_ledger",       "Export AR Ledger",         "customers_ar_ledger"),
+            ("view_credit_memos",      "View Credit Memos",        "customers_credit_memo"),
+            ("issue_credit_memo",      "Issue Credit Memo",        "customers_credit_memo"),
+            ("cancel_credit_memo",     "Cancel Credit Memo",       "customers_credit_memo"),
+            ("view_pdc_vault",         "View PDC Vault",           "customers_pdc_vault"),
+            ("manage_pdc",             "Manage PDC",               "customers_pdc_vault"),
+            # Settings
+            ("manage_locations",       "Manage Locations",         "settings"),
+            ("manage_shifts",          "Manage Shifts",            "settings"),
+            ("manage_registers",       "Manage Registers",         "settings"),
+            ("manage_payment_modes",   "Manage Payment Modes",     "settings"),
+            ("manage_uoms",            "Manage UOMs",              "settings"),
+            ("manage_categories",      "Manage Categories",        "settings"),
+            ("manage_users",           "Manage Users & Employees", "settings"),
+            ("manage_roles",           "Manage Roles & Permissions","settings"),
+            ("manage_inventory_policy","Inventory Policy",         "settings"),
+            ("manage_import",          "Manage Import",            "settings"),
+            ("manage_appearance",      "Manage Appearance",        "settings"),
+            ("manage_sales_settings",  "Manage Sales Settings",    "settings"),
+        ]
+        for ak, dn, pk in ACTIONS:
+            db.execute(text("""
+                INSERT INTO auth.actions (action_key, display_name, program_id)
+                SELECT :ak, :dn, p.program_id
+                FROM auth.programs p
+                WHERE p.program_key = :pk
+                ON CONFLICT (action_key) DO NOTHING
+            """), {"ak": ak, "dn": dn, "pk": pk})
+
+        db.flush()
+
+        # ── Default roles (create if absent) ─────────────────────────────────────
+        DEFAULT_ROLES = [
+            "ADMIN", "WAREHOUSE_MANAGER", "WAREHOUSE_STAFF",
+            "ACCOUNTANT", "STORE_MANAGER", "CASHIER",
+        ]
+        for rn in DEFAULT_ROLES:
+            db.execute(text("""
+                INSERT INTO auth.roles (role_name)
+                VALUES (:rn)
+                ON CONFLICT (role_name) DO NOTHING
+            """), {"rn": rn})
+
+        db.flush()
+
+        # ── Helper: grant programs/actions by role_name ───────────────────────────
+        def _grant_programs(role_name: str, program_keys: list[str]):
+            for pk in program_keys:
+                db.execute(text("""
+                    INSERT INTO auth.role_programs (role_id, program_id)
+                    SELECT r.role_id, p.program_id
+                    FROM auth.roles r, auth.programs p
+                    WHERE r.role_name = :rn AND p.program_key = :pk
+                    ON CONFLICT DO NOTHING
+                """), {"rn": role_name, "pk": pk})
+
+        def _grant_actions(role_name: str, action_keys: list[str]):
+            for ak in action_keys:
+                db.execute(text("""
+                    INSERT INTO auth.role_actions (role_id, action_id)
+                    SELECT r.role_id, a.action_id
+                    FROM auth.roles r, auth.actions a
+                    WHERE r.role_name = :rn AND a.action_key = :ak
+                    ON CONFLICT DO NOTHING
+                """), {"rn": role_name, "ak": ak})
+
+        # ── ADMIN: all programs, all actions ──────────────────────────────────────
+        db.execute(text("""
+            INSERT INTO auth.role_programs (role_id, program_id)
+            SELECT r.role_id, p.program_id
+            FROM auth.roles r, auth.programs p
+            WHERE r.role_name = 'ADMIN'
+            ON CONFLICT DO NOTHING
+        """))
+        db.execute(text("""
+            INSERT INTO auth.role_actions (role_id, action_id)
+            SELECT r.role_id, a.action_id
+            FROM auth.roles r, auth.actions a
+            WHERE r.role_name = 'ADMIN'
+            ON CONFLICT DO NOTHING
+        """))
+
+        # ── WAREHOUSE_MANAGER ─────────────────────────────────────────────────────
+        _grant_programs("WAREHOUSE_MANAGER", [
+            "inventory_catalogue", "stock_transfers", "stock_receiving",
+            "stock_ledger", "procurement_suppliers",
+            "procurement_purchase_orders", "settings",
+        ])
+        _grant_actions("WAREHOUSE_MANAGER", [
+            "view_inventory", "manage_products", "export_products", "import_products",
+            "view_transfers", "create_transfer", "edit_transfer_header", "receive_transfer",
+            "view_receiving", "create_shipment", "confirm_shipment",
+            "view_stock_ledger", "export_stock_ledger",
+            "view_suppliers", "manage_suppliers",
+            "view_purchase_orders", "manage_purchase_orders",
+            "manage_locations", "manage_inventory_policy",
+        ])
+
+        # ── WAREHOUSE_STAFF ───────────────────────────────────────────────────────
+        _grant_programs("WAREHOUSE_STAFF", [
+            "stock_transfers", "stock_receiving", "stock_ledger",
+        ])
+        _grant_actions("WAREHOUSE_STAFF", [
+            "view_transfers", "create_transfer", "receive_transfer",
+            "view_receiving", "view_stock_ledger",
+        ])
+
+        # ── ACCOUNTANT ────────────────────────────────────────────────────────────
+        _grant_programs("ACCOUNTANT", [
+            "inventory_catalogue", "ap_invoices", "ap_payments",
+            "ap_ledger", "ap_aging",
+        ])
+        _grant_actions("ACCOUNTANT", [
+            "view_inventory",
+            "view_invoices", "manage_invoices",
+            "view_ap_payments", "manage_payments",
+            "view_ap_ledger", "export_ap_ledger",
+            "view_ap_aging", "export_ap_aging",
+        ])
+
+        # ── STORE_MANAGER ─────────────────────────────────────────────────────────
+        _grant_programs("STORE_MANAGER", [
+            "sales_workstation", "sales_ledger", "sales_returns",
+            "inventory_catalogue", "stock_ledger", "customers_list",
+            "customers_aging", "customers_ar_ledger",
+            "customers_credit_memo", "customers_pdc_vault", "settings",
+        ])
+        _grant_actions("STORE_MANAGER", [
+            "process_sale", "process_returns", "process_blind_returns", "apply_discount",
+            "view_sales_ledger", "export_sales",
+            "view_returns", "export_returns",
+            "view_inventory",
+            "view_stock_ledger",
+            "view_customers", "manage_customers",
+            "view_customer_aging", "export_customer_aging",
+            "view_ar_ledger", "export_ar_ledger",
+            "view_credit_memos", "issue_credit_memo", "cancel_credit_memo",
+            "view_pdc_vault", "manage_pdc",
+            "manage_users", "manage_roles", "manage_shifts",
+            "manage_registers", "manage_payment_modes",
+            "manage_sales_settings", "manage_inventory_policy",
+        ])
+
+        # ── CASHIER ───────────────────────────────────────────────────────────────
+        _grant_programs("CASHIER", ["sales_workstation"])
+        _grant_actions("CASHIER", ["process_sale", "process_returns"])
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+_seed_rbac()
+
+
 app = FastAPI(title="Season ERP")
 
 # --- CORS ---

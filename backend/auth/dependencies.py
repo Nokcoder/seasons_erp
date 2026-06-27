@@ -1,6 +1,6 @@
 # auth/dependencies.py
 import os
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
 import jwt
@@ -17,70 +17,6 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 
 _bearer = HTTPBearer()
-
-# ── Role → permission map ─────────────────────────────────────────────────────
-ROLE_PERMISSIONS: dict[str, list[str]] = {
-    "ADMIN": [
-        "view_inventory",
-        "manage_products",
-        "manage_locations",
-        "create_transfer",
-        "receive_transfer",
-        "edit_transfer_header",
-        "manage_suppliers",
-        "manage_purchase_orders",
-        "confirm_shipment",
-        "manage_invoices",
-        "manage_payments",
-        "manage_ap_ledger",
-        "manage_users",
-        "manage_inventory_policy",
-        # sales module
-        "manage_sales_settings",
-        "manage_customers",
-        "process_sale",
-        "process_returns",
-        "process_blind_returns",
-    ],
-    "WAREHOUSE_MANAGER": [
-        "view_inventory",
-        "manage_products",
-        "manage_locations",
-        "create_transfer",
-        "receive_transfer",
-        "manage_suppliers",
-        "manage_purchase_orders",
-        "confirm_shipment",
-        "manage_inventory_policy",
-    ],
-    "WAREHOUSE_STAFF": [
-        "view_inventory",
-        "create_transfer",
-        "receive_transfer",
-    ],
-    "ACCOUNTANT": [
-        "view_inventory",
-        "manage_invoices",
-        "manage_payments",
-        "manage_ap_ledger",
-    ],
-    "STORE_MANAGER": [
-        "view_inventory",
-        "manage_sales_settings",
-        "manage_customers",
-        "process_sale",
-        "process_returns",
-        "process_blind_returns",
-        "manage_payments",
-        "manage_users",
-        "manage_inventory_policy",
-    ],
-    "CASHIER": [
-        "view_inventory",
-        "process_sale",
-        "process_returns",
-    ],
-}
 
 
 # ── Real JWT identity ─────────────────────────────────────────────────────────
@@ -113,17 +49,110 @@ def get_current_user(
     return user
 
 
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _get_role_ids(user: models.User) -> list[int]:
+    return [r.role_id for r in user.roles]
+
+
+def _resolve_action_set(user: models.User, db: Session) -> set[str]:
+    """Query all action_keys granted to this user via their roles.
+
+    Result is cached on the SQLAlchemy session for the duration of the request
+    to avoid repeated round-trips when multiple require_permission guards fire.
+    """
+    cache_attr = f"_action_cache_{user.user_id}"
+    cached = getattr(db, cache_attr, None)
+    if cached is not None:
+        return cached
+
+    role_ids = _get_role_ids(user)
+    if not role_ids:
+        result: set[str] = set()
+        setattr(db, cache_attr, result)
+        return result
+
+    rows = (
+        db.query(models.Action.action_key)
+        .join(models.role_actions_table,
+              models.role_actions_table.c.action_id == models.Action.action_id)
+        .filter(models.role_actions_table.c.role_id.in_(role_ids))
+        .all()
+    )
+    result = {r.action_key for r in rows}
+    setattr(db, cache_attr, result)
+    return result
+
+
+def _resolve_program_set(user: models.User, db: Session) -> set[str]:
+    """Query all program_keys granted to this user via their roles."""
+    cache_attr = f"_program_cache_{user.user_id}"
+    cached = getattr(db, cache_attr, None)
+    if cached is not None:
+        return cached
+
+    role_ids = _get_role_ids(user)
+    if not role_ids:
+        result: set[str] = set()
+        setattr(db, cache_attr, result)
+        return result
+
+    rows = (
+        db.query(models.Program.program_key)
+        .join(models.role_programs_table,
+              models.role_programs_table.c.program_id == models.Program.program_id)
+        .filter(models.role_programs_table.c.role_id.in_(role_ids))
+        .all()
+    )
+    result = {r.program_key for r in rows}
+    setattr(db, cache_attr, result)
+    return result
+
+
+# ── Public non-raising check (used inside business logic helpers) ─────────────
+
+def has_action(user: models.User, action_key: str, db: Session) -> bool:
+    """Return True if the user holds the given action_key. Does not raise."""
+    return action_key in _resolve_action_set(user, db)
+
+
 # ── Permission guard ──────────────────────────────────────────────────────────
-def require_permission(required_perm: str):
+
+def require_permission(required_action_key: str):
+    """FastAPI dependency: enforces action-level access on an endpoint.
+
+    Injects current_user and db, resolves the user's full action set from
+    role_actions, and raises HTTP 403 if the required action is absent.
+    The resolved set is cached on the db session to avoid N queries per request
+    when multiple guards fire on the same endpoint.
+    """
     def _checker(
         current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
     ) -> models.User:
-        user_perms: set[str] = set()
-        for role in current_user.roles:
-            user_perms.update(ROLE_PERMISSIONS.get(role.role_name, []))
-        if required_perm not in user_perms:
+        if required_action_key not in _resolve_action_set(current_user, db):
             raise HTTPException(
-                status_code=403, detail=f"Missing permission: {required_perm}"
+                status_code=403,
+                detail=f"Missing permission: {required_action_key}",
+            )
+        return current_user
+    return _checker
+
+
+def require_program(required_program_key: str):
+    """FastAPI dependency: enforces program-level access on an endpoint.
+
+    Used for backend enforcement on sensitive routes. Frontend uses
+    GET /auth/programs for nav/page gating.
+    """
+    def _checker(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> models.User:
+        if required_program_key not in _resolve_program_set(current_user, db):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied: program '{required_program_key}'",
             )
         return current_user
     return _checker

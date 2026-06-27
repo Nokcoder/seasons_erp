@@ -1,7 +1,7 @@
 import { useState, type ReactNode, lazy, Suspense } from 'react'
 const ImportHub = lazy(() => import('./settings/ImportHub'))
 import { Navigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useAuth } from '../context/AuthContext'
 import { useTheme, type Theme } from '../hooks/useTheme'
 import { useAltRows } from '../hooks/useAltRows'
@@ -13,6 +13,7 @@ import {
   type Shift, type CashRegister, type PaymentMode, type Location,
   type EmployeeOut, type UserEntry, type RoleEntry,
   type UOM, type Category,
+  type ModuleGroup, type RolePermissions,
 } from '../services/api'
 
 // ── access guard ─────────────────────────────────────────────────────────────
@@ -624,6 +625,177 @@ function EmployeesUsersTab() {
 // TAB 6 — ROLES
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Permission Matrix (sub-component, mounted when a role is being edited) ────
+
+function PermissionMatrix({
+  role,
+  onClose,
+}: {
+  role: RoleEntry
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+
+  const { data: catalogue = [], isLoading: catalogueLoading } = useQuery({
+    queryKey: qk.programs(),
+    queryFn: authApi.programs.list,
+    ...stale.auth,
+  })
+
+  const { data: current, isLoading: permLoading } = useQuery({
+    queryKey: qk.rolePermissions(role.role_id!),
+    queryFn: () => authApi.roles.getPermissions(role.role_id!),
+  })
+
+  const [programKeys, setProgramKeys] = useState<Set<string>>(new Set())
+  const [actionKeys,  setActionKeys]  = useState<Set<string>>(new Set())
+  const [saveErr,     setSaveErr]     = useState<string | null>(null)
+
+  // Populate from server data once loaded
+  const [initialised, setInitialised] = useState(false)
+  if (current && !initialised) {
+    setProgramKeys(new Set(current.program_keys))
+    setActionKeys(new Set(current.action_keys))
+    setInitialised(true)
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: RolePermissions) =>
+      authApi.roles.setPermissions(role.role_id!, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.rolePermissions(role.role_id!) })
+      setSaveErr(null)
+      onClose()
+    },
+    onError: (e: unknown) => {
+      setSaveErr(e instanceof Error ? e.message : 'Save failed')
+    },
+  })
+
+  function toggleProgram(pk: string, programActions: string[]) {
+    setProgramKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(pk)) {
+        next.delete(pk)
+        // uncheck all actions that belong to this program
+        setActionKeys(ak => {
+          const nextAk = new Set(ak)
+          programActions.forEach(a => nextAk.delete(a))
+          return nextAk
+        })
+      } else {
+        next.add(pk)
+      }
+      return next
+    })
+  }
+
+  function toggleAction(ak: string, pk: string) {
+    setActionKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(ak)) {
+        next.delete(ak)
+      } else {
+        next.add(ak)
+        // auto-check the parent program
+        setProgramKeys(pp => {
+          const nextPp = new Set(pp)
+          nextPp.add(pk)
+          return nextPp
+        })
+      }
+      return next
+    })
+  }
+
+  function handleSave() {
+    setSaveErr(null)
+    saveMutation.mutate({
+      program_keys: Array.from(programKeys),
+      action_keys:  Array.from(actionKeys),
+    })
+  }
+
+  const isLoading = catalogueLoading || permLoading
+
+  return (
+    <div className="t-bg-elevated border t-border rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-widest t-text-3">
+          Permissions — <span className="font-mono t-text-1">{role.role_name}</span>
+        </p>
+        <div className="flex gap-2">
+          <Btn variant="primary" onClick={handleSave} disabled={saveMutation.isPending || isLoading}>
+            {saveMutation.isPending ? 'Saving…' : 'Save Permissions'}
+          </Btn>
+          <Btn variant="ghost" onClick={onClose} disabled={saveMutation.isPending}>Cancel</Btn>
+        </div>
+      </div>
+
+      {saveErr && (
+        <div className="text-xs text-red-400 bg-red-950 border border-red-900 rounded px-3 py-2 mb-3">
+          {saveErr}
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="space-y-2">
+          {[1,2,3].map(i => <div key={i} className="h-8 t-bg-input rounded animate-pulse" />)}
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {(catalogue as ModuleGroup[]).map(mg => (
+            <div key={mg.module}>
+              <p className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mb-2">
+                {mg.module}
+              </p>
+              <div className="space-y-2 pl-2">
+                {mg.programs.map(prog => {
+                  const progActionKeys = prog.actions.map(a => a.action_key)
+                  const progChecked    = programKeys.has(prog.program_key)
+                  return (
+                    <div key={prog.program_key} className="t-bg-input border t-border rounded p-2">
+                      {/* Program row */}
+                      <label className="flex items-center gap-2 cursor-pointer mb-1">
+                        <input
+                          type="checkbox"
+                          className="accent-[var(--accent)]"
+                          checked={progChecked}
+                          onChange={() => toggleProgram(prog.program_key, progActionKeys)}
+                        />
+                        <span className="text-xs font-semibold t-text-1">{prog.display_name}</span>
+                        <span className="text-[10px] t-text-4 font-mono">{prog.program_key}</span>
+                      </label>
+                      {/* Action sub-rows — only visible when program is checked */}
+                      {progChecked && (
+                        <div className="pl-5 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+                          {prog.actions.map(act => (
+                            <label key={act.action_key} className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                className="accent-[var(--accent)]"
+                                checked={actionKeys.has(act.action_key)}
+                                onChange={() => toggleAction(act.action_key, prog.program_key)}
+                              />
+                              <span className="text-[11px] t-text-2">{act.display_name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── RolesTab ──────────────────────────────────────────────────────────────────
+
 function RolesTab() {
   const qc = useQueryClient()
   const { data: roles = [], isLoading, isFetching } = useQuery({ queryKey: qk.roles(), queryFn: authApi.roles.list, ...stale.auth })
@@ -637,6 +809,7 @@ function RolesTab() {
   const [deleteErr,     setDeleteErr]     = useState<string | null>(null)
   const [editingAssign, setEditingAssign] = useState<number | null>(null)
   const [selectedRoles, setSelectedRoles] = useState<string[]>([])
+  const [editingPerms,  setEditingPerms]  = useState<RoleEntry | null>(null)
 
   async function invalidateAll() {
     await Promise.all([qc.invalidateQueries({ queryKey: qk.roles() }), qc.invalidateQueries({ queryKey: qk.users() })])
@@ -694,6 +867,9 @@ function RolesTab() {
                 <td className="px-3 py-2">
                   <div className="flex gap-2">
                     <Btn onClick={() => { setEditing(r); setRoleName(r.role_name); setShowForm(true) }}>Rename</Btn>
+                    <Btn onClick={() => setEditingPerms(editingPerms?.role_id === r.role_id ? null : r)}>
+                      {editingPerms?.role_id === r.role_id ? 'Close' : 'Permissions'}
+                    </Btn>
                     {(r.user_count ?? 0) === 0
                       ? <Btn variant="danger" onClick={() => deleteRole(r)}>Delete</Btn>
                       : <span className="text-[10px] t-text-3 italic self-center">{r.user_count} assigned</span>}
@@ -705,6 +881,14 @@ function RolesTab() {
         </table>
         <p className="text-[10px] t-text-4 mt-2">Roles can only be deleted when no users are assigned. Hard delete — no recovery.</p>
       </div>
+
+      {/* Permission matrix — shown inline below the table when a role is selected */}
+      {editingPerms && (
+        <PermissionMatrix
+          role={editingPerms}
+          onClose={() => setEditingPerms(null)}
+        />
+      )}
 
       <div>
         <SubHead title="Role Assignment" />
