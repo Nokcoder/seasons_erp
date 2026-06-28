@@ -11,7 +11,8 @@ export const qk = {
   shifts:     () => ['shifts']           as const,
   registers:  () => ['registers']        as const,
   paymentModes:() => ['paymentModes']    as const,
-  employees:  () => ['employees']        as const,
+  employees:           () => ['employees']               as const,
+  employeesWithoutUser:() => ['employees', 'without-user'] as const,
 
   // ── catalogue / inventory (transactional) ────────────────────────────
   products:   ()                  => ['products']             as const,
@@ -77,6 +78,8 @@ export const qk = {
   users:            () => ['users'] as const,
   usersActive:      () => ['users', 'active'] as const,
   inventoryPolicy:  () => ['inventoryPolicy'] as const,
+  myProfile:        () => ['myProfile']       as const,
+  myPrograms:       () => ['myPrograms']      as const,
   storeName:        () => ['storeName']       as const,
   programs:         () => ['programs']        as const,
   rolePermissions:  (id: number) => ['roles', id, 'permissions'] as const,

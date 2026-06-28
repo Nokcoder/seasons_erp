@@ -1,5 +1,203 @@
 # Changelog
 
+## 2026-06-28 — Fix: audit_variance not calculated when receipt_grand_total is null
+
+**`backend/sales/router.py`** — `post_draft` was unconditionally setting `sale.receipt_grand_total = grand_total` and calculating `audit_variance = total_tendered_raw - grand_total` (which captured the change-due amount) on every posted sale regardless of mode. The frontend correctly sends `receipt_grand_total: null` in cashiering mode, but the backend was ignoring `payload.receipt_grand_total` entirely.
+
+Fixed:
+- `sale.receipt_grand_total` now reads from `payload.receipt_grand_total` (null in cashiering mode, user-supplied value in audit mode)
+- `audit_variance` is now `payload.receipt_grand_total - grand_total` when `receipt_grand_total is not None`, otherwise explicitly `None`
+- Removed the dead `total_tendered_raw` variable that was only used for the old incorrect formula
+
+---
+
+## 2026-06-28 — Fix: Workstation sticky writes gated on cashieringConfirmed ref
+
+All three sticky saves (shift, location, register) were gated on `cashieringMode`, which is `false` while `myPrograms` is loading. If the user changed a field during the loading window, `saveSticky` was silently skipped and nothing was written to localStorage.
+
+Added `cashieringConfirmed = useRef(false)` that latches to `true` the first time `cashieringMode` resolves to `true` and never reverts. All three `saveSticky` calls now guard on `cashieringConfirmed.current` instead of `cashieringMode`, so once the session is confirmed as cashiering mode the writes fire reliably regardless of re-fetches or timing.
+
+---
+
+## 2026-06-28 — Fix: Workstation employees fetch gated robustly against stale sessions
+
+`GET /auth/employees` requires `manage_users` — a permission cashiers do not hold. The fetch was firing unconditionally, causing a 403 for cashier users.
+
+**Root cause of the regression:** `cashieringMode` was derived solely from `user.action_keys` in localStorage. Sessions saved before `action_keys` was added to the login flow have `action_keys: []` (backwards-compat default), making `cashieringMode = false` even for cashier users — bypassing the `enabled: !cashieringMode` guard.
+
+**Fix:** Added a `myPrograms` query (`GET /auth/me/programs`) that runs on every Workstation mount. `cashieringMode` is now derived from live `myPrograms.action_keys` (primary) with the localStorage value as an instant fallback for the first paint. The employees query is gated on `!myProgramsPending && !cashieringMode`, so it cannot fire until the live programs fetch completes and confirms the user is not in cashiering mode.
+
+---
+
+## 2026-06-28 — Workstation: receipt_grand_total hidden in cashiering mode
+
+### Frontend
+- **`frontend/src/pages/sales/Workstation.tsx`** — Added `receiptGrandTotal` state and a "Receipt Total" input field (audit mode only). In cashiering mode the field is hidden and `receipt_grand_total` is sent as `null` in `buildDraftPayload()`, `buildPatchPayload()`, and the post payload, so `audit_variance` is never calculated on cashiered sales. In audit mode the field is visible and the value is included in all three payloads normally. Field resets on post, void, and new transaction; restores when loading a saved draft.
+
+---
+
+## 2026-06-28 — Refactor: Cashiering mode moved to RBAC action
+
+Removes the `pos_cashiering_mode` system-setting toggle and replaces it with a
+`cashiering_mode` action on the `sales_workstation` program. Admins assign the
+action to a role via Settings → Roles → Permissions matrix; no global on/off toggle exists anymore.
+
+### Backend
+- **`backend/settings/schemas.py`** — Removed `POSSettingsOut` and `POSSettingsPatch`.
+- **`backend/settings/router.py`** — Removed `GET /settings/pos` and `PATCH /settings/pos`.
+- **`backend/main.py`** — Added `cashiering_mode / Cashiering Mode` action seed under `sales_workstation`. Not assigned to any role by default.
+- **`backend/auth/schemas.py`** — Added `action_keys: List[str] = []` to `UserProgramsOut`.
+- **`backend/auth/router.py`** — `GET /auth/me/programs` now also queries and returns `action_keys` for the calling user's roles.
+- **`docs/rbac_programs_actions.md`** — Added `cashiering_mode` entry under `sales_workstation` actions.
+
+### Frontend
+- **`frontend/src/services/api.ts`** — Removed `POSSettings` interface and `settingsApi.posSettings`. Added `action_keys: string[]` to `UserProgramsOut`.
+- **`frontend/src/lib/queryKeys.ts`** — Removed `posSettings` query key.
+- **`frontend/src/context/AuthContext.tsx`** — Added `action_keys: string[]` to `AuthUser`; populated from `GET /auth/me/programs` at login; backwards-compat default is `[]`.
+- **`frontend/src/pages/Settings.tsx`** — Removed `POS Workstation` tab, `POSWorkstationTab`, and `ToggleRow` components entirely.
+- **`frontend/src/pages/sales/Workstation.tsx`** — `cashieringMode` is now `user?.action_keys?.includes('cashiering_mode') ?? false` — synchronous, zero latency, no fetch. Removed `posSettings` query, `posSettingsLoading`, and all related skeleton guards. Mode badge and date field now render their final state on first paint.
+
+### Migration note
+Any `pos_cashiering_mode` row that was written to `settings.system_settings` by the old toggle is now an orphaned row (nothing reads it). No migration is required — the row is harmless and will remain until manually cleaned up.
+
+## 2026-06-28 — Fix: Cashiering mode — date picker timing + cashier submission bugs
+
+### BUG 1 — Date picker still editable on load (timing)
+`cashieringMode` was derived as `posSettings?.pos_cashiering_mode ?? false`, defaulting to `false` while the settings query was in-flight. The date input rendered as an editable picker until the fetch resolved.
+
+- **`frontend/src/pages/sales/Workstation.tsx`** — `cashieringMode` is now `null` while `posSettingsLoading` is true. Mode badge, date field, and cashier field all render a skeleton placeholder while `null`, then snap directly to the correct locked/unlocked state once resolved — no picker is ever shown in cashiering mode.
+
+### BUG 2 — Cashier blank / wrong employee submitted
+The `useEffect` that set `header.employeeId` was gated on `myProfile?.employee_id != null`. Users without a linked employee record caused `null != null = false`, so the effect never fired and `employee_id: null` was submitted with every sale.
+
+- **`backend/auth/router.py`** — `GET /auth/me` now returns HTTP 400 with a descriptive message if `user.employee` is `None`. Every user must be linked to an employee; unlinked accounts are a data-integrity error, not a silent `null`.
+- **`frontend/src/pages/sales/Workstation.tsx`** — Added `resolveEmployeeId()` helper that reads from `myProfile.employee_id` directly in cashiering mode (not from `header.employeeId` state). `handlePost` blocks submission with an inline error when cashiering mode is on and the profile has no linked employee. The cashier display also shows a red "Not linked" label and the full inline error message in that case.
+
+## 2026-06-28 — Feature: Cashiering Mode toggle
+
+Adds a system-wide POS mode flag (`pos_cashiering_mode`) that changes how the workstation operates.
+
+### Backend
+- **`backend/auth/schemas.py`** — Added `UserProfileOut` (user_id, username, employee_id, first/last name).
+- **`backend/auth/router.py`** — Added `GET /auth/me` that decodes the JWT directly (bypasses `get_current_user` stub) to return the calling user's own profile + linked employee.
+- **`backend/settings/schemas.py`** — Added `POSSettingsOut` and `POSSettingsPatch` schemas.
+- **`backend/settings/router.py`** — Added `GET /settings/pos` (open) and `PATCH /settings/pos` (requires `manage_sales_settings`).
+
+### Frontend
+- **`frontend/src/lib/queryKeys.ts`** — Added `posSettings` and `myProfile` query keys.
+- **`frontend/src/services/api.ts`** — Added `UserProfileOut`, `POSSettings` interfaces; `authApi.me.profile()`, `settingsApi.posSettings.get/patch`.
+- **`frontend/src/pages/Settings.tsx`** — Added `'POS Workstation'` tab with `POSWorkstationTab` component: toggle switches `pos_cashiering_mode` via API.
+- **`frontend/src/pages/sales/Workstation.tsx`**:
+  - Fetches `GET /settings/pos` and `GET /auth/me` on load.
+  - In **Cashiering Mode**: Date locked to today, Cashier replaced with logged-in user's name (read-only), Shift and Location are sticky (persisted to localStorage).
+  - In **Audit Mode**: Fully editable as before.
+  - Mode badge displayed in the session header bar.
+
+## 2026-06-28 — Fix: SyntaxError due to duplicate `_actor` parameter in `get_pdc_vault`
+
+`GET /pdc` had two `_actor: AuthUser = Depends(...)` parameters in its signature — `view_pdc_vault` (correct) and `manage_customers` (erroneous duplicate added during RBAC wiring). Python raises `SyntaxError: duplicate argument '_actor'` on import, preventing the backend from starting.
+
+### `backend/sales/router.py`
+- Removed the spurious `_actor: AuthUser = Depends(require_permission("manage_customers"))` from `get_pdc_vault`; the `view_pdc_vault` guard is the correct and only permission for that endpoint.
+
+---
+
+## 2026-06-27 — Feature: DB-driven RBAC enforcement (nav visibility + route gating)
+
+Wires the DB program assignments to actual nav and route access. Previously all program/action data was stored in the DB but the frontend still used hardcoded role-name arrays, so granting a program in Settings had no visible effect until re-implemented here.
+
+### `backend/auth/schemas.py`
+- Added `UserProgramsOut(program_keys: List[str])` — scoped to the calling user's assigned programs.
+
+### `backend/auth/router.py`
+- New `GET /auth/me/programs` endpoint (appears before `GET /auth/programs`): queries `role_programs JOIN programs` for every role held by the current user, deduplicates with `.distinct()`, returns `{ program_keys: [...] }`. Any authenticated user.
+
+### `backend/sales/router.py`
+- Added `require_permission` guards to 15 previously unguarded read endpoints:
+  - `GET /` → `view_sales_ledger`
+  - `GET /summary` → `view_sales_ledger`
+  - `GET /{sale_id}/items` → `view_sales_ledger`
+  - `GET /returns` → `view_returns`
+  - `GET /returns/{return_id}` → `view_returns`
+  - `GET /sale/{sale_id}/items-for-return` → `process_returns`
+  - `GET /customers/ar-ledger` → `view_ar_ledger`
+  - `GET /customers/ar-ledger/{sale_id}/payments` → `view_ar_ledger`
+  - `GET /customers/{customer_id}/ar-ledger` → `view_ar_ledger`
+  - `GET /customers/{customer_id}/sales` → `view_customers`
+  - `GET /customers/{customer_id}/payments` → `view_customers`
+  - `GET /ar-ledger` → `view_ar_ledger`
+  - `GET /pdc` → `view_pdc_vault`
+  - `GET /payments` → `manage_customers`
+  - `GET /payments/{payment_id}` → `manage_customers`
+- POS workstation reference endpoints intentionally left unguarded (shifts, payment-modes, registers, customers list/detail, next-pid, drafts, credit-memos/validate).
+
+### `frontend/src/services/api.ts`
+- Added `UserProgramsOut` interface.
+- Added `authApi.me.programs()` → `GET /auth/me/programs`.
+
+### `frontend/src/context/AuthContext.tsx`
+- `AuthUser` extended with `programs: string[]`.
+- `login()`: stores token first, then calls `authApi.me.programs()`, builds full `authUser` with programs, persists to localStorage. Programs fetch wrapped in try/catch — login never fails due to a programs-fetch error.
+- `useState` initializer: existing localStorage records without `programs` default to `[]` (backwards-compat).
+
+### `frontend/src/components/AppShell.tsx`
+- `NavItem.roles: string[]` replaced with `NavItem.programs: string[]`.
+- `visibleNav` filter now checks `item.programs.some(p => programs.includes(p))` — no role names anywhere.
+- Program key mappings: Sales → `[sales_workstation, sales_ledger, sales_returns]`; Inventory → `[inventory_catalogue]`; Stock → `[stock_transfers, stock_receiving, stock_ledger]`; Procurement → `[procurement_suppliers, procurement_purchase_orders]`; AP → `[ap_invoices, ap_payments, ap_ledger, ap_aging]`; Customers → `[customers_list, customers_aging, customers_ar_ledger, customers_credit_memo, customers_pdc_vault]`; Settings/Admin → `[settings]`.
+
+### `frontend/src/pages/Sales.tsx`
+- "Sales Ledger" tab and `ledger`/`ledger/:saleId` routes gated on `sales_ledger`.
+- "Returns" tab and `returns/*` routes gated on `sales_returns`. "New Sale" always renders.
+
+### `frontend/src/pages/Stock.tsx`
+- Rewritten: each tab+routes gated on its program. `defaultTab` computed from first accessible program to prevent redirect loops.
+
+### `frontend/src/pages/Procurement.tsx`
+- Rewritten: Suppliers on `procurement_suppliers`; POs on `procurement_purchase_orders`. Dynamic `defaultTab`.
+
+### `frontend/src/pages/AP.tsx`
+- Rewritten: each of 4 tabs gated on its program. Index and catch-all redirect to first accessible tab.
+
+### `frontend/src/pages/Customers.tsx`
+- Rewritten: each of 5 sub-tabs gated on its program. Index and catch-all redirect to first accessible tab.
+
+---
+
+## 2026-06-27 — Fix: duplicate employee record created on Add User
+
+Every "Add User" form submission unconditionally created a new `auth.employees` row because `POST /auth/register` always inserted a new employee regardless of whether one already existed.
+
+### Correct flow (enforced going forward)
+1. Admin creates an employee in the Employees section.
+2. Admin promotes that employee to a user via a "Create Login" button on the employee row.
+3. `POST /auth/register` links the new `auth.users` row to the existing employee via `employee_id`.
+
+No existing duplicate records were cleaned up — only new ones are prevented.
+
+### `backend/auth/schemas.py`
+- `UserCreate`: added `employee_id: Optional[int] = None`; made `first_name`/`last_name` optional.
+- `EmployeeOut`: added `has_user: bool = False`.
+
+### `backend/auth/router.py`
+- `register()`: if `employee_id` is supplied, links existing employee (rejects 400 if it already has a user); else requires name fields and creates a new employee.
+- `list_employees()`: annotates `has_user` by checking the set of employee_ids with linked users.
+- New `GET /auth/employees/without-user`: returns active employees with no linked user account.
+
+### `frontend/src/services/api.ts`
+- `EmployeeOut`: added `has_user: boolean`.
+- `UserCreate`: added `employee_id?: number`; made `first_name?/last_name?` optional.
+- `authApi.employees`: added `withoutUser()` → `GET /auth/employees/without-user`.
+
+### `frontend/src/lib/queryKeys.ts`
+- Added `employeesWithoutUser: () => ['employees', 'without-user'] as const`.
+
+### `frontend/src/pages/Settings.tsx` (`EmployeesUsersTab`)
+- Employee table: added "Login" column — "Has Login" badge or "Create Login" button (`!has_user && is_active` rows only).
+- Add User form: free-text name inputs removed; replaced with employee dropdown from `without-user` endpoint. Pre-selected and locked when opened via "Create Login".
+- `saveUser` payload: `{ employee_id, username, password, role_names }` only.
+
+---
+
 ## 2026-06-27 — Feature: DB-driven RBAC (Programs & Actions)
 
 Replaced the hardcoded `ROLE_PERMISSIONS` dict with a fully database-driven permission system per `/docs/rbac_programs_actions.md`.

@@ -382,7 +382,7 @@ class SaleTenderIn(BaseModel):
 class SalePostRequest(BaseModel):
     """Payload for POST /sales/drafts/{id}/post."""
     tenders: List[SaleTenderIn] = []
-    receipt_grand_total: Optional[Decimal] = None
+    is_cashiering_mode: bool = False
     transaction_date: date = Field(default_factory=_ph_today)
 
 

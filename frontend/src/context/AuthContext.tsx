@@ -14,6 +14,8 @@ export interface AuthUser {
   user_id: number
   username: string
   roles: string[]
+  programs: string[]
+  action_keys: string[]
 }
 
 interface AuthContextValue {
@@ -57,7 +59,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const [user, setUser] = useState<AuthUser | null>(() => {
     const raw = localStorage.getItem('erp_user')
-    return raw ? (JSON.parse(raw) as AuthUser) : null
+    if (!raw) return null
+    // Backwards-compat: records saved before `programs`/`action_keys` was added default to []
+    const parsed = JSON.parse(raw) as Partial<AuthUser>
+    return { programs: [], action_keys: [], ...parsed } as AuthUser
   })
 
   // Global 401 handler — fired by the api request wrapper
@@ -75,18 +80,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await authApi.login(username, password)
     const payload = decodePayload(data.access_token)
 
-    // The JWT carries `roles` as an array of role name strings
     const roles: string[] = Array.isArray(payload.roles)
       ? (payload.roles as string[])
       : []
+
+    // Store the token before calling /me/programs so the fetch can authenticate
+    localStorage.setItem('erp_token', data.access_token)
+
+    let programs: string[] = []
+    let action_keys: string[] = []
+    try {
+      const result = await authApi.me.programs()
+      programs    = result.program_keys
+      action_keys = result.action_keys ?? []
+    } catch {
+      // Programs fetch failed — user can re-login to retry
+    }
 
     const authUser: AuthUser = {
       user_id: payload.id as number,
       username: payload.sub as string,
       roles,
+      programs,
+      action_keys,
     }
 
-    localStorage.setItem('erp_token', data.access_token)
     localStorage.setItem('erp_user', JSON.stringify(authUser))
     setToken(data.access_token)
     setUser(authUser)

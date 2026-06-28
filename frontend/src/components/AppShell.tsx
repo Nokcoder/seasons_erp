@@ -6,18 +6,18 @@ import { useAltRows } from '../hooks/useAltRows'
 interface NavItem {
   label: string
   path: string
-  roles: string[]
+  programs: string[]
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: 'Sales',       path: '/sales',        roles: ['ADMIN', 'STORE_MANAGER', 'CASHIER'] },
-  { label: 'Inventory',   path: '/inventory',    roles: ['ADMIN', 'WAREHOUSE_MANAGER', 'WAREHOUSE_STAFF', 'STORE_MANAGER'] },
-  { label: 'Stock',       path: '/stock',         roles: ['ADMIN', 'WAREHOUSE_MANAGER', 'STORE_MANAGER'] },
-  { label: 'Procurement', path: '/procurement',  roles: ['ADMIN', 'WAREHOUSE_MANAGER'] },
-  { label: 'AP',          path: '/ap',           roles: ['ADMIN', 'ACCOUNTANT'] },
-  { label: 'Customers',   path: '/customers',    roles: ['ADMIN', 'STORE_MANAGER'] },
-  { label: 'Settings',    path: '/settings',     roles: ['ADMIN', 'STORE_MANAGER'] },
-  { label: 'Admin',       path: '/admin/users',  roles: ['ADMIN'] },
+  { label: 'Sales',       path: '/sales',       programs: ['sales_workstation', 'sales_ledger', 'sales_returns'] },
+  { label: 'Inventory',   path: '/inventory',   programs: ['inventory_catalogue'] },
+  { label: 'Stock',       path: '/stock',        programs: ['stock_transfers', 'stock_receiving', 'stock_ledger'] },
+  { label: 'Procurement', path: '/procurement', programs: ['procurement_suppliers', 'procurement_purchase_orders'] },
+  { label: 'AP',          path: '/ap',          programs: ['ap_invoices', 'ap_payments', 'ap_ledger', 'ap_aging'] },
+  { label: 'Customers',   path: '/customers',   programs: ['customers_list', 'customers_aging', 'customers_ar_ledger', 'customers_credit_memo', 'customers_pdc_vault'] },
+  { label: 'Settings',    path: '/settings',    programs: ['settings'] },
+  { label: 'Admin',       path: '/admin/users', programs: ['settings'] },
 ]
 
 export default function AppShell() {
@@ -25,8 +25,9 @@ export default function AppShell() {
   useTheme()    // ensures theme is initialized and reactive
   useAltRows()  // ensures alternating-rows state is initialized and reactive
 
+  const programs = user?.programs ?? []
   const visibleNav = NAV_ITEMS.filter(item =>
-    item.roles.some(r => user?.roles.includes(r))
+    item.programs.some(p => programs.includes(p))
   )
 
   return (

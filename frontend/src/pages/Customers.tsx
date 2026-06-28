@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import { lazy, Suspense } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 const CustomerList     = lazy(() => import('./customers/CustomerList'))
 const CustomerDetail   = lazy(() => import('./customers/CustomerDetail'))
@@ -16,25 +17,41 @@ function Loading() {
 }
 
 export default function Customers() {
+  const { user } = useAuth()
+  const programs = user?.programs ?? []
+  const hasList     = programs.includes('customers_list')
+  const hasAging    = programs.includes('customers_aging')
+  const hasARLedger = programs.includes('customers_ar_ledger')
+  const hasMemo     = programs.includes('customers_credit_memo')
+  const hasPDC      = programs.includes('customers_pdc_vault')
+
+  const defaultTab = hasList ? '' : hasAging ? 'aging' : hasARLedger ? 'ledger' : hasMemo ? 'credit-memo' : 'pdc-vault'
+
   return (
     <div className="min-h-full t-bg-base flex flex-col">
       <div className="flex items-center gap-1 px-4 py-2 border-b t-border t-bg-surface shrink-0">
-        <NavLink to="/customers"             end className={TAB_CLS}>Customers</NavLink>
-        <NavLink to="/customers/aging"         className={TAB_CLS}>Aging Report</NavLink>
-        <NavLink to="/customers/ledger"        className={TAB_CLS}>AR Ledger</NavLink>
-        <NavLink to="/customers/credit-memo"   className={TAB_CLS}>Credit Memo</NavLink>
-        <NavLink to="/customers/pdc-vault"     className={TAB_CLS}>PDC Vault</NavLink>
+        {hasList     && <NavLink to="/customers"           end className={TAB_CLS}>Customers</NavLink>}
+        {hasAging    && <NavLink to="/customers/aging"         className={TAB_CLS}>Aging Report</NavLink>}
+        {hasARLedger && <NavLink to="/customers/ledger"        className={TAB_CLS}>AR Ledger</NavLink>}
+        {hasMemo     && <NavLink to="/customers/credit-memo"   className={TAB_CLS}>Credit Memo</NavLink>}
+        {hasPDC      && <NavLink to="/customers/pdc-vault"     className={TAB_CLS}>PDC Vault</NavLink>}
       </div>
       <div className="flex-1 overflow-auto">
         <Suspense fallback={<Loading />}>
           <Routes>
-            <Route index                      element={<CustomerList />} />
-            <Route path="aging"               element={<CustomerAging />} />
-            <Route path="ledger"              element={<CustomerARLedger />} />
-            <Route path="credit-memo"         element={<CreditMemo />} />
-            <Route path="pdc-vault"           element={<PDCVault />} />
-            <Route path=":customerId"         element={<CustomerDetail />} />
-            <Route path="*"                   element={<Navigate to="/customers" replace />} />
+            {hasList ? (
+              <>
+                <Route index             element={<CustomerList />} />
+                <Route path=":customerId" element={<CustomerDetail />} />
+              </>
+            ) : (
+              <Route index element={<Navigate to={defaultTab} replace />} />
+            )}
+            {hasAging    && <Route path="aging"       element={<CustomerAging />} />}
+            {hasARLedger && <Route path="ledger"      element={<CustomerARLedger />} />}
+            {hasMemo     && <Route path="credit-memo" element={<CreditMemo />} />}
+            {hasPDC      && <Route path="pdc-vault"   element={<PDCVault />} />}
+            <Route path="*" element={<Navigate to={defaultTab || '.'} replace />} />
           </Routes>
         </Suspense>
       </div>

@@ -64,13 +64,27 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     if db.query(models.User).filter(models.User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
 
-    # 1. create employee
-    employee = models.Employee(
-        first_name=payload.first_name,
-        last_name=payload.last_name,
-    )
-    db.add(employee)
-    db.flush()   # get employee_id before creating user
+    # 1. resolve or create employee
+    if payload.employee_id is not None:
+        employee = db.query(models.Employee).filter(
+            models.Employee.employee_id == payload.employee_id
+        ).first()
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        if db.query(models.User).filter(models.User.employee_id == payload.employee_id).first():
+            raise HTTPException(status_code=400, detail="This employee already has a user account")
+    else:
+        if not payload.first_name or not payload.last_name:
+            raise HTTPException(
+                status_code=422,
+                detail="first_name and last_name are required when employee_id is not provided",
+            )
+        employee = models.Employee(
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+        )
+        db.add(employee)
+        db.flush()
 
     # 2. create user
     user = models.User(
@@ -79,7 +93,7 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
         password_hash=pwd_context.hash(payload.password),
     )
     db.add(user)
-    db.flush()   # get user_id before assigning roles
+    db.flush()
 
     # 3. assign roles (create Role rows on the fly if they don't exist)
     for role_name in payload.role_names:
@@ -352,11 +366,53 @@ def list_employees(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
-    return (
+    employees = (
         db.query(models.Employee)
         .order_by(models.Employee.last_name, models.Employee.first_name)
         .all()
     )
+    # employee_ids that have at least one user (active or inactive)
+    emp_ids_with_user = {
+        row[0] for row in db.query(models.User.employee_id).all()
+    }
+    return [
+        schemas.EmployeeOut(
+            employee_id=e.employee_id,
+            first_name=e.first_name,
+            last_name=e.last_name,
+            is_active=e.is_active,
+            has_user=e.employee_id in emp_ids_with_user,
+        )
+        for e in employees
+    ]
+
+
+@router.get("/employees/without-user", response_model=List[schemas.EmployeeOut])
+def list_employees_without_user(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    """Active employees that have no linked user account — used to populate the Create Login dropdown."""
+    emp_ids_with_user = {
+        row[0] for row in db.query(models.User.employee_id).all()
+    }
+    employees = (
+        db.query(models.Employee)
+        .filter(models.Employee.is_active == True)
+        .order_by(models.Employee.last_name, models.Employee.first_name)
+        .all()
+    )
+    return [
+        schemas.EmployeeOut(
+            employee_id=e.employee_id,
+            first_name=e.first_name,
+            last_name=e.last_name,
+            is_active=e.is_active,
+            has_user=False,
+        )
+        for e in employees
+        if e.employee_id not in emp_ids_with_user
+    ]
 
 
 @router.post("/employees", response_model=schemas.EmployeeOut, status_code=201)
@@ -403,8 +459,86 @@ def update_employee(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CURRENT USER PROFILE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/me", response_model=schemas.UserProfileOut)
+def get_me(request: Request, db: Session = Depends(get_db)):
+    """Return the calling user's profile with their linked employee record.
+
+    Decodes the JWT directly so it works correctly even while get_current_user
+    is a stub that always returns the first DB user.
+    """
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = int(payload["id"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = (
+        db.query(models.User)
+        .options(joinedload(models.User.employee))
+        .filter(models.User.user_id == user_id)
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    emp = user.employee
+    if not emp:
+        raise HTTPException(
+            status_code=400,
+            detail="Your user account is not linked to an employee record. Contact your administrator.",
+        )
+    return schemas.UserProfileOut(
+        user_id=user.user_id,
+        username=user.username,
+        employee_id=emp.employee_id,
+        first_name=emp.first_name,
+        last_name=emp.last_name,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RBAC — PROGRAMS & ACTIONS CATALOGUE
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/me/programs", response_model=schemas.UserProgramsOut)
+def get_my_programs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return the program_keys and action_keys the current user's roles grant access to.
+
+    Unlike GET /auth/programs (full catalogue for the Settings matrix editor),
+    this returns only what this specific user can access.
+    """
+    role_ids = [r.role_id for r in current_user.roles]
+    if not role_ids:
+        return schemas.UserProgramsOut(program_keys=[], action_keys=[])
+    program_rows = (
+        db.query(models.Program.program_key)
+        .join(models.role_programs_table,
+              models.role_programs_table.c.program_id == models.Program.program_id)
+        .filter(models.role_programs_table.c.role_id.in_(role_ids))
+        .distinct()
+        .all()
+    )
+    action_rows = (
+        db.query(models.Action.action_key)
+        .join(models.role_actions_table,
+              models.role_actions_table.c.action_id == models.Action.action_id)
+        .filter(models.role_actions_table.c.role_id.in_(role_ids))
+        .distinct()
+        .all()
+    )
+    return schemas.UserProgramsOut(
+        program_keys=[r.program_key for r in program_rows],
+        action_keys=[r.action_key for r in action_rows],
+    )
+
 
 @router.get("/programs", response_model=List[schemas.ModuleGroup])
 def list_programs(

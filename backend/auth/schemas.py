@@ -48,6 +48,7 @@ class EmployeeOut(BaseModel):
     first_name: str
     last_name: str
     is_active: bool
+    has_user: bool = False
 
     class Config:
         from_attributes = True
@@ -57,9 +58,10 @@ class EmployeeOut(BaseModel):
 # USERS — input
 # ==========================================
 class UserCreate(BaseModel):
-    """Creates an Employee row and a linked User row in one call."""
-    first_name: str
-    last_name: str
+    """Links a User to an existing employee (employee_id) or creates a new one (first_name + last_name)."""
+    employee_id: Optional[int] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     username: str
     password: str
     role_names: List[str] = []
@@ -153,3 +155,18 @@ class RolePermissionsOut(BaseModel):
 class RolePermissionsIn(BaseModel):
     program_keys: List[str]
     action_keys:  List[str]
+
+
+class UserProgramsOut(BaseModel):
+    """Scoped to the calling user's roles — not the full catalogue."""
+    program_keys: List[str]
+    action_keys:  List[str] = []
+
+
+class UserProfileOut(BaseModel):
+    """Current user's identity + linked employee record."""
+    user_id:     int
+    username:    str
+    employee_id: Optional[int] = None
+    first_name:  Optional[str] = None
+    last_name:   Optional[str] = None

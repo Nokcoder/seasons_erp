@@ -4,6 +4,7 @@ import { FetchingBar } from '../../components/Skeleton'
 import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   salesApi, inventoryApi, authApi,
   type Shift, type PaymentMode, type CashRegister, type Location, type EmployeeOut,
@@ -80,13 +81,24 @@ function today() {
 // Sticky transaction date — remembers the last value chosen at this terminal so
 // it carries forward as the default for the next transaction in the session
 // (e.g. when batch-entering backdated sales) instead of resetting to today.
-const SALE_DATE_KEY = 'erp_pos_sale_date'
+const SALE_DATE_KEY      = 'erp_pos_sale_date'
+const STICKY_SHIFT_KEY    = 'pos_sticky_shift'
+const STICKY_LOCATION_KEY = 'pos_sticky_location'
+const STICKY_REGISTER_KEY = 'pos_sticky_register'
+
 function loadSaleDate(): string {
   try { return localStorage.getItem(SALE_DATE_KEY) || today() }
   catch { return today() }
 }
 function saveSaleDate(d: string) {
   try { localStorage.setItem(SALE_DATE_KEY, d) } catch { /* ignore */ }
+}
+function loadSticky(key: string): string {
+  try { return localStorage.getItem(key) || '' }
+  catch { return '' }
+}
+function saveSticky(key: string, val: string) {
+  try { localStorage.setItem(key, val) } catch { /* ignore */ }
 }
 
 function calcLineTotal(item: CartItem): number {
@@ -127,6 +139,38 @@ const hdrInput = hdrSelect
 
 export default function Workstation() {
   const qc = useQueryClient()
+  const { user } = useAuth()
+
+  // ── current-user profile (employee name for cashiering mode display) ──
+  const { data: myProfile, isError: myProfileError, error: myProfileErrorObj } = useQuery({
+    queryKey: qk.myProfile(),
+    queryFn:  authApi.me.profile,
+    ...stale.reference,
+    retry: false,
+  })
+
+  // ── live action_keys — guards against stale localStorage (action_keys was []
+  //    for sessions saved before this field was added to the login flow) ────────
+  const { data: myPrograms, isPending: myProgramsPending } = useQuery({
+    queryKey: qk.myPrograms(),
+    queryFn:  authApi.me.programs,
+    ...stale.reference,
+    retry: false,
+  })
+
+  // Live data is authoritative; localStorage value is the instant fallback while
+  // myPrograms is in-flight so the badge/UI render correctly on the first paint.
+  const cashieringMode =
+    myPrograms?.action_keys?.includes('cashiering_mode')
+    ?? (user?.action_keys?.includes('cashiering_mode') ?? false)
+
+  // Latches to true the first time cashieringMode resolves to true and never
+  // reverts. Used to guard sticky writes so they fire reliably once confirmed,
+  // regardless of myPrograms re-fetches or the loading window.
+  const cashieringConfirmed = useRef(false)
+  useEffect(() => {
+    if (cashieringMode === true) cashieringConfirmed.current = true
+  }, [cashieringMode])
 
   // ── reference data — React Query ─────────────────────────────────────────
   const refResults = useQueries({
@@ -135,7 +179,7 @@ export default function Workstation() {
       { queryKey: qk.locations(),    queryFn: inventoryApi.locations.all,     ...stale.reference, retry: 3 },
       { queryKey: qk.registers(),    queryFn: salesApi.registers.list,        ...stale.reference, retry: 3 },
       { queryKey: qk.paymentModes(), queryFn: salesApi.paymentModes.list,     ...stale.reference, retry: 3 },
-      { queryKey: qk.employees(),    queryFn: authApi.employees.list,         ...stale.auth,      retry: 3 },
+      { queryKey: qk.employees(),    queryFn: authApi.employees.list,         ...stale.auth,      retry: 3, enabled: !myProgramsPending && !cashieringMode },
       { queryKey: qk.posCatalog(),   queryFn: inventoryApi.posCatalog,        ...stale.transactional },
     ],
   })
@@ -172,9 +216,9 @@ export default function Workstation() {
   // ── session header ────────────────────────────────────────────────────────
   const [header, setHeader] = useState<SessionHeader>({
     saleDate:     loadSaleDate(),
-    shiftId:      '',
-    locationId:   '',
-    registerId:   '',
+    shiftId:      loadSticky(STICKY_SHIFT_KEY),
+    locationId:   loadSticky(STICKY_LOCATION_KEY),
+    registerId:   loadSticky(STICKY_REGISTER_KEY),
     employeeId:   '',
     customerId:   '',
     originSaleId: '',
@@ -349,6 +393,13 @@ export default function Workstation() {
     }
   }, [nextPidData?.next_pid])
 
+  // ── cashiering mode: lock cashier to logged-in user ───────────────────────
+  useEffect(() => {
+    if (cashieringMode && myProfile?.employee_id != null) {
+      setHeader(h => ({ ...h, employeeId: String(myProfile.employee_id) }))
+    }
+  }, [cashieringMode, myProfile?.employee_id])
+
   // ── auto-sync first Cash tender amount with grand total ───────────────────
   useEffect(() => {
     if (!cashModePID) return
@@ -391,6 +442,13 @@ export default function Workstation() {
           r => r.register_id === parseInt(h.registerId) && r.location_id === lid
         )
         if (!regStillValid) next.registerId = ''
+        if (cashieringConfirmed.current) saveSticky(STICKY_LOCATION_KEY, val as string)
+      }
+      if (key === 'shiftId' && cashieringConfirmed.current) {
+        saveSticky(STICKY_SHIFT_KEY, val as string)
+      }
+      if (key === 'registerId' && cashieringConfirmed.current) {
+        saveSticky(STICKY_REGISTER_KEY, val as string)
       }
       if (key === 'saleDate') {
         saveSaleDate(val as string)
@@ -577,11 +635,16 @@ export default function Workstation() {
   }
 
   // ── payload builders ──────────────────────────────────────────────────────
+  function resolveEmployeeId(): number | null {
+    if (cashieringMode) return myProfile?.employee_id ?? null
+    return header.employeeId ? parseInt(header.employeeId) : null
+  }
+
   function buildDraftPayload() {
     return {
       location_id:        parseInt(header.locationId),
       register_id:        header.registerId    ? parseInt(header.registerId)    : null,
-      employee_id:        header.employeeId    ? parseInt(header.employeeId)    : null,
+      employee_id:        resolveEmployeeId(),
       shift_id:           header.shiftId       ? parseInt(header.shiftId)       : null,
       customer_id:        header.customerId    ? parseInt(header.customerId)    : null,
       origin_sale_id:     header.originSaleId  ? parseInt(header.originSaleId)  : null,
@@ -605,7 +668,7 @@ export default function Workstation() {
   function buildPatchPayload() {
     return {
       register_id:        header.registerId ? parseInt(header.registerId) : null,
-      employee_id:        header.employeeId ? parseInt(header.employeeId) : null,
+      employee_id:        resolveEmployeeId(),
       shift_id:           header.shiftId    ? parseInt(header.shiftId)    : null,
       customer_id:        header.customerId ? parseInt(header.customerId) : null,
       cart_discount_pct:  cartDiscPct  ? parseFloat(cartDiscPct)  : null,
@@ -649,6 +712,10 @@ export default function Workstation() {
     if (!header.locationId) { flash('Select a location before posting.', true); return }
     if (!header.registerId) { flash('Register is required to post a sale.', true); return }
     if (cartItems.length === 0) { flash('Cart is empty.', true); return }
+    if (cashieringMode && (myProfileError || myProfile?.employee_id == null)) {
+      flash('Your account is not linked to an employee record. You cannot post sales in cashiering mode. Contact your administrator.', true)
+      return
+    }
     const validTenders = tenders.filter(t => t.payment_mode_id && parseFloat(t.amount) > 0)
     if (validTenders.length === 0) { flash('Add at least one tender row.', true); return }
     // AR pre-flight validation
@@ -689,7 +756,7 @@ export default function Workstation() {
         draftId = draft.sale_id
       }
 
-      const posted = await salesApi.drafts.post(draftId, {
+      const postPayload = {
         tenders: validTenders.map(t => {
           const mode = paymentModes.find(m => m.payment_mode_id === parseInt(t.payment_mode_id))
           return {
@@ -703,8 +770,10 @@ export default function Workstation() {
             } : {}),
           }
         }),
-        transaction_date: header.saleDate,
-      })
+        is_cashiering_mode: cashieringMode,
+        transaction_date: cashieringMode ? today() : header.saleDate,
+      }
+      const posted = await salesApi.drafts.post(draftId, postPayload)
 
       // Invalidate next-pid so useEffect refreshes the PID field for auto mode
       await qc.invalidateQueries({ queryKey: qk.nextSalePid() })
@@ -814,16 +883,27 @@ export default function Workstation() {
 
 
       {/* ══════════════════════════════════════════════════════════════════
-          SESSION HEADER — values persist, never lock
+          SESSION HEADER
       ══════════════════════════════════════════════════════════════════ */}
       <div className="shrink-0 t-bg-surface border-b t-border px-4 py-2.5 flex items-end gap-4 flex-wrap">
+
+        {/* Mode badge */}
+        <div className="flex flex-col gap-1 self-center">
+          <span className={`text-[10px] font-semibold uppercase tracking-widest px-2 py-0.5 rounded ${cashieringMode ? 'bg-blue-950 text-blue-400' : 'bg-emerald-950 text-emerald-500'}`}>
+            {cashieringMode ? 'Cashiering Mode' : 'Audit Mode'}
+          </span>
+        </div>
 
         {/* Sale Date */}
         <div className="flex flex-col gap-1">
           <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Date</span>
-          <input type="date" value={header.saleDate}
-            onChange={e => setHeaderField('saleDate', e.target.value)}
-            className={hdrSelect} />
+          {cashieringMode ? (
+            <span className={`${hdrSelect} t-text-2 cursor-default select-none`}>{today()}</span>
+          ) : (
+            <input type="date" value={header.saleDate}
+              onChange={e => setHeaderField('saleDate', e.target.value)}
+              className={hdrSelect} />
+          )}
         </div>
 
         {/* Shift */}
@@ -881,18 +961,38 @@ export default function Workstation() {
           )}
         </div>
 
-        {/* Cashier — from employees, not users */}
+        {/* Cashier */}
         <div className="flex flex-col gap-1">
           <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Cashier</span>
-          <select value={header.employeeId} onChange={e => setHeaderField('employeeId', e.target.value)} className={hdrSelect}>
-            <option value="">—</option>
-            {employees.map(emp =>
-              <option key={emp.employee_id} value={emp.employee_id}>
-                {emp.first_name} {emp.last_name}
-              </option>
-            )}
-          </select>
+          {cashieringMode ? (
+            myProfileError || myProfile?.employee_id == null ? (
+              <span className={`${hdrSelect} text-red-400 cursor-default`}>Not linked</span>
+            ) : (
+              <span className={`${hdrSelect} t-text-2 cursor-default select-none`}>
+                {([myProfile.first_name, myProfile.last_name].filter(Boolean).join(' ')) || (user?.username ?? '—')}
+              </span>
+            )
+          ) : (
+            <select value={header.employeeId} onChange={e => setHeaderField('employeeId', e.target.value)} className={hdrSelect}>
+              <option value="">—</option>
+              {employees.map(emp =>
+                <option key={emp.employee_id} value={emp.employee_id}>
+                  {emp.first_name} {emp.last_name}
+                </option>
+              )}
+            </select>
+          )}
         </div>
+        {/* Inline error — cashiering mode but no employee linked */}
+        {cashieringMode && (myProfileError || myProfile?.employee_id == null) && (
+          <div className="flex flex-col gap-1 self-center">
+            <span className="text-[10px] text-red-400 max-w-xs leading-snug">
+              {myProfileError
+                ? (myProfileErrorObj instanceof Error ? myProfileErrorObj.message : 'Could not load your profile.')
+                : 'Your account is not linked to an employee record. You cannot post sales in cashiering mode. Contact your administrator.'}
+            </span>
+          </div>
+        )}
 
         {/* Customer search */}
         <div className="flex flex-col gap-1 relative">
@@ -1347,6 +1447,7 @@ export default function Workstation() {
                 <span className="text-[10px] uppercase tracking-widest t-text-3">Total Tendered</span>
                 <span className="tabular-nums font-medium t-text-1">₱{fmt(totalTendered)}</span>
               </div>
+
               {tenderDelta > 0.005 && (
                 <div className="flex justify-between text-sm font-bold text-emerald-400">
                   <span className="text-[10px] uppercase tracking-widest self-center">Change Due</span>

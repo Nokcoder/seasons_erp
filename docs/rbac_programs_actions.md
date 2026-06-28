@@ -52,6 +52,7 @@ program_key: sales_workstation | display_name: POS Workstation | sort_order: 1
   process_returns         Process Returns
   process_blind_returns   Process Blind Returns
   apply_discount          Apply Discount
+  cashiering_mode         Cashiering Mode
 
 program_key: sales_ledger | display_name: Sales Ledger | sort_order: 2
   view_sales_ledger       View Sales Ledger

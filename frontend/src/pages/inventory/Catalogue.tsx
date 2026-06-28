@@ -207,8 +207,9 @@ function sortRows(rows: Row[], sort: SortState | null): Row[] {
 
 export default function Catalogue() {
   const navigate   = useNavigate()
-  const { user }   = useAuth()
-  const canEdit    = user?.roles.some(r => CAN_EDIT.includes(r)) ?? false
+  const { user }          = useAuth()
+  const canEdit           = user?.roles.some(r => CAN_EDIT.includes(r)) ?? false
+  const canManageProducts = user?.programs.includes('manage_products') ?? false
   const [searchParams, setSearchParams] = useSearchParams()
 
   // ── React Query ─────────────────────────────────────────────────────────────
@@ -612,9 +613,9 @@ export default function Catalogue() {
               )}
               {!loading && pagedRows.map(({ product: p, variant: v, isBundle }) => {
                 const isDefault = v.is_default
-                const rowCls = `border-b t-border hover:t-bg-surface cursor-pointer transition-colors group${isDefault ? '' : ' opacity-80'}`
+                const rowCls = `border-b t-border ${canManageProducts ? 'hover:t-bg-surface cursor-pointer' : ''} transition-colors group${isDefault ? '' : ' opacity-80'}`
                 return (
-                  <tr key={v.variant_id} onClick={() => navigate(`/inventory/${v.variant_id}`)} className={rowCls}>
+                  <tr key={v.variant_id} onClick={canManageProducts ? () => navigate(`/inventory/${v.variant_id}`) : undefined} className={rowCls}>
                     {/* Brand — max-w + truncate prevents layout shifts from long names */}
                     <td className={`px-3 py-2 whitespace-nowrap max-w-[180px] truncate ${isDefault ? 't-text-1 font-semibold' : 't-text-2'}`}>
                       {p.brand}
@@ -672,10 +673,12 @@ export default function Catalogue() {
                       )
                     })}
                     <td className="px-3 py-2 whitespace-nowrap w-20" onClick={e => e.stopPropagation()}>
-                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => navigate(`/inventory/${v.variant_id}`)} className="text-[10px] text-blue-400 hover:underline">View</button>
-                        {canEdit && <button onClick={() => navigate(`/inventory/${v.variant_id}`)} className="text-[10px] t-text-3 hover:t-text-1">Edit</button>}
-                      </div>
+                      {canManageProducts && (
+                        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button onClick={() => navigate(`/inventory/${v.variant_id}`)} className="text-[10px] text-blue-400 hover:underline">View</button>
+                          {canEdit && <button onClick={() => navigate(`/inventory/${v.variant_id}`)} className="text-[10px] t-text-3 hover:t-text-1">Edit</button>}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )

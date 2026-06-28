@@ -524,6 +524,7 @@ def get_customer_ar_ledger_view(
     date_to:     Optional[date] = None,
     status:      List[str] = Query(default=[]),
     search:      Optional[str] = None,
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
     limit:       int = 200,
     cursor:      int = 0,
     db: Session = Depends(get_db),
@@ -604,6 +605,7 @@ def get_customer_ar_ledger_view(
 def get_ar_ledger_sale_payments(
     sale_id: int,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
 ):
     """Return all payments applied to a specific sale, ordered by payment date."""
     rows = (
@@ -705,6 +707,7 @@ def get_customer_ar_ledger(
     date_to: Optional[datetime] = None,
     reason: Optional[str] = None,
     limit: int = 50,
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
     cursor: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
@@ -731,6 +734,7 @@ def get_customer_sales(
     limit: int = 10,
     cursor: Optional[int] = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_customers")),
 ):
     _load_customer(customer_id, db)
     q = (
@@ -759,6 +763,7 @@ def get_customer_payments(
     limit: int = 10,
     cursor: Optional[int] = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_customers")),
 ):
     _load_customer(customer_id, db)
     q = (
@@ -859,6 +864,7 @@ def get_ar_ledger(
     limit: int = 100,
     cursor: Optional[int] = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
 ):
     """Global AR ledger across all customers."""
     q = (
@@ -889,8 +895,8 @@ def get_pdc_vault(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     as_of: Optional[date] = Query(None),
+    _actor: AuthUser = Depends(require_permission("view_pdc_vault")),
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
     """PDC vault — list and summarise post-dated cheques by maturity."""
     today = as_of or _ph_today()
@@ -1811,12 +1817,13 @@ def post_draft(
         subtotal - sale.discount_amount + (sale.tax_amount or Decimal("0")),
     )
 
-    # ── 8. receipt_grand_total / audit_variance ────────────────────────────────
-    # receipt_grand_total = grand_total (auditor workstation; cashier page reserved)
-    sale.receipt_grand_total = grand_total
-    # audit_variance = total tendered - grand_total (positive = change given, negative = shortfall)
-    total_tendered_raw = sum(t.amount for t in payload.tenders)
-    audit_variance = total_tendered_raw - grand_total
+    # ── 8. audit_variance ─────────────────────────────────────────────────────
+    total_tendered = sum(t.amount for t in payload.tenders)
+    sale.receipt_grand_total = None
+    if payload.is_cashiering_mode:
+        audit_variance = None
+    else:
+        audit_variance = total_tendered - grand_total
 
     # ── 9. AR ledger: SALE event ───────────────────────────────────────────────
     if customer:
@@ -2035,6 +2042,7 @@ def list_sales(
     cursor: Optional[int] = None,
     limit: int = 100,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_sales_ledger")),
 ):
     """List sales, newest first. Returns paginated results with summary totals.
 
@@ -2190,7 +2198,11 @@ def list_sales(
 
 
 @router.get("/{sale_id}/items", response_model=List[schemas.SaleItemOut])
-def get_sale_items(sale_id: int, db: Session = Depends(get_db)):
+def get_sale_items(
+    sale_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_sales_ledger")),
+):
     """Return raw sale_items rows, one per FIFO layer split.
 
     For audit and COGS queries. Includes full cost snapshot per split row.
@@ -2500,6 +2512,7 @@ def list_payments(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
     """List customer payments, newest first. Filter by customer_id and/or date range."""
     q = (
@@ -2517,7 +2530,11 @@ def list_payments(
 
 
 @router.get("/payments/{payment_id}", response_model=schemas.CustomerPaymentOut)
-def get_payment(payment_id: int, db: Session = Depends(get_db)):
+def get_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("manage_customers")),
+):
     """Get a single payment with its application detail."""
     return _load_payment(payment_id, db)
 
@@ -2934,6 +2951,7 @@ def list_returns(
     limit:       int = 100,
     cursor:      Optional[int] = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_returns")),
 ):
     """List sales returns, newest first."""
     q = (
@@ -2976,13 +2994,21 @@ def list_returns(
 
 
 @router.get("/returns/{return_id}", response_model=schemas.SalesReturnOut)
-def get_return(return_id: int, db: Session = Depends(get_db)):
+def get_return(
+    return_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_returns")),
+):
     """Get a single sales return with its line items and exchange_sale_pid."""
     return _load_return(return_id, db)
 
 
 @router.get("/sale/{sale_id}/items-for-return", response_model=List[schemas.SaleItemOut])
-def get_items_for_return(sale_id: int, db: Session = Depends(get_db)):
+def get_items_for_return(
+    sale_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("process_returns")),
+):
     """Return collapsed sale_items for a Posted sale, annotated with already-returned quantities.
 
     Used by the Return New page to pre-populate the return form.
@@ -3035,6 +3061,7 @@ def get_sales_summary(
     customer_id:    Optional[int]      = None,
     status:         Optional[str]      = None,
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_sales_ledger")),
 ):
     """Compute revenue and profit dashboard metrics for the filtered sale scope."""
     status_list = [status] if status else ["Posted"]

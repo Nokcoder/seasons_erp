@@ -59,6 +59,7 @@ export interface EmployeeOut {
   first_name: string
   last_name: string
   is_active: boolean
+  has_user: boolean
 }
 
 export interface EmployeeCreate {
@@ -73,8 +74,9 @@ export interface EmployeePatch {
 }
 
 export interface UserCreate {
-  first_name: string
-  last_name: string
+  employee_id?: number
+  first_name?: string
+  last_name?: string
   username: string
   password: string
   role_names?: string[]
@@ -106,9 +108,26 @@ export interface RolePermissions {
   action_keys:  string[]
 }
 
+export interface UserProgramsOut {
+  program_keys: string[]
+  action_keys:  string[]
+}
+
+export interface UserProfileOut {
+  user_id:     number
+  username:    string
+  employee_id: number | null
+  first_name:  string | null
+  last_name:   string | null
+}
+
 export const authApi = {
   login: (username: string, password: string) =>
     request<LoginResponse>('POST', '/auth/login', { username, password }, false),
+  me: {
+    programs: () => get<UserProgramsOut>('/auth/me/programs'),
+    profile:  () => get<UserProfileOut>('/auth/me'),
+  },
   users: {
     allActive: () => get<UserEntry[]>('/auth/users/all'),       // active only — for dropdowns
     all:       () => get<UserEntry[]>('/auth/users'),           // active + inactive — for Settings
@@ -121,8 +140,9 @@ export const authApi = {
       patch<void>(`/auth/users/${id}/password`, { new_password }),
   },
   employees: {
-    list:   ()                              => get<EmployeeOut[]>('/auth/employees'),
-    create: (payload: EmployeeCreate)       => post<EmployeeOut>('/auth/employees', payload),
+    list:        ()                              => get<EmployeeOut[]>('/auth/employees'),
+    withoutUser: ()                              => get<EmployeeOut[]>('/auth/employees/without-user'),
+    create: (payload: EmployeeCreate)            => post<EmployeeOut>('/auth/employees', payload),
     patch:  (id: number, payload: EmployeePatch) =>
       patch<EmployeeOut>(`/auth/employees/${id}`, payload),
   },
@@ -285,7 +305,7 @@ export interface SaleTenderIn {
 
 export interface SalePostRequest {
   tenders: SaleTenderIn[]
-  receipt_grand_total?: number | null
+  is_cashiering_mode?: boolean
   transaction_date?: string
 }
 

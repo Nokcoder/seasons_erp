@@ -13,3 +13,5 @@ class InventoryPolicyOut(BaseModel):
 
 class InventoryPolicyPatch(BaseModel):
     allow_negative_stock: bool
+
+

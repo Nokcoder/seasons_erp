@@ -444,25 +444,35 @@ function PaymentModesTab() {
 function EmployeesUsersTab() {
   const qc = useQueryClient()
   const { data: employees = [], isLoading: empLoading } = useQuery({ queryKey: qk.employees(), queryFn: authApi.employees.list, ...stale.auth })
-  const { data: users = [],     isLoading: usrLoading } = useQuery({ queryKey: qk.users(),     queryFn: authApi.users.all,        ...stale.auth })
-  const { data: roles = [] }                            = useQuery({ queryKey: qk.roles(),     queryFn: authApi.roles.list,       ...stale.auth })
+  const { data: users = [],     isLoading: usrLoading } = useQuery({ queryKey: qk.users(),     queryFn: authApi.users.all,    ...stale.auth })
+  const { data: roles = [] }                            = useQuery({ queryKey: qk.roles(),     queryFn: authApi.roles.list,   ...stale.auth })
   const isLoading = empLoading || usrLoading
 
-  const [loading, setLoading] = useState(false)
-  const [showEmpForm,  setShowEmpForm]  = useState(false)
-  const [editingEmp,   setEditingEmp]   = useState<EmployeeOut | null>(null)
-  const [empForm,      setEmpForm]      = useState({ first_name: '', last_name: '' })
-  const [showUserForm, setShowUserForm] = useState(false)
-  const [editingUser,  setEditingUser]  = useState<UserEntry | null>(null)
-  const [userForm,     setUserForm]     = useState({ first_name: '', last_name: '', username: '', password: '' })
-  const [userRoles,    setUserRoles]    = useState<string[]>([])
+  const [loading,        setLoading]        = useState(false)
+  const [showEmpForm,    setShowEmpForm]    = useState(false)
+  const [editingEmp,     setEditingEmp]     = useState<EmployeeOut | null>(null)
+  const [empForm,        setEmpForm]        = useState({ first_name: '', last_name: '' })
+  const [showUserForm,   setShowUserForm]   = useState(false)
+  const [editingUser,    setEditingUser]    = useState<UserEntry | null>(null)
+  const [preselectedEmp, setPreselectedEmp] = useState<EmployeeOut | null>(null)
+  const [userForm,       setUserForm]       = useState({ employee_id: null as number | null, username: '', password: '' })
+  const [userRoles,      setUserRoles]      = useState<string[]>([])
   const [changingPwdFor, setChangingPwdFor] = useState<number | null>(null)
-  const [newPwd, setNewPwd] = useState('')
+  const [newPwd,         setNewPwd]         = useState('')
+
+  // Only fetched when the Create Login / Add User form is open for a new user
+  const { data: empWithoutUser = [] } = useQuery({
+    queryKey: qk.employeesWithoutUser(),
+    queryFn:  authApi.employees.withoutUser,
+    enabled:  showUserForm && !editingUser,
+    ...stale.auth,
+  })
 
   async function invalidateAll() {
     await Promise.all([
       qc.invalidateQueries({ queryKey: qk.employees() }),
       qc.invalidateQueries({ queryKey: qk.users() }),
+      qc.invalidateQueries({ queryKey: qk.employeesWithoutUser() }),
     ])
   }
 
@@ -483,21 +493,42 @@ function EmployeesUsersTab() {
       if (editingUser) {
         await authApi.users.setRoles(editingUser.user_id, userRoles)
       } else {
-        if (!userForm.username.trim() || !userForm.password.trim() || !userForm.first_name.trim() || !userForm.last_name.trim()) { setLoading(false); return }
-        await authApi.users.register({ first_name: userForm.first_name.trim(), last_name: userForm.last_name.trim(), username: userForm.username.trim(), password: userForm.password, role_names: userRoles })
+        if (!userForm.employee_id || !userForm.username.trim() || !userForm.password.trim()) { setLoading(false); return }
+        await authApi.users.register({
+          employee_id: userForm.employee_id,
+          username:    userForm.username.trim(),
+          password:    userForm.password,
+          role_names:  userRoles,
+        })
       }
-      await invalidateAll(); setShowUserForm(false)
+      await invalidateAll(); setShowUserForm(false); setPreselectedEmp(null)
     } catch (e: unknown) { alert(e instanceof Error ? e.message : 'Failed') }
     finally { setLoading(false) }
   }
 
-  function openEditUser(u: UserEntry) { setEditingUser(u); setUserRoles(u.roles.map(r => r.role_name)); setShowUserForm(true) }
+  function openEditUser(u: UserEntry) {
+    setEditingUser(u); setUserRoles(u.roles.map(r => r.role_name)); setShowUserForm(true)
+  }
+
+  function openCreateLogin(emp: EmployeeOut) {
+    setEditingUser(null)
+    setPreselectedEmp(emp)
+    setUserForm({ employee_id: emp.employee_id, username: '', password: '' })
+    setUserRoles([])
+    setShowUserForm(true)
+  }
 
   async function savePassword() {
     if (!changingPwdFor || !newPwd.trim()) return
     setLoading(true)
     try { await authApi.users.changePassword(changingPwdFor, newPwd.trim()); setChangingPwdFor(null); setNewPwd('') }
     finally { setLoading(false) }
+  }
+
+  function userFormTitle() {
+    if (editingUser) return `Edit User: ${editingUser.username}`
+    if (preselectedEmp) return `Create Login — ${preselectedEmp.first_name} ${preselectedEmp.last_name}`
+    return 'New User'
   }
 
   return (
@@ -515,17 +546,25 @@ function EmployeesUsersTab() {
           </InlineForm>
         )}
         <table className="w-full text-sm">
-          <TableHead cols={['First Name', 'Last Name', 'Status', 'Actions']} />
+          <TableHead cols={['First Name', 'Last Name', 'Login', 'Status', 'Actions']} />
           <tbody>
-            {isLoading && <SkeletonTable rows={4} cols={4} />}
+            {isLoading && <SkeletonTable rows={4} cols={5} />}
             {employees.map(e => (
               <tr key={e.employee_id} className={`border-b t-border ${!e.is_active ? 'opacity-50' : ''}`}>
                 <td className="px-3 py-2 t-text-1">{e.first_name}</td>
                 <td className="px-3 py-2 t-text-1">{e.last_name}</td>
+                <td className="px-3 py-2">
+                  {e.has_user
+                    ? <span className="text-[10px] font-medium rounded px-1.5 py-0.5 bg-emerald-950 text-[var(--success)]">Has Login</span>
+                    : <span className="text-[10px] t-text-4 italic">No login</span>}
+                </td>
                 <td className="px-3 py-2"><StatusBadge active={e.is_active} /></td>
                 <td className="px-3 py-2">
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
                     <Btn onClick={() => { setEditingEmp(e); setEmpForm({ first_name: e.first_name, last_name: e.last_name }); setShowEmpForm(true) }}>Edit</Btn>
+                    {!e.has_user && e.is_active && (
+                      <Btn variant="primary" onClick={() => openCreateLogin(e)}>Create Login</Btn>
+                    )}
                     {e.is_active
                       ? <Btn variant="danger" onClick={async () => { await authApi.employees.patch(e.employee_id, { is_active: false }); invalidateAll() }}>Deactivate</Btn>
                       : <Btn variant="ghost" onClick={async () => { await authApi.employees.patch(e.employee_id, { is_active: true }); invalidateAll() }}>Reactivate</Btn>}
@@ -541,14 +580,39 @@ function EmployeesUsersTab() {
       <div>
         <SubHead title="Users" />
         <div className="flex justify-end mb-3">
-          <Btn variant="primary" onClick={() => { setEditingUser(null); setUserForm({ first_name: '', last_name: '', username: '', password: '' }); setUserRoles([]); setShowUserForm(true) }}>+ Add User</Btn>
+          <Btn variant="primary" onClick={() => {
+            setEditingUser(null); setPreselectedEmp(null)
+            setUserForm({ employee_id: null, username: '', password: '' })
+            setUserRoles([]); setShowUserForm(true)
+          }}>+ Add User</Btn>
         </div>
         {showUserForm && (
-          <InlineForm title={editingUser ? `Edit User: ${editingUser.username}` : 'New User (creates linked employee)'} onCancel={() => setShowUserForm(false)} onSave={saveUser} loading={loading}>
+          <InlineForm title={userFormTitle()} onCancel={() => { setShowUserForm(false); setPreselectedEmp(null) }} onSave={saveUser} loading={loading}>
             {!editingUser && (
               <>
-                <div><label className={labelCls}>First Name *</label><input className={inputCls} value={userForm.first_name} onChange={e => setUserForm(f => ({ ...f, first_name: e.target.value }))} /></div>
-                <div><label className={labelCls}>Last Name *</label><input className={inputCls} value={userForm.last_name} onChange={e => setUserForm(f => ({ ...f, last_name: e.target.value }))} /></div>
+                {/* Employee selector — locked if opened from "Create Login" button */}
+                <div className="col-span-full sm:col-span-2">
+                  <label className={labelCls}>Employee *</label>
+                  {preselectedEmp ? (
+                    <div className="t-bg-input border t-border-strong rounded px-2 py-1.5 text-sm t-text-2">
+                      {preselectedEmp.first_name} {preselectedEmp.last_name}
+                      <span className="ml-2 text-[10px] t-text-4">(pre-selected)</span>
+                    </div>
+                  ) : (
+                    <select
+                      className={selectCls}
+                      value={userForm.employee_id ?? ''}
+                      onChange={e => setUserForm(f => ({ ...f, employee_id: e.target.value ? Number(e.target.value) : null }))}
+                    >
+                      <option value="">— select employee —</option>
+                      {empWithoutUser.map(emp => (
+                        <option key={emp.employee_id} value={emp.employee_id}>
+                          {emp.last_name}, {emp.first_name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
                 <div><label className={labelCls}>Username *</label><input className={inputCls} value={userForm.username} onChange={e => setUserForm(f => ({ ...f, username: e.target.value }))} /></div>
                 <div><label className={labelCls}>Temp Password *</label><input type="password" className={inputCls} value={userForm.password} onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))} /></div>
               </>

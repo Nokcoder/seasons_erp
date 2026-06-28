@@ -49,3 +49,4 @@ def update_inventory_policy(
     db.commit()
     db.refresh(row)
     return _read_policy(db)
+
