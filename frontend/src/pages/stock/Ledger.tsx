@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
+import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { inventoryApi, stockApi, type LedgerEntry } from '../../services/api'
@@ -55,7 +56,8 @@ function DocIdCell({ entry }: { entry: LedgerEntry }) {
 
 export default function Ledger() {
   // ── all state declared before any derived values ──────────────────────────
-  const [search,    setSearch]    = useState('')
+  const [searchTags, setSearchTags] = useState<string[]>([])
+  const [liveInput,  setLiveInput]  = useState('')
   const [locFilter, setLocFilter] = useState('')
   const [reasons,   setReasons]   = useState<Set<Reason>>(new Set())
   const [dateFrom,  setDateFrom]  = useState('')
@@ -105,16 +107,22 @@ export default function Ledger() {
     setReasons(prev => { const n = new Set(prev); n.has(r) ? n.delete(r) : n.add(r); return n })
   }
 
-  // Client-side keyword filter (brand, PID, variant name, ref ID)
+  // Client-side keyword filter (brand, PID, variant name, ref ID) — AND across tags
   const filtered = useMemo(() => {
-    if (!search.trim()) return allEntries
-    return allEntries.filter((e: LedgerEntry) =>
-      normalize(e.variant?.product?.brand ?? '').includes(normalize(search)) ||
-      normalize(e.variant?.variant_name   ?? '').includes(normalize(search)) ||
-      normalize(e.variant?.PID            ?? '').includes(normalize(search)) ||
-      normalize(e.reference_id            ?? '').includes(normalize(search))
-    )
-  }, [allEntries, search])
+    const allTerms = [
+      ...searchTags.map(t => normalize(t)),
+      ...(liveInput.trim() ? [normalize(liveInput)] : []),
+    ]
+    if (allTerms.length === 0) return allEntries
+    return allEntries.filter((e: LedgerEntry) => {
+      const hit = (term: string) =>
+        normalize(e.variant?.product?.brand ?? '').includes(term) ||
+        normalize(e.variant?.variant_name   ?? '').includes(term) ||
+        normalize(e.variant?.PID            ?? '').includes(term) ||
+        normalize(e.reference_id            ?? '').includes(term)
+      return allTerms.every(hit)
+    })
+  }, [allEntries, searchTags, liveInput])
 
   function handleExport() {
     const rows = filtered.map(e => ({
@@ -143,8 +151,18 @@ export default function Ledger() {
       {/* filters */}
       <div className="flex items-center gap-2 mb-3 flex-wrap">
         <h1 className="text-sm font-semibold t-text-1">Inventory Ledger</h1>
-        <input className={`${inputCls} w-44`} placeholder="Brand, PID, ref ID…"
-          value={search} onChange={e => setSearch(e.target.value)} />
+        <div>
+          <label className="block text-[10px] font-medium uppercase tracking-widest t-text-3 mb-1">
+            Keyword
+          </label>
+          <KeywordSearch
+            tags={searchTags}
+            onTagsChange={setSearchTags}
+            onPartialChange={setLiveInput}
+            placeholder="Brand, PID, ref ID…"
+            className="w-56"
+          />
+        </div>
         <select className={`${inputCls} w-36`} value={locFilter} onChange={e => setLocFilter(e.target.value)}>
           <option value="">All locations</option>
           {allLocs.map(l => (
@@ -182,16 +200,16 @@ export default function Ledger() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b t-border">
-              {['Date','Brand','Variant Name','PID','Location','Reason','Qty Change','Document ID'].map(h => (
+              {['Date','Brand','Variant Name','PID','SKU','Location','Reason','Qty Change','Document ID'].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {isLoading && <SkeletonTable rows={10} cols={8} />}
+            {isLoading && <SkeletonTable rows={10} cols={9} />}
             {!isLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-12 text-center t-text-4">
+                <td colSpan={9} className="px-3 py-12 text-center t-text-4">
                   No ledger entries match the current filters.
                 </td>
               </tr>
@@ -202,6 +220,7 @@ export default function Ledger() {
                 <td className="px-3 py-2 t-text-3">{e.variant?.product?.brand ?? '—'}</td>
                 <td className="px-3 py-2 t-text-2">{e.variant?.variant_name ?? '—'}</td>
                 <td className="px-3 py-2 font-mono t-text-4">{e.variant?.PID ?? '—'}</td>
+                <td className="px-3 py-2 font-mono t-text-3 whitespace-nowrap">{e.variant?.sku ?? '—'}</td>
                 <td className="px-3 py-2 t-text-3">{e.location?.location_name ?? '—'}</td>
                 <td className={`px-3 py-2 font-medium ${REASON_COLORS[e.reason] ?? 't-text-3'}`}>{e.reason}</td>
                 <td className={`px-3 py-2 tabular-nums font-medium ${Number(e.qty_change) > 0 ? 'text-emerald-400' : 'text-red-400'}`}>

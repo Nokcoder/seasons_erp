@@ -24,6 +24,7 @@ interface SessionHeader {
   originSaleId: string   // '' = none; stores numeric sale_id as string
   salePID:      string
   pidMode:      'auto' | 'manual'
+  receiptNo:    string
 }
 
 interface CartItem {
@@ -224,6 +225,7 @@ export default function Workstation() {
     originSaleId: '',
     salePID:      'SALE-00001',
     pidMode:      'auto',
+    receiptNo:    '',
   })
 
   // ── customer search ───────────────────────────────────────────────────────
@@ -627,6 +629,7 @@ export default function Workstation() {
         registerId: draft.register_id  ? String(draft.register_id)  : h.registerId,
         employeeId: draft.employee_id  ? String(draft.employee_id)  : h.employeeId,
         shiftId:    draft.shift_id     ? String(draft.shift_id)     : h.shiftId,
+        receiptNo:  draft.receipt_no   ?? '',
       }))
       setTrayOpen(false)
     } catch (e: unknown) {
@@ -649,6 +652,7 @@ export default function Workstation() {
       customer_id:        header.customerId    ? parseInt(header.customerId)    : null,
       origin_sale_id:     header.originSaleId  ? parseInt(header.originSaleId)  : null,
       sale_pid:           header.salePID       || undefined,
+      receipt_no:         header.receiptNo     || undefined,
       idempotency_key:    txnKey,
       cart_discount_pct:  cartDiscPct  ? parseFloat(cartDiscPct)  : null,
       cart_discount_flat: cartDiscFlat ? parseFloat(cartDiscFlat) : null,
@@ -671,6 +675,7 @@ export default function Workstation() {
       employee_id:        resolveEmployeeId(),
       shift_id:           header.shiftId    ? parseInt(header.shiftId)    : null,
       customer_id:        header.customerId ? parseInt(header.customerId) : null,
+      receipt_no:         header.receiptNo  || undefined,
       cart_discount_pct:  cartDiscPct  ? parseFloat(cartDiscPct)  : null,
       cart_discount_flat: cartDiscFlat ? parseFloat(cartDiscFlat) : null,
       discount_amount:    cartDiscountAmt,
@@ -784,6 +789,7 @@ export default function Workstation() {
       setActiveDraftId(null)
       setTxnKey(uid())
       clearOriginSale()
+      setHeaderField('receiptNo', '')
       await refreshDrafts()
       flash(`Posted ${posted.sale_pid ?? 'sale'} successfully.`)
     } catch (e: unknown) {
@@ -804,6 +810,7 @@ export default function Workstation() {
       setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' }])
       setActiveDraftId(null)
       clearOriginSale()
+      setHeaderField('receiptNo', '')
       await refreshDrafts()
       flash('Draft voided.')
     } catch (e: unknown) {
@@ -821,6 +828,7 @@ export default function Workstation() {
     setActiveDraftId(null)
     setTxnKey(uid())
     clearOriginSale()
+    setHeaderField('receiptNo', '')
     setError('')
   }
 
@@ -1065,9 +1073,9 @@ export default function Workstation() {
           )}
         </div>
 
-        {/* Receipt No. */}
+        {/* Sale PID */}
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Receipt No.</span>
+          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Sale PID</span>
           <div className="flex items-center gap-1.5">
             <input
               type="text"
@@ -1083,6 +1091,18 @@ export default function Workstation() {
               {header.pidMode === 'auto' ? 'Auto' : 'Manual'}
             </button>
           </div>
+        </div>
+
+        {/* Receipt No. */}
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Receipt No.</span>
+          <input
+            type="text"
+            value={header.receiptNo}
+            onChange={e => setHeaderField('receiptNo', e.target.value)}
+            placeholder="optional"
+            className={`${hdrInput} w-28`}
+          />
         </div>
       </div>
 

@@ -165,6 +165,7 @@ class Sale(Base):
     voided_at       = Column(DateTime(timezone=True), nullable=True)
     void_reason     = Column(String(500), nullable=True)
     idempotency_key = Column(String(255), unique=True, nullable=True)
+    receipt_no      = Column(String(100), nullable=True)
 
     location   = relationship("Location")
     register   = relationship("CashRegister")

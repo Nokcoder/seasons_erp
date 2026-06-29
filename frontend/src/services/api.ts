@@ -276,6 +276,7 @@ export interface SaleCreate {
   shift_id?: number | null
   sale_pid?: string
   idempotency_key?: string
+  receipt_no?: string | null
   cart_discount_pct?: number | null
   cart_discount_flat?: number | null
   discount_amount?: number
@@ -287,6 +288,7 @@ export interface SalePatch {
   register_id?: number | null
   employee_id?: number | null
   shift_id?: number | null
+  receipt_no?: string | null
   cart_discount_pct?: number | null
   cart_discount_flat?: number | null
   discount_amount?: number | null
@@ -454,6 +456,7 @@ export interface SaleOut {
   voided_at: string | null
   void_reason: string | null
   idempotency_key: string | null
+  receipt_no: string | null
   non_merchandise_revenue: number
   items: SaleItemOut[]
   payments: CustomerPaymentOut[]
@@ -1259,7 +1262,7 @@ export interface LedgerEntry {
   reference_id: string | null
   occurred_at: string
   document_pid: string | null
-  variant?: { variant_id: number; PID: string; variant_name: string
+  variant?: { variant_id: number; PID: string; variant_name: string; sku?: string | null
               product?: { brand: string } }
   location?: { location_id: number; location_name: string }
 }

@@ -1269,6 +1269,7 @@ def create_draft(
         shift_id=payload.shift_id,
         origin_sale_id=payload.origin_sale_id,
         sale_pid=payload.sale_pid,
+        receipt_no=payload.receipt_no,
         cart_discount_pct=payload.cart_discount_pct,
         cart_discount_flat=payload.cart_discount_flat,
         discount_amount=payload.discount_amount,
@@ -1350,6 +1351,8 @@ def update_draft(
         sale.employee_id = payload.employee_id
     if payload.shift_id is not None:
         sale.shift_id = payload.shift_id
+    if payload.receipt_no is not None:
+        sale.receipt_no = payload.receipt_no
     if payload.cart_discount_pct is not None:
         sale.cart_discount_pct = payload.cart_discount_pct
     if payload.cart_discount_flat is not None:
@@ -1539,6 +1542,7 @@ def _collapse_items(items: list) -> list[schemas.SaleItemOut]:
                     variant_id=first.variant.variant_id,
                     PID=first.variant.PID,
                     variant_name=first.variant.variant_name,
+                    sku=first.variant.sku,
                     product_brand=(first.variant.product.brand if getattr(first.variant, "product", None) else None),
                     product_type=(first.variant.product.product_type if getattr(first.variant, "product", None) else None),
                 )

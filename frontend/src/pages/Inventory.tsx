@@ -12,7 +12,7 @@ function Loading() {
 
 function RequireManageProducts({ children }: { children: ReactNode }) {
   const { user } = useAuth()
-  if (!user?.programs.includes('manage_products')) {
+  if (!user?.action_keys.includes('manage_products')) {
     return <Navigate to="/inventory" replace />
   }
   return <>{children}</>

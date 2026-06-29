@@ -7,11 +7,11 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { normalize } from '../../lib/normalize'
 import {
-  salesApi, inventoryApi, authApi,
+  salesApi, inventoryApi, authApi, catalogueApi,
   type SaleOut, type SaleItemOut, type CustomerPaymentOut, type Location,
   type EmployeeOut, type Shift, type CashRegister, type CustomerOut,
   type PaymentMode, type SalesSummaryResponse, type CollectionEntry, type SalesReturnOut,
-  type SalesReturnItemOut,
+  type SalesReturnItemOut, type InvProduct,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
 
@@ -428,7 +428,8 @@ export default function SalesLedger() {
     for (const s of sales) {
       const isRet = s.row_type === 'return'
       const hdr = {
-        PID: s.sale_pid ?? '', Date: fmtDateOnly(s.transaction_date),
+        PID: s.sale_pid ?? '', 'Receipt No.': s.receipt_no || '',
+        Date: fmtDateOnly(s.transaction_date),
         Cashier: cashierName(s), Customer: customerName(s), 'Row Type': s.status,
       }
       if (!isRet) {
@@ -462,9 +463,67 @@ export default function SalesLedger() {
       }
     }
 
+    // Sheet 3 — Sales by Variant
+    // Fetch primary supplier per variant from the catalogue
+    const variantSupplierMap = new Map<number, string>()
+    try {
+      const products = await catalogueApi.products.list() as InvProduct[]
+      for (const p of products) {
+        for (const v of p.variants) {
+          const primary = v.suppliers.find(sv => sv.is_primary) ?? v.suppliers[0]
+          if (primary) variantSupplierMap.set(v.variant_id, primary.supplier.supplier_name)
+        }
+      }
+    } catch { /* supplier column left blank on fetch failure */ }
+
+    // Aggregate qty / most-recent price+cost per variant; exclude voids and return rows
+    const variantAgg = new Map<number, {
+      PID: string; sku: string | null; brand: string; variantName: string
+      qty: number; unitPrice: number; unitCost: number | null; latestDate: string | null
+    }>()
+    for (const s of sales) {
+      if (s.status === 'Voided' || s.row_type === 'return') continue
+      for (const item of s.items as SaleItemOut[]) {
+        const vid  = item.variant_id
+        const date = s.transaction_date
+        const agg  = variantAgg.get(vid)
+        const isNewer = !agg?.latestDate || (date != null && date > agg.latestDate)
+        if (!agg) {
+          variantAgg.set(vid, {
+            PID: item.variant?.PID ?? '', sku: item.variant?.sku ?? null,
+            brand: item.variant?.product_brand ?? '',
+            variantName: item.variant?.variant_name ?? '',
+            qty: Number(item.quantity),
+            unitPrice: Number(item.unit_price),
+            unitCost: item.net_unit_cost != null ? Number(item.net_unit_cost) : null,
+            latestDate: date,
+          })
+        } else {
+          agg.qty += Number(item.quantity)
+          if (isNewer) {
+            agg.unitPrice  = Number(item.unit_price)
+            agg.unitCost   = item.net_unit_cost != null ? Number(item.net_unit_cost) : null
+            agg.latestDate = date
+          }
+        }
+      }
+    }
+    const variantRows = Array.from(variantAgg.entries())
+      .sort(([, a], [, b]) => {
+        const bc = a.brand.localeCompare(b.brand, undefined, { sensitivity: 'base' })
+        return bc !== 0 ? bc : a.variantName.localeCompare(b.variantName, undefined, { sensitivity: 'base' })
+      })
+      .map(([vid, v]) => ({
+        PID: v.PID, SKU: v.sku ?? '', Brand: v.brand, 'Variant Name': v.variantName,
+        Supplier: variantSupplierMap.get(vid) ?? '',
+        Qty: v.qty, 'Unit Price': v.unitPrice,
+        'Unit Cost': v.unitCost ?? '',
+      }))
+
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tenderRows), 'Tender Breakdown')
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemRows),   'Line Item Detail')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tenderRows),  'Tender Breakdown')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemRows),    'Line Item Detail')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(variantRows), 'Sales by Variant')
     const from = dateFrom || 'all'
     const to   = dateTo   || 'all'
     XLSX.writeFile(wb, `sales_export_${from}_${to}.xlsx`)

@@ -1,5 +1,105 @@
 # Changelog
 
+## 2026-06-30 — Fix: SKU blank in Sheet 3 and Receipt No. not restored when loading draft
+
+### Fix A — SKU blank in Sheet 3 of Sales Ledger XLSX
+
+**Root cause:** `_collapse_items` in `backend/sales/router.py` builds `VariantRefOut` explicitly field-by-field, but never passed `sku`. `VariantRefOut.sku` is `Optional[str] = None`, so every collapsed item returned `sku = None` regardless of what the variant had in the catalogue. `Variant.sku` is a direct DB column already eager-loaded by the existing `selectinload(SaleItem.variant)` — it was simply never forwarded.
+
+**Fix:** Added `sku=first.variant.sku` to the `VariantRefOut(...)` constructor inside `_collapse_items`.
+
+### Fix B — Receipt No. not restored when loading a saved draft
+
+**Root cause:** `loadDraft` in `frontend/src/pages/sales/Workstation.tsx` restores `registerId`, `employeeId`, and `shiftId` from the draft's `SaleOut` response, but not `receiptNo`. The `GET /sales/drafts/{id}` endpoint returns `receipt_no` in the `SaleOut`, but it was never written back to `header.receiptNo`. A cashier loading a draft that had a receipt number would see a blank "Receipt No." field.
+
+**Fix:** Added `receiptNo: draft.receipt_no ?? ''` to the `setHeader` spread inside `loadDraft`.
+
+---
+
+## 2026-06-30 — Feature: cashier-entered Receipt No. on sales
+
+Adds an optional free-text `receipt_no` field (VARCHAR 100, nullable) that cashiers can enter manually on each transaction. Fully wired through backend, workstation, detail view, and XLSX export.
+
+### Backend
+
+- **`backend/alembic/versions/o5p6q7r8s9t0_add_receipt_no_to_sales.py`** — New migration (`down_revision = n4o5p6q7r8s9`): `ALTER TABLE sales.sales ADD COLUMN IF NOT EXISTS receipt_no VARCHAR(100) NULL`.
+- **`backend/sales/models.py`** — `Sale`: added `receipt_no = Column(String(100), nullable=True)`.
+- **`backend/sales/schemas.py`** — Added `receipt_no: Optional[str] = None` to `SaleCreate`, `SalePatch`, and `SaleOut`.
+- **`backend/sales/router.py`** — `create_draft` passes `receipt_no=payload.receipt_no` to the `Sale` constructor. `update_draft` conditionally sets `sale.receipt_no = payload.receipt_no` when the field is provided.
+
+### Frontend — API types
+
+- **`frontend/src/services/api.ts`** — Added `receipt_no?: string | null` to `SaleCreate`, `SalePatch`, and `SaleOut`.
+
+### Frontend — Workstation
+
+- **`frontend/src/pages/sales/Workstation.tsx`**:
+  - `SessionHeader` interface: added `receiptNo: string`.
+  - Initial state: `receiptNo: ''`.
+  - Renamed existing "Receipt No." header label to "Sale PID" (it was wired to `salePID`, the auto-generated system ID with Auto/Manual toggle — the label was incorrect).
+  - Added a new "Receipt No." `<input>` for `header.receiptNo` (optional, placeholder "optional").
+  - `buildDraftPayload` and `buildPatchPayload`: include `receipt_no: header.receiptNo || undefined`.
+  - `handlePost` success, `handleVoidDraft` success, and `handleNew`: reset `receiptNo` to `''`.
+
+### Frontend — Sale Detail
+
+- **`frontend/src/pages/sales/SaleDetail.tsx`** — Added `{sale.receipt_no && ...}` to the header grid — shows "Receipt No." label and monospace value only when non-null.
+
+### Frontend — XLSX export (Sheet 2 + Sheet 3)
+
+- **`frontend/src/pages/sales/SalesLedger.tsx`**:
+  - Sheet 2 "Line Item Detail": added `'Receipt No.': s.receipt_no || ''` column after Sale PID, before Date.
+  - Sheet 3 "Sales by Variant": `variantAgg` map type and first-insert block updated to carry `sku: string | null`; `variantRows .map()` now emits an `SKU` column after PID, before Brand.
+
+---
+
+## 2026-06-29 — Enhancement: Inventory Ledger — KeywordSearch + SKU column
+
+Replaced the plain search `<input>` on `/stock/ledger` with the `<KeywordSearch>` multi-tag component (AND logic). Added a SKU column to the table. No backend files changed.
+
+### `frontend/src/pages/stock/Ledger.tsx`
+
+- Replaced `search` / `setSearch` state with `searchTags: string[]` + `liveInput: string`.
+- Filter `useMemo`: all committed tags AND the live partial input must all match (brand, variant name, PID, reference ID).
+- Replaced the plain `<input>` with `<KeywordSearch tags={searchTags} onTagsChange={setSearchTags} onPartialChange={setLiveInput} />`.
+- Added "SKU" column header and `e.variant?.sku ?? '—'` cell after PID.
+- Updated `colSpan` and `SkeletonTable cols` from 8 to 9.
+
+### `frontend/src/services/api.ts`
+
+- `LedgerEntry.variant`: added `sku?: string | null` to satisfy TypeScript.
+
+---
+
+## 2026-06-29 — Enhancement: Sales Ledger XLSX — Sheet 3 "Sales by Variant"
+
+Added a third sheet to the Sales Ledger XLSX export aggregating sold quantities and most-recent price/cost per variant. Voided sales and return rows are excluded. No backend changes.
+
+### `frontend/src/pages/sales/SalesLedger.tsx`
+
+- Added `catalogueApi` and `InvProduct` imports.
+- Inside `handleExport`: fetches the product catalogue to build a `Map<variant_id, supplierName>` from primary supplier assignments (fails silently if the fetch errors — supplier column left blank).
+- Aggregates line items into `variantAgg: Map<number, { PID, sku, brand, variantName, qty, unitPrice, unitCost, latestDate }>` per unique `variant_id`; unit price and cost are taken from the most recent transaction date.
+- `variantRows` sorted by Brand then Variant Name.
+- Columns: PID | SKU | Brand | Variant Name | Supplier | Qty | Unit Price | Unit Cost.
+- Appended as Sheet 3 "Sales by Variant" via `XLSX.utils.book_append_sheet`.
+
+---
+
+## 2026-06-29 — Fix: manage_products access control checking wrong field
+
+Users with the `manage_products` action assigned were blocked from the product detail page and catalogue because two guards were checking `user.programs` (module-level keys) instead of `user.action_keys` (granular action keys). `manage_products` is an action, not a program.
+
+### `frontend/src/pages/Inventory.tsx`
+
+- `RequireManageProducts`: `user?.programs.includes('manage_products')` → `user?.action_keys.includes('manage_products')`.
+
+### `frontend/src/pages/inventory/Catalogue.tsx`
+
+- `canManageProducts` derived value: same fix — `.programs.includes` → `.action_keys.includes`.
+
+---
+
 ## 2026-06-28 — Fix: audit_variance not calculated when receipt_grand_total is null
 
 **`backend/sales/router.py`** — `post_draft` was unconditionally setting `sale.receipt_grand_total = grand_total` and calculating `audit_variance = total_tendered_raw - grand_total` (which captured the change-due amount) on every posted sale regardless of mode. The frontend correctly sends `receipt_grand_total: null` in cashiering mode, but the backend was ignoring `payload.receipt_grand_total` entirely.

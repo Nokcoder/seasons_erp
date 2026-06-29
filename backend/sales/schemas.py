@@ -249,6 +249,7 @@ class SaleCreate(BaseModel):
     origin_sale_id: Optional[int] = None
     sale_pid: Optional[str] = None
     idempotency_key: Optional[str] = None
+    receipt_no: Optional[str] = None
     cart_discount_pct: Optional[Decimal] = None
     cart_discount_flat: Optional[Decimal] = None
     discount_amount: Decimal = Decimal("0")
@@ -263,6 +264,7 @@ class SalePatch(BaseModel):
     customer_id: Optional[int] = None
     employee_id: Optional[int] = None
     shift_id: Optional[int] = None
+    receipt_no: Optional[str] = None
     cart_discount_pct: Optional[Decimal] = None
     cart_discount_flat: Optional[Decimal] = None
     discount_amount: Optional[Decimal] = None
@@ -298,6 +300,7 @@ class SaleOut(BaseModel):
     voided_at: Optional[datetime] = None
     void_reason: Optional[str] = None
     idempotency_key: Optional[str] = None
+    receipt_no: Optional[str] = None
     non_merchandise_revenue: Decimal = Decimal("0")
     items: List[SaleItemOut] = []
     payments: List["CustomerPaymentOut"] = []

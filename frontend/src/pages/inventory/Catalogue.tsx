@@ -209,7 +209,7 @@ export default function Catalogue() {
   const navigate   = useNavigate()
   const { user }          = useAuth()
   const canEdit           = user?.roles.some(r => CAN_EDIT.includes(r)) ?? false
-  const canManageProducts = user?.programs.includes('manage_products') ?? false
+  const canManageProducts = user?.action_keys.includes('manage_products') ?? false
   const [searchParams, setSearchParams] = useSearchParams()
 
   // ── React Query ─────────────────────────────────────────────────────────────

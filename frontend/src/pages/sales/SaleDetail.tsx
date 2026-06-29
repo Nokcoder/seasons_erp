@@ -264,6 +264,7 @@ export default function SaleDetail() {
               {variance != null && variance !== 0 ? (variance > 0 ? `+₱${fmt(variance)}` : `-₱${fmt(Math.abs(variance))}`) : '—'}
             </p>
           </div>
+          {sale.receipt_no && <div><label className={lCls}>Receipt No.</label><p className={`${vCls} font-mono`}>{sale.receipt_no}</p></div>}
           {sale.created_by_user_id && <div><label className={lCls}>Created By (User)</label><p className={vCls}>{sale.created_by_user_id}</p></div>}
           {sale.void_reason && (
             <div className="col-span-2"><label className={lCls}>Void Reason</label><p className="text-sm text-red-400">{sale.void_reason}</p></div>
