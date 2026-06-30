@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import { inventoryApi, stockApi, type LedgerEntry } from '../../services/api'
 import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
@@ -55,6 +56,8 @@ function DocIdCell({ entry }: { entry: LedgerEntry }) {
 }
 
 export default function Ledger() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_stock_ledger') ?? false
   // ── all state declared before any derived values ──────────────────────────
   const [searchTags, setSearchTags] = useState<string[]>([])
   const [liveInput,  setLiveInput]  = useState('')
@@ -119,6 +122,7 @@ export default function Ledger() {
         normalize(e.variant?.product?.brand ?? '').includes(term) ||
         normalize(e.variant?.variant_name   ?? '').includes(term) ||
         normalize(e.variant?.PID            ?? '').includes(term) ||
+        normalize(e.variant?.sku            ?? '').includes(term) ||
         normalize(e.reference_id            ?? '').includes(term)
       return allTerms.every(hit)
     })
@@ -171,9 +175,11 @@ export default function Ledger() {
         </select>
         <input type="date" className={`${inputCls} w-36`} value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
         <input type="date" className={`${inputCls} w-36`} value={dateTo}   onChange={e => setDateTo(e.target.value)} />
-        <button onClick={handleExport} className="px-2.5 py-1 text-xs border t-border rounded t-text-3 hover:t-border-strong ml-auto">
-          Export XLSX
-        </button>
+        {canExport && (
+          <button onClick={handleExport} className="px-2.5 py-1 text-xs border t-border rounded t-text-3 hover:t-border-strong ml-auto">
+            Export XLSX
+          </button>
+        )}
       </div>
 
       {/* reason pills */}

@@ -5,6 +5,7 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { catalogueApi, type InvSupplier, type SupplierCreate, type SupplierUpdate } from '../../services/api'
 import { normalize } from '../../lib/normalize'
+import { useAuth } from '../../context/AuthContext'
 
 // ── Status toggle ─────────────────────────────────────────────────────────────
 type StatusFilter = 'Active' | 'Inactive' | 'Both'
@@ -93,6 +94,8 @@ function SupplierModal({ mode, initial, onClose, onSave, saving, error }: ModalP
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Suppliers() {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_suppliers') ?? false
   const qc = useQueryClient()
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('Active')
@@ -196,12 +199,14 @@ export default function Suppliers() {
           ))}
         </div>
 
-        <button
-          onClick={() => { setModalError(''); setModal({ mode: 'create' }) }}
-          className="ml-auto px-3 py-1.5 text-xs rounded text-white font-medium"
-          style={{ backgroundColor: 'var(--accent)' }}>
-          + New Supplier
-        </button>
+        {canManage && (
+          <button
+            onClick={() => { setModalError(''); setModal({ mode: 'create' }) }}
+            className="ml-auto px-3 py-1.5 text-xs rounded text-white font-medium"
+            style={{ backgroundColor: 'var(--accent)' }}>
+            + New Supplier
+          </button>
+        )}
       </div>
 
       {/* table */}
@@ -238,18 +243,20 @@ export default function Suppliers() {
                   </span>
                 </td>
                 <td className="px-3 py-2 flex gap-3">
-                  {!s.is_deleted && (
+                  {canManage && !s.is_deleted && (
                     <button
                       onClick={() => { setModalError(''); setModal({ mode: 'edit', supplier: s }) }}
                       className="text-[10px] text-blue-400 hover:underline">
                       Edit
                     </button>
                   )}
-                  <button
-                    onClick={() => handleToggleStatus(s)}
-                    className={`text-[10px] hover:underline ${s.is_deleted ? 'text-emerald-400' : 't-text-4 hover:text-red-400'}`}>
-                    {s.is_deleted ? 'Reactivate' : 'Deactivate'}
-                  </button>
+                  {canManage && (
+                    <button
+                      onClick={() => handleToggleStatus(s)}
+                      className={`text-[10px] hover:underline ${s.is_deleted ? 'text-emerald-400' : 't-text-4 hover:text-red-400'}`}>
+                      {s.is_deleted ? 'Reactivate' : 'Deactivate'}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

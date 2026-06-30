@@ -6,6 +6,7 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { salesApi } from '../../services/api'
 import { normalize } from '../../lib/normalize'
+import { useAuth } from '../../context/AuthContext'
 import * as XLSX from 'xlsx'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -25,6 +26,8 @@ type SortKey = 'customer_name' | 'outstanding_balance' | 'terms_days'
 type SortDir = 'asc' | 'desc'
 
 export default function CustomerList() {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_customers') ?? false
   const navigate = useNavigate()
   const qc = useQueryClient()
 
@@ -160,11 +163,13 @@ export default function CustomerList() {
               className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
               Export XLSX
             </button>
-            <button onClick={() => setShowNew(true)}
-              className="px-3 py-1 text-xs rounded text-white font-medium"
-              style={{ backgroundColor: 'var(--accent)' }}>
-              + New Customer
-            </button>
+            {canManage && (
+              <button onClick={() => setShowNew(true)}
+                className="px-3 py-1 text-xs rounded text-white font-medium"
+                style={{ backgroundColor: 'var(--accent)' }}>
+                + New Customer
+              </button>
+            )}
           </div>
         </div>
 

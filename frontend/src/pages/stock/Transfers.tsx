@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Transfer } from '../../services/api'
+import { useAuth } from '../../context/AuthContext'
 import KeywordSearch from '../../components/KeywordSearch'
 import * as XLSX from 'xlsx'
 import { normalize } from '../../lib/normalize'
@@ -24,6 +25,8 @@ function transferSkus(t: Transfer): string {
 }
 
 export default function Transfers() {
+  const { user } = useAuth()
+  const canCreate = user?.action_keys?.includes('create_transfer') ?? false
   const navigate = useNavigate()
   const { data: transfers = [], isLoading, isFetching } = useQuery({
     queryKey: qk.transfers(),
@@ -122,11 +125,13 @@ export default function Transfers() {
           <button onClick={handleExport} className="px-2.5 py-1 text-xs border t-border rounded t-text-3 hover:t-border-strong">
             Export XLSX
           </button>
-          <button onClick={() => navigate('/stock/transfers/new')}
-            className="px-3 py-1 text-xs rounded text-white font-medium"
-            style={{ backgroundColor: 'var(--accent)' }}>
-            + New Transfer
-          </button>
+          {canCreate && (
+            <button onClick={() => navigate('/stock/transfers/new')}
+              className="px-3 py-1 text-xs rounded text-white font-medium"
+              style={{ backgroundColor: 'var(--accent)' }}>
+              + New Transfer
+            </button>
+          )}
         </div>
       </div>
 

@@ -124,9 +124,9 @@ All financial data and stock levels belong to **ProductVariant**, not Product. P
 2. The frontend stores the token at `localStorage.erp_token` and user object at `localStorage.erp_user` (see `AuthContext.tsx`)
 3. `AuthContext` provides `{ user, token, login, logout }` globally via React Context
 
-**Important**: `auth/dependencies.py`'s `get_current_user()` is a **stub** — it grabs the first user from the DB instead of decoding the JWT. This means backend route permission guards (`require_permission(...)`) do not actually validate the caller's JWT. Real token enforcement only exists in the login endpoint.
+`auth/dependencies.py`'s `get_current_user()` is a **real JWT decoder** — it validates the Bearer token using the `SECRET_KEY` env var, extracts `user_id` from the payload, queries `auth.users` for an active matching record, and raises HTTP 401 on any failure. `require_permission(action_key)` wraps `get_current_user` and additionally resolves the user's full action set from `auth.role_actions`, raising HTTP 403 if the required action is absent. All guarded endpoints enforce both authentication and authorisation on every request.
 
-The `SECRET_KEY` in `auth/router.py` is hardcoded and must be changed before production use.
+`SECRET_KEY` is read from the environment variable of the same name (`dependencies.py:11`). The backend refuses to start if it is unset. Set it in `.env` before running.
 
 ### Frontend Architecture
 

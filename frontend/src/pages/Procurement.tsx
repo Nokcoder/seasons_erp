@@ -17,6 +17,14 @@ export default function Procurement() {
 
   const defaultTab = hasSuppliers ? 'suppliers' : 'purchase-orders'
 
+  if (!hasSuppliers && !hasPOs) {
+    return (
+      <div className="min-h-full t-bg-base flex items-center justify-center">
+        <p className="text-sm t-text-4">You do not have access to any sections in this module.</p>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-full t-bg-base flex flex-col">
       <div className="flex items-center gap-1 px-4 py-2 border-b t-border t-bg-surface shrink-0">

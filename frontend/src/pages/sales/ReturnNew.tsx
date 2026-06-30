@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   salesApi, inventoryApi,
   type SaleItemOut, type SaleOut, type Location, type CustomerOut,
@@ -49,6 +50,8 @@ interface ReturnLine {
 }
 
 export default function ReturnNew() {
+  const { user }      = useAuth()
+  const canBlind      = user?.action_keys?.includes('process_blind_returns') ?? false
   const navigate      = useNavigate()
   const [sp]          = useSearchParams()
   const qc            = useQueryClient()
@@ -357,7 +360,7 @@ export default function ReturnNew() {
       )}
 
       {/* blind return: item search */}
-      {!saleId && (
+      {!saleId && canBlind && (
         <div className="t-bg-surface border t-border rounded-lg p-4 mb-5">
           <p className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mb-2">Add Items</p>
           <div className="relative max-w-sm">
@@ -380,6 +383,11 @@ export default function ReturnNew() {
               </div>
             )}
           </div>
+        </div>
+      )}
+      {!saleId && !canBlind && (
+        <div className="t-bg-elevated border t-border rounded-lg p-4 mb-5 text-xs text-red-400">
+          You do not have permission to process blind returns. To process a return, open it from the original sale.
         </div>
       )}
 

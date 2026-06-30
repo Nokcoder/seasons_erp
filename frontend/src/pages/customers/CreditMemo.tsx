@@ -1,5 +1,4 @@
 import { useState, useMemo } from 'react'
-import { Navigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
@@ -7,8 +6,6 @@ import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
 import { salesApi, settingsApi, authApi, type CreditMemoListOut, type CreditMemoOut, type UserEntry } from '../../services/api'
 import * as XLSX from 'xlsx'
-
-const ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']
 
 const STATUS_OPTIONS = ['ACTIVE', 'REDEEMED', 'EXPIRED', 'CANCELLED']
 
@@ -72,9 +69,6 @@ function isExpiringSoon(memo: CreditMemoListOut): boolean {
 
 export default function CreditMemo() {
   const { user } = useAuth()
-  if (!user || !user.roles.some(r => ALLOWED_ROLES.includes(r))) {
-    return <Navigate to="/customers" replace />
-  }
 
   const qc = useQueryClient()
   const today = todayLocal()
@@ -326,9 +320,11 @@ export default function CreditMemo() {
           <span className="text-xs t-text-3">{memos.length} memo{memos.length !== 1 ? 's' : ''}</span>
           <div className="ml-auto flex gap-2">
             <button className={btnGhost} onClick={handleExport}>Export XLSX</button>
-            <button className={btnPrimary} onClick={() => setIsIssueOpen(true)}>
-              Issue Credit Memo
-            </button>
+            {user?.action_keys?.includes('issue_credit_memo') && (
+              <button className={btnPrimary} onClick={() => setIsIssueOpen(true)}>
+                Issue Credit Memo
+              </button>
+            )}
           </div>
         </div>
 
@@ -384,7 +380,7 @@ export default function CreditMemo() {
                       <td className={tdCls}>{m.issued_by_name ?? '—'}</td>
                       <td className={tdCls}>{m.return_pid ?? '—'}</td>
                       <td className={tdCls} onClick={e => e.stopPropagation()}>
-                        {m.status === 'ACTIVE' && (
+                        {m.status === 'ACTIVE' && user?.action_keys?.includes('cancel_credit_memo') && (
                           <button className={btnDanger}
                             onClick={() => setCancelConfirmId(m.memo_id)}>
                             Cancel
@@ -524,7 +520,7 @@ export default function CreditMemo() {
                       Print
                     </button>
                   )}
-                  {detailData.status === 'ACTIVE' && (
+                  {detailData.status === 'ACTIVE' && user?.action_keys?.includes('cancel_credit_memo') && (
                     <button className={btnDanger} onClick={() => setCancelConfirmId(detailData.memo_id)}>
                       Cancel Memo
                     </button>

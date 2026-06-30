@@ -165,6 +165,10 @@ export default function Workstation() {
     myPrograms?.action_keys?.includes('cashiering_mode')
     ?? (user?.action_keys?.includes('cashiering_mode') ?? false)
 
+  const canDiscount =
+    myPrograms?.action_keys?.includes('apply_discount')
+    ?? (user?.action_keys?.includes('apply_discount') ?? false)
+
   // Latches to true the first time cashieringMode resolves to true and never
   // reverts. Used to guard sticky writes so they fire reliably once confirmed,
   // regardless of myPrograms re-fetches or the loading window.
@@ -676,9 +680,9 @@ export default function Workstation() {
       shift_id:           header.shiftId    ? parseInt(header.shiftId)    : null,
       customer_id:        header.customerId ? parseInt(header.customerId) : null,
       receipt_no:         header.receiptNo  || undefined,
-      cart_discount_pct:  cartDiscPct  ? parseFloat(cartDiscPct)  : null,
-      cart_discount_flat: cartDiscFlat ? parseFloat(cartDiscFlat) : null,
-      discount_amount:    cartDiscountAmt,
+      cart_discount_pct:  canDiscount && cartDiscPct  ? parseFloat(cartDiscPct)  : null,
+      cart_discount_flat: canDiscount && cartDiscFlat ? parseFloat(cartDiscFlat) : null,
+      discount_amount:    canDiscount ? cartDiscountAmt : null,
       items: cartItems.map(i => ({
         variant_id:    i.variant_id,
         quantity:      parseFloat(i.qty)        || 1,
@@ -1246,44 +1250,56 @@ export default function Workstation() {
 
                     {/* Disc % with fill handle */}
                     <td className="px-3 py-1.5">
-                      <div className="flex items-center gap-1">
-                        <input type="number" min="0" max="100" step="0.01"
-                          value={item.disc_pct}
-                          onChange={e => updateCartItem(item.localId, 'disc_pct', e.target.value)}
-                          onFocus={onFocusSelect}
-                          className={cellInput}
-                          placeholder="—" />
-                        {item.disc_pct !== '' && (
-                          <span
-                            className="shrink-0 cursor-ns-resize select-none t-text-4 hover:t-text-1 text-[10px] transition-colors"
-                            title="Single-click: fill next row · Double-click: fill all below · Drag: fill to row"
-                            onClick={() => handleFillSingleClick('pct', rowIdx, item.disc_pct)}
-                            onDoubleClick={e => { e.preventDefault(); handleFillDoubleClick('pct', rowIdx, item.disc_pct) }}
-                            onMouseDown={e => { e.preventDefault(); handleDragStart('pct', rowIdx, item.disc_pct) }}
-                          >▼</span>
-                        )}
-                      </div>
+                      {canDiscount ? (
+                        <div className="flex items-center gap-1">
+                          <input type="number" min="0" max="100" step="0.01"
+                            value={item.disc_pct}
+                            onChange={e => updateCartItem(item.localId, 'disc_pct', e.target.value)}
+                            onFocus={onFocusSelect}
+                            className={cellInput}
+                            placeholder="—" />
+                          {item.disc_pct !== '' && (
+                            <span
+                              className="shrink-0 cursor-ns-resize select-none t-text-4 hover:t-text-1 text-[10px] transition-colors"
+                              title="Single-click: fill next row · Double-click: fill all below · Drag: fill to row"
+                              onClick={() => handleFillSingleClick('pct', rowIdx, item.disc_pct)}
+                              onDoubleClick={e => { e.preventDefault(); handleFillDoubleClick('pct', rowIdx, item.disc_pct) }}
+                              onMouseDown={e => { e.preventDefault(); handleDragStart('pct', rowIdx, item.disc_pct) }}
+                            >▼</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs tabular-nums t-text-3 block text-right">
+                          {item.disc_pct || '—'}
+                        </span>
+                      )}
                     </td>
 
                     {/* Disc ₱ with fill handle */}
                     <td className="px-3 py-1.5">
-                      <div className="flex items-center gap-1">
-                        <input type="number" min="0" step="0.01"
-                          value={item.disc_flat}
-                          onChange={e => updateCartItem(item.localId, 'disc_flat', e.target.value)}
-                          onFocus={onFocusSelect}
-                          className={cellInput}
-                          placeholder="—" />
-                        {item.disc_flat !== '' && (
-                          <span
-                            className="shrink-0 cursor-ns-resize select-none t-text-4 hover:t-text-1 text-[10px] transition-colors"
-                            title="Single-click: fill next row · Double-click: fill all below · Drag: fill to row"
-                            onClick={() => handleFillSingleClick('flat', rowIdx, item.disc_flat)}
-                            onDoubleClick={e => { e.preventDefault(); handleFillDoubleClick('flat', rowIdx, item.disc_flat) }}
-                            onMouseDown={e => { e.preventDefault(); handleDragStart('flat', rowIdx, item.disc_flat) }}
-                          >▼</span>
-                        )}
-                      </div>
+                      {canDiscount ? (
+                        <div className="flex items-center gap-1">
+                          <input type="number" min="0" step="0.01"
+                            value={item.disc_flat}
+                            onChange={e => updateCartItem(item.localId, 'disc_flat', e.target.value)}
+                            onFocus={onFocusSelect}
+                            className={cellInput}
+                            placeholder="—" />
+                          {item.disc_flat !== '' && (
+                            <span
+                              className="shrink-0 cursor-ns-resize select-none t-text-4 hover:t-text-1 text-[10px] transition-colors"
+                              title="Single-click: fill next row · Double-click: fill all below · Drag: fill to row"
+                              onClick={() => handleFillSingleClick('flat', rowIdx, item.disc_flat)}
+                              onDoubleClick={e => { e.preventDefault(); handleFillDoubleClick('flat', rowIdx, item.disc_flat) }}
+                              onMouseDown={e => { e.preventDefault(); handleDragStart('flat', rowIdx, item.disc_flat) }}
+                            >▼</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs tabular-nums t-text-3 block text-right">
+                          {item.disc_flat || '—'}
+                        </span>
+                      )}
                     </td>
 
                     {/* Line total */}
@@ -1311,26 +1327,30 @@ export default function Workstation() {
                 <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Subtotal</span>
                 <span className="tabular-nums t-text-2">₱{fmt(subtotal)}</span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Cart Disc %</span>
-                <input type="number" min="0" max="100" step="0.01"
-                  value={cartDiscPct}
-                  onChange={e => setCartDiscPct(e.target.value)}
-                  onFocus={onFocusSelect}
-                  placeholder="0"
-                  className="w-20 text-right text-xs t-bg-input border t-border-strong rounded px-2 py-0.5 t-text-1
-                             focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Cart Disc ₱</span>
-                <input type="number" min="0" step="0.01"
-                  value={cartDiscFlat}
-                  onChange={e => setCartDiscFlat(e.target.value)}
-                  onFocus={onFocusSelect}
-                  placeholder="0.00"
-                  className="w-20 text-right text-xs t-bg-input border t-border-strong rounded px-2 py-0.5 t-text-1
-                             focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
-              </div>
+              {canDiscount && (
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Cart Disc %</span>
+                  <input type="number" min="0" max="100" step="0.01"
+                    value={cartDiscPct}
+                    onChange={e => setCartDiscPct(e.target.value)}
+                    onFocus={onFocusSelect}
+                    placeholder="0"
+                    className="w-20 text-right text-xs t-bg-input border t-border-strong rounded px-2 py-0.5 t-text-1
+                               focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                </div>
+              )}
+              {canDiscount && (
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Cart Disc ₱</span>
+                  <input type="number" min="0" step="0.01"
+                    value={cartDiscFlat}
+                    onChange={e => setCartDiscFlat(e.target.value)}
+                    onFocus={onFocusSelect}
+                    placeholder="0.00"
+                    className="w-20 text-right text-xs t-bg-input border t-border-strong rounded px-2 py-0.5 t-text-1
+                               focus:outline-none focus:ring-1 ring-[var(--accent)] transition-colors" />
+                </div>
+              )}
               {cartDiscountAmt > 0 && (
                 <div className="flex justify-between text-[10px] uppercase tracking-widest">
                   <span className="t-text-3">Discount</span>

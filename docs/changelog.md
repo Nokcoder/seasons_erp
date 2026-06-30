@@ -1,5 +1,191 @@
 # Changelog
 
+## 2026-07-01 — Enhancement: Add SKU to Inventory Ledger keyword search
+
+Added variant SKU as a searchable field in the keyword search bar on the Inventory Ledger page (`frontend/src/pages/stock/Ledger.tsx`). A single line added to the `hit` function inside the `filtered` useMemo:
+
+```
+normalize(e.variant?.sku ?? '').includes(term)
+```
+
+Searched fields are now: brand, variant name, PID, **SKU**, reference ID. AND logic across tags is unchanged. No other files modified. `npx tsc --noEmit` passes with zero errors.
+
+---
+
+## 2026-07-01 — Security: Retire manage_import as standalone gate; per-type Import access
+
+`manage_import` was a coarse master switch that either unlocked or blocked the entire Import Hub. It is now retired from the frontend. Import tab and section visibility are derived from the data-type action_keys the user already holds.
+
+### `frontend/src/pages/Settings.tsx`
+
+- `TAB_ACTION_MAP` type changed from `Record<TabName, string>` to `Partial<Record<TabName, string>>`. The `'Import'` entry removed.
+- Added `IMPORT_DATA_ACTIONS = ['manage_products', 'manage_suppliers', 'manage_customers']`.
+- `visibleTabs` filter updated: Import tab appears if the user holds **any** of the three data-type actions; all other tabs continue to use `TAB_ACTION_MAP` as before.
+
+### `frontend/src/pages/settings/ImportHub.tsx`
+
+- Added `actionKey` field to `EntityConfig` interface and filled for all 5 entities.
+- Added `useAuth` import and `useMemo`.
+- `ImportHub` component now filters `ENTITIES` to `visibleEntities` based on `user?.action_keys`.
+- If `visibleEntities` is empty: renders "You do not have permission to import any data type. Contact your administrator." — no sidebar, no form.
+- Sidebar shows only the entities the user can access. Active entity falls back to first visible if the stored `activeId` is no longer in scope.
+
+### Backend — no changes
+
+All 5 import endpoints in `backend/import_hub/router.py` were already correctly gated per type:
+
+| Import type (ENTITY id) | Backend permission |
+|---|---|
+| `customers` | `manage_customers` |
+| `suppliers` | `manage_suppliers` |
+| `stock-balances` | `manage_products` |
+| `variant-prices` | `manage_products` |
+| `variant-costs` | `manage_products` |
+
+### Data cleanup — deferred
+
+`manage_import` remains in `auth.actions` and any existing `auth.role_actions` rows to avoid silent breakage. It is no longer referenced anywhere in the frontend. A follow-up pass will remove it from seed data and clean up orphaned rows.
+
+---
+
+## 2026-07-01 — Feature: AP Ledger export
+
+Added an "Export XLSX" button to `frontend/src/pages/ap/ApLedger.tsx`, closing the `export_ap_ledger` action_key which previously had a seed entry but no corresponding frontend feature.
+
+- Added `useAuth` import and `import * as XLSX from 'xlsx'`.
+- `canExport` gates the button: `user?.action_keys?.includes('export_ap_ledger')`.
+- `handleExport()` maps currently loaded `rows` (filtered by selected supplier) to columns: Date, Supplier, Reason, Amount Change (raw signed number), Reference. Writes `ap_ledger_<date>.xlsx`.
+- Button is disabled when `rows.length === 0`, consistent with `SupplierAging.tsx`.
+- No backend changes — export is fully client-side, same as all other export features in the app.
+
+---
+
+## 2026-07-01 — Security: export action_key enforcement and process_blind_returns frontend gate
+
+Closed nine ungated action_keys. All exports are generated client-side (no backend export endpoints exist); gating is applied entirely on the frontend by hiding buttons. `process_blind_returns` backend enforcement was already in place; this change adds the matching frontend gate.
+
+### Frontend — export button gating
+
+Each file received a `useAuth` import (where not already present), a `canExport` boolean derived from `user?.action_keys?.includes(...)`, and the Export XLSX button wrapped in `{canExport && ...}`.
+
+| Action key | File | Notes |
+|---|---|---|
+| `export_sales` | `frontend/src/pages/sales/SalesLedger.tsx` | Added `useAuth` import |
+| `export_returns` | `frontend/src/pages/sales/Returns.tsx` | Added `useAuth` import |
+| `export_products` | `frontend/src/pages/inventory/Catalogue.tsx` | `useAuth` already imported; added `canExport` alongside existing `canEdit` |
+| `export_stock_ledger` | `frontend/src/pages/stock/Ledger.tsx` | Added `useAuth` import |
+| `export_ap_aging` | `frontend/src/pages/ap/SupplierAging.tsx` | Added `useAuth` import |
+| `export_customer_aging` | `frontend/src/pages/customers/CustomerAging.tsx` | `useAuth` already imported (see cleanup note below) |
+| `export_ar_ledger` | `frontend/src/pages/customers/CustomerARLedger.tsx` | Added `useAuth` import |
+
+### Frontend — `process_blind_returns` gate (`ReturnNew.tsx`)
+
+- Added `useAuth` import and `canBlind = user?.action_keys?.includes('process_blind_returns') ?? false`.
+- The blind-return catalog item picker (`{!saleId && ...}`) is now conditioned on `canBlind`. When the user lacks the action and navigates to `/sales/returns/new` without a `?sale_id`, a message is shown instead: "You do not have permission to process blind returns. To process a return, open it from the original sale."
+- Backend enforcement was already present: `_do_return()` in `backend/sales/router.py` lines 2697–2699 calls `has_action(current_user, "process_blind_returns", db)` when `is_blind`. No backend change needed.
+
+### Bonus cleanup — `CustomerAging.tsx`
+
+Removed stale hardcoded `ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']` page-level role guard and unused `Navigate` import. Program-level access is now handled by `RequireProgram` in `App.tsx` (same cleanup pattern applied to `CreditMemo.tsx` in the Tier 1 session).
+
+### No-feature finding — `export_ap_ledger`
+
+`ApLedger.tsx` has no Export XLSX button — the action key exists in seed data but has no corresponding frontend feature. **No change made.** Decision deferred: either remove the seed data entry or build the missing export button.
+
+---
+
+## 2026-07-01 — Security: Tier 2 — program-level route guards (direct URL bypass)
+
+Authenticated users could reach any module by typing the URL directly, bypassing the nav-bar visibility rules. Added a reusable `RequireProgram` guard that enforces program-level access at the route layer.
+
+### New component
+
+- **`frontend/src/components/RequireProgram.tsx`** — Accepts `program: string | string[]`. Reads `user.programs` from `useAuth()`. If the user holds none of the required programs, redirects to `/no-access`. Supports single-program and "any of" multi-program checks.
+
+### New page
+
+- **`frontend/src/pages/NoAccess.tsx`** — Renders when an authenticated user has zero programs assigned across all modules. Shows "Your account has no assigned permissions. Contact your administrator." with a Logout button. Prevents the infinite redirect loop that would otherwise occur (`/` → `/sales` → RequireProgram → `/` → …).
+
+### `frontend/src/App.tsx`
+
+- Imported `RequireProgram` (static import, not lazy).
+- Added lazy-loaded `NoAccess` page.
+- Added `<Route path="/no-access" element={<NoAccess />} />` inside `ProtectedRoute` + `AppShell`, with no guard of its own.
+- Wrapped every module route element with `RequireProgram`:
+
+| Route | Programs required (any of) |
+|---|---|
+| `/sales/*` | `sales_workstation`, `sales_ledger`, `sales_returns` |
+| `/inventory/*` | `inventory_catalogue` |
+| `/stock/*` | `stock_transfers`, `stock_receiving`, `stock_ledger` |
+| `/procurement/*` | `procurement_suppliers`, `procurement_purchase_orders` |
+| `/ap/*` | `ap_invoices`, `ap_payments`, `ap_ledger`, `ap_aging` |
+| `/customers/*` | `customers_list`, `customers_aging`, `customers_ar_ledger`, `customers_credit_memo`, `customers_pdc_vault` |
+| `/settings/*` | (unchanged — guarded inside `Settings.tsx`) |
+| `/admin/*` | `settings` |
+
+### Module pages — zero-program fallback
+
+Added early-return "no access" message to four module pages for the edge case where a user has the module's route-level program but no sub-programs (e.g., a program was revoked while the page was open in another tab):
+
+- **`frontend/src/pages/Stock.tsx`**
+- **`frontend/src/pages/Procurement.tsx`**
+- **`frontend/src/pages/AP.tsx`**
+- **`frontend/src/pages/Customers.tsx`**
+
+Each renders `"You do not have access to any sections in this module."` instead of an empty nav bar.
+
+---
+
+## 2026-07-01 — Security: Tier 1 — RBAC gaps (discount enforcement, credit memo, write-button visibility)
+
+Closed real-business-risk RBAC gaps: backend enforcement of `apply_discount`, correct action-key gates on credit memo endpoints, and frontend write-button visibility across six modules.
+
+### PART 1 — `apply_discount` enforcement
+
+**`backend/sales/router.py`**
+
+- `create_draft`: Added inline `has_action` check. If the payload contains any non-zero discount field (`cart_discount_pct`, `cart_discount_flat`, `discount_amount`, or any item-level `discount_pct`/`discount_flat`) and the caller lacks `apply_discount`, raises HTTP 403 `"You do not have permission to apply discounts."`.
+- `update_draft`: Added smarter inline check that allows preserving existing discounts on a loaded draft. Rejects only if incoming cart discount values _exceed_ the current values, or if a newly added line item carries a non-zero discount. Users without `apply_discount` can still save drafts that already had a discount applied by another user.
+
+**`frontend/src/pages/sales/Workstation.tsx`**
+
+- Added `canDiscount` boolean derived from `myPrograms?.action_keys?.includes('apply_discount')` with localStorage fallback (same live-fetch pattern as `cashieringMode`).
+- Per-line `Disc %` and `Disc ₱` table cells: when `!canDiscount`, render a read-only `<span>` instead of the `<input>` + fill handle. Existing draft discount values are still visible.
+- Cart footer `Cart Disc %` and `Cart Disc ₱` input rows: wrapped in `{canDiscount && ...}`; the computed `Discount` summary line remains visible when `cartDiscountAmt > 0`.
+- `buildPatchPayload`: when `!canDiscount`, sends `null` for all three cart discount fields so a user without the action cannot inadvertently trigger the backend discount guard when saving a draft that was discounted by someone else.
+
+### PART 2 — Credit memo enforcement
+
+**`backend/sales/router.py`**
+
+- `issue_credit_memo`: changed `require_permission("manage_customers")` → `require_permission("issue_credit_memo")`.
+- `cancel_credit_memo`: changed `require_permission("manage_customers")` → `require_permission("cancel_credit_memo")`.
+
+**`frontend/src/pages/customers/CreditMemo.tsx`**
+
+- Removed stale `ALLOWED_ROLES` constant (`['ADMIN', 'STORE_MANAGER']`) and the hardcoded role guard that redirected to `/customers`.
+- Removed the `Navigate` import that was only used for the role guard.
+- "Issue Credit Memo" button gated with `user?.action_keys?.includes('issue_credit_memo')`.
+- Table-row "Cancel" button gated with `user?.action_keys?.includes('cancel_credit_memo')`.
+- Detail-modal "Cancel Memo" button gated with `user?.action_keys?.includes('cancel_credit_memo')`.
+
+### PART 3 — Write-button visibility
+
+Added `useAuth` + action-key checks to hide write-path buttons for users who lack the corresponding permission. Backend enforcement was already in place; these changes bring the frontend into alignment.
+
+| File | Action key | Buttons gated |
+|---|---|---|
+| `frontend/src/pages/procurement/Suppliers.tsx` | `manage_suppliers` | + New Supplier, Edit, Deactivate/Reactivate |
+| `frontend/src/pages/procurement/PurchaseOrders.tsx` | `manage_purchase_orders` | + New PO |
+| `frontend/src/pages/ap/InvoiceDetail.tsx` (`MatchTab`) | `manage_invoices` | Billed Qty inline edit, Unit Cost inline edit (renders static `<span>` when denied) |
+| `frontend/src/pages/ap/ApPayments.tsx` | `manage_payments` | + New Payment |
+| `frontend/src/pages/customers/CustomerList.tsx` | `manage_customers` | + New Customer |
+| `frontend/src/pages/customers/CustomerDetail.tsx` | `manage_customers` | Edit |
+| `frontend/src/pages/stock/Transfers.tsx` | `create_transfer` | + New Transfer |
+
+---
+
 ## 2026-06-30 — Fix: SKU blank in Sheet 3 and Receipt No. not restored when loading draft
 
 ### Fix A — SKU blank in Sheet 3 of Sales Ledger XLSX

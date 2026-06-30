@@ -18,8 +18,6 @@ import {
 
 // ── access guard ─────────────────────────────────────────────────────────────
 
-const ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']
-
 // ── tab definition ────────────────────────────────────────────────────────────
 
 const TABS = [
@@ -27,6 +25,22 @@ const TABS = [
   'UOMs', 'Categories', 'Employees & Users', 'Roles', 'Appearance', 'Inventory Policy', 'Import',
 ] as const
 type TabName = typeof TABS[number]
+
+const TAB_ACTION_MAP: Partial<Record<TabName, string>> = {
+  'Locations':         'manage_locations',
+  'Shifts':            'manage_shifts',
+  'Registers':         'manage_registers',
+  'Payment Modes':     'manage_payment_modes',
+  'UOMs':              'manage_uoms',
+  'Categories':        'manage_categories',
+  'Employees & Users': 'manage_users',
+  'Roles':             'manage_roles',
+  'Appearance':        'manage_appearance',
+  'Inventory Policy':  'manage_inventory_policy',
+  // 'Import' is intentionally absent — visibility is derived from data-type actions below
+}
+
+const IMPORT_DATA_ACTIONS = ['manage_products', 'manage_suppliers', 'manage_customers'] as const
 
 // ── shared UI primitives ──────────────────────────────────────────────────────
 
@@ -1308,7 +1322,15 @@ export default function Settings() {
   const { user } = useAuth()
   const [activeTab, setActiveTab] = useState<TabName>('Locations')
 
-  if (!user || !user.roles.some(r => ALLOWED_ROLES.includes(r))) return <Navigate to="/" replace />
+  if (!user || !user.programs.includes('settings')) return <Navigate to="/" replace />
+
+  const visibleTabs = TABS.filter(tab => {
+    if (tab === 'Import') {
+      return IMPORT_DATA_ACTIONS.some(a => user?.action_keys?.includes(a))
+    }
+    const key = TAB_ACTION_MAP[tab]
+    return key != null && (user?.action_keys?.includes(key) ?? false)
+  })
 
   const tabContent: Record<TabName, ReactNode> = {
     'Locations':         <LocationsTab />,
@@ -1324,6 +1346,24 @@ export default function Settings() {
     'Import':            <Suspense fallback={<div className="p-4 text-xs t-text-4 animate-pulse">Loading…</div>}><ImportHub /></Suspense>,
   }
 
+  if (visibleTabs.length === 0) {
+    return (
+      <div className="min-h-full t-bg-base px-6 py-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="mb-5">
+            <h1 className="text-sm font-semibold t-text-1 tracking-tight">Settings</h1>
+            <p className="text-xs t-text-3 mt-0.5">System configuration for all modules.</p>
+          </div>
+          <div className="t-bg-surface border t-border rounded-lg p-5">
+            <p className="text-sm t-text-3">You do not have access to any settings sections. Contact your administrator.</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const effectiveTab = visibleTabs.includes(activeTab) ? activeTab : visibleTabs[0]!
+
   return (
     <div className="min-h-full t-bg-base px-6 py-6">
       <div className="max-w-5xl mx-auto">
@@ -1332,17 +1372,17 @@ export default function Settings() {
           <p className="text-xs t-text-3 mt-0.5">System configuration for all modules.</p>
         </div>
         <div className="flex gap-0.5 border-b t-border mb-6 overflow-x-auto">
-          {TABS.map(tab => (
+          {visibleTabs.map(tab => (
             <button key={tab} onClick={() => setActiveTab(tab)}
               className={`px-4 py-2 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
-                activeTab === tab ? 't-text-1 border-[var(--accent)]' : 't-text-3 border-transparent hover:t-text-2'
+                effectiveTab === tab ? 't-text-1 border-[var(--accent)]' : 't-text-3 border-transparent hover:t-text-2'
               }`}>
               {tab}
             </button>
           ))}
         </div>
         <div className="t-bg-surface border t-border rounded-lg p-5">
-          {tabContent[activeTab]}
+          {tabContent[effectiveTab]}
         </div>
       </div>
     </div>

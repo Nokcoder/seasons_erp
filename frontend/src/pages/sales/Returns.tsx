@@ -4,6 +4,7 @@ import { useQuery, useQueries } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   salesApi, inventoryApi,
   type SalesReturnOut, type Location, type CustomerOut,
@@ -25,6 +26,8 @@ function fmt(n: number | null | undefined) {
 }
 
 export default function Returns() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_returns') ?? false
   const navigate = useNavigate()
 
   const [search,      setSearch]      = useState('')
@@ -138,7 +141,9 @@ export default function Returns() {
             <span className="text-xs t-text-3">{returns.length} return{returns.length !== 1 ? 's' : ''}</span>
             <span className="text-xs t-text-4">· Total ₱{fmt(totalValue)}</span>
             <div className="ml-auto flex gap-2">
-              <button onClick={handleExport} className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">Export XLSX</button>
+              {canExport && (
+                <button onClick={handleExport} className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">Export XLSX</button>
+              )}
             </div>
           </div>
           <div className="flex-1 overflow-auto">

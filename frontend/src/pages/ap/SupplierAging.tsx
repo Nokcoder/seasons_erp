@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import { apApi, type SupplierAgingRow } from '../../services/api'
 import * as XLSX from 'xlsx'
 
@@ -56,6 +57,8 @@ const thCls     = 'text-left px-3 py-2 text-[10px] font-bold uppercase tracking-
 const thNumCls  = 'text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap'
 
 export default function SupplierAging() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_ap_aging') ?? false
   const navigate = useNavigate()
   const [asOf, setAsOf] = useState(todayLocal())
 
@@ -133,13 +136,15 @@ export default function SupplierAging() {
             {rows.length} supplier{rows.length !== 1 ? 's' : ''}
             {agingData && <> · as of {fmtDateDisplay(agingData.as_of)}</>}
           </span>
-          <button
-            onClick={handleExport}
-            disabled={!agingData || rows.length === 0}
-            className="ml-auto px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong disabled:opacity-40"
-          >
-            Export XLSX
-          </button>
+          {canExport && (
+            <button
+              onClick={handleExport}
+              disabled={!agingData || rows.length === 0}
+              className="ml-auto px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong disabled:opacity-40"
+            >
+              Export XLSX
+            </button>
+          )}
         </div>
 
         {/* table */}

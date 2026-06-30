@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   apApi, stockApi,
   type InvoiceAmend, type InvoiceVettingUpdate, type InvoiceCheckDraftUpdate,
@@ -83,6 +84,8 @@ const DISC_CLS: Record<string, string> = {
 // ── MatchTab ──────────────────────────────────────────────────────────────────
 
 function MatchTab({ invoiceId, isActive }: { invoiceId: number; isActive: boolean }) {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_invoices') ?? false
   const qc = useQueryClient()
 
   const matchQ = useQuery({
@@ -316,7 +319,7 @@ function MatchTab({ invoiceId, isActive }: { invoiceId: number; isActive: boolea
                               }}
                               className="w-24 px-1.5 py-0.5 text-xs rounded border t-border t-bg-surface t-text-1 focus:outline-none focus:ring-1 focus:ring-blue-500 text-right font-mono"
                             />
-                          ) : (
+                          ) : canManage ? (
                             <button
                               onClick={() => iid != null && startEdit(iid, 'billed_qty', origQty)}
                               disabled={iid == null || isPending}
@@ -325,6 +328,8 @@ function MatchTab({ invoiceId, isActive }: { invoiceId: number; isActive: boolea
                             >
                               {fmtQty(row.billed_qty)}
                             </button>
+                          ) : (
+                            <span className="font-mono text-xs">{fmtQty(row.billed_qty)}</span>
                           )}
                         </td>
 
@@ -344,7 +349,7 @@ function MatchTab({ invoiceId, isActive }: { invoiceId: number; isActive: boolea
                               }}
                               className="w-28 px-1.5 py-0.5 text-xs rounded border t-border t-bg-surface t-text-1 focus:outline-none focus:ring-1 focus:ring-blue-500 text-right font-mono"
                             />
-                          ) : (
+                          ) : canManage ? (
                             <button
                               onClick={() => iid != null && startEdit(iid, 'billed_unit_cost', origCost)}
                               disabled={iid == null || isPending}
@@ -353,6 +358,8 @@ function MatchTab({ invoiceId, isActive }: { invoiceId: number; isActive: boolea
                             >
                               {php(row.billed_unit_cost)}
                             </button>
+                          ) : (
+                            <span className="font-mono text-xs">{php(row.billed_unit_cost)}</span>
                           )}
                         </td>
 

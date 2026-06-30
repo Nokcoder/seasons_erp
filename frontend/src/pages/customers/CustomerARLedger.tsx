@@ -4,6 +4,7 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   salesApi,
   type CustomerARLedgerRowOut,
@@ -85,6 +86,8 @@ function DetailRows({ saleId }: { saleId: number }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function CustomerARLedger() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_ar_ledger') ?? false
   const navigate = useNavigate()
   const qc       = useQueryClient()
 
@@ -372,11 +375,13 @@ export default function CustomerARLedger() {
           <span className="text-xs t-text-4 self-end pb-1">
             {rows.length} row{rows.length !== 1 ? 's' : ''}
           </span>
-          <button
-            onClick={handleExport}
-            className="self-end px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
-            Export XLSX
-          </button>
+          {canExport && (
+            <button
+              onClick={handleExport}
+              className="self-end px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
+              Export XLSX
+            </button>
+          )}
         </div>
       </div>
 

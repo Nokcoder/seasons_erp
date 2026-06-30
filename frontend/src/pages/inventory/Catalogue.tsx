@@ -210,6 +210,7 @@ export default function Catalogue() {
   const { user }          = useAuth()
   const canEdit           = user?.roles.some(r => CAN_EDIT.includes(r)) ?? false
   const canManageProducts = user?.action_keys.includes('manage_products') ?? false
+  const canExport         = user?.action_keys?.includes('export_products') ?? false
   const [searchParams, setSearchParams] = useSearchParams()
 
   // ── React Query ─────────────────────────────────────────────────────────────
@@ -559,10 +560,12 @@ export default function Catalogue() {
               )}
             </div>
 
-            <button onClick={() => setExportOpen(true)}
-              className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong hover:t-text-1 transition-colors">
-              Export XLSX
-            </button>
+            {canExport && (
+              <button onClick={() => setExportOpen(true)}
+                className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong hover:t-text-1 transition-colors">
+                Export XLSX
+              </button>
+            )}
             {canEdit && (
               <button onClick={() => navigate('/inventory/new')}
                 className="px-3 py-1 text-xs rounded text-white font-medium transition-colors"

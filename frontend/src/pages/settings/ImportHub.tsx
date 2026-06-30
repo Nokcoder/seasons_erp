@@ -1,4 +1,5 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useMemo } from 'react'
+import { useAuth } from '../../context/AuthContext'
 import {
   importApi,
   type ImportDiffRow, type ImportErrorRow, type ImportPreviewResponse,
@@ -13,6 +14,7 @@ interface EntityConfig {
   description: string
   anchor:      string
   columns:     string[]
+  actionKey:   string
 }
 
 const ENTITIES: EntityConfig[] = [
@@ -22,6 +24,7 @@ const ENTITIES: EntityConfig[] = [
     description: 'Create or update customer records. Existing customers are matched by name.',
     anchor:      'customer_name',
     columns:     ['customer_name', 'credit_limit', 'terms_days'],
+    actionKey:   'manage_customers',
   },
   {
     id:          'suppliers',
@@ -29,6 +32,7 @@ const ENTITIES: EntityConfig[] = [
     description: 'Create or update supplier records. Existing suppliers are matched by supplier_code.',
     anchor:      'supplier_code',
     columns:     ['supplier_code', 'supplier_name', 'terms', 'bank_account_name', 'contact_person', 'phone', 'email', 'address'],
+    actionKey:   'manage_suppliers',
   },
   {
     id:          'stock-balances',
@@ -36,6 +40,7 @@ const ENTITIES: EntityConfig[] = [
     description: 'Set stock quantities for variants at specific locations via ADJUST ledger entries. Use for physical counts and opening balances.',
     anchor:      'PID + location_name',
     columns:     ['PID', 'location_name', 'quantity', 'notes'],
+    actionKey:   'manage_products',
   },
   {
     id:          'variant-prices',
@@ -43,6 +48,7 @@ const ENTITIES: EntityConfig[] = [
     description: 'Bulk update variant prices and promo prices. Each change is recorded in price history.',
     anchor:      'PID',
     columns:     ['PID', 'price', 'promo_price', 'clear_promo'],
+    actionKey:   'manage_products',
   },
   {
     id:          'variant-costs',
@@ -50,6 +56,7 @@ const ENTITIES: EntityConfig[] = [
     description: 'Bulk update supplier cost and discount for existing variant-supplier links. Each change is recorded in cost history.',
     anchor:      'PID + supplier_code',
     columns:     ['PID', 'supplier_code', 'gross_cost', 'supplier_discount'],
+    actionKey:   'manage_products',
   },
 ]
 
@@ -379,22 +386,42 @@ function ImportForm({ entity }: { entity: EntityConfig }) {
 // ── Import Hub ────────────────────────────────────────────────────────────────
 
 export default function ImportHub() {
+  const { user } = useAuth()
   const [activeId, setActiveId] = useState(ENTITIES[0].id)
-  const activeEntity = ENTITIES.find(e => e.id === activeId) ?? ENTITIES[0]
+
+  const visibleEntities = useMemo(
+    () => ENTITIES.filter(e => user?.action_keys?.includes(e.actionKey) ?? false),
+    [user],
+  )
+
+  if (visibleEntities.length === 0) {
+    return (
+      <div className="p-8 text-center">
+        <p className="text-sm t-text-3">
+          You do not have permission to import any data type. Contact your administrator.
+        </p>
+      </div>
+    )
+  }
+
+  const effectiveId = visibleEntities.some(e => e.id === activeId)
+    ? activeId
+    : visibleEntities[0].id
+  const activeEntity = ENTITIES.find(e => e.id === effectiveId) ?? visibleEntities[0]
 
   return (
     <div className="flex h-full min-h-[500px] overflow-hidden -mx-6 -mt-6">
       {/* sidebar */}
       <aside className="w-48 shrink-0 border-r t-border t-bg-surface flex flex-col py-3">
         <p className="text-[9px] font-semibold uppercase tracking-widest t-text-4 px-3 mb-2">Entity Type</p>
-        {ENTITIES.map(e => (
+        {visibleEntities.map(e => (
           <button key={e.id} onClick={() => setActiveId(e.id)}
             className={`w-full text-left px-3 py-2 text-xs transition-colors ${
-              activeId === e.id
+              effectiveId === e.id
                 ? 't-text-1 font-medium t-bg-elevated border-r-2'
                 : 't-text-2 hover:t-bg-elevated'
             }`}
-            style={activeId === e.id ? { borderRightColor: 'var(--accent)' } : undefined}>
+            style={effectiveId === e.id ? { borderRightColor: 'var(--accent)' } : undefined}>
             {e.label}
           </button>
         ))}
@@ -402,7 +429,7 @@ export default function ImportHub() {
 
       {/* main area */}
       <div className="flex-1 overflow-y-auto">
-        <ImportForm key={activeId} entity={activeEntity} />
+        <ImportForm key={effectiveId} entity={activeEntity} />
       </div>
     </div>
   )

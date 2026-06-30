@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import {
   apApi, catalogueApi,
   type InvoiceOut, type ApPaymentCreate, type InvoiceApplicationCreate,
@@ -262,6 +263,8 @@ function NewPaymentForm({ onClose, onSaved }: NewPaymentFormProps) {
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export default function ApPayments() {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_payments') ?? false
   const [supplierId, setSupplierId] = useState('')
   const [showForm, setShowForm]     = useState(false)
 
@@ -295,9 +298,11 @@ export default function ApPayments() {
             ))}
           </select>
         </div>
-        <button onClick={() => setShowForm(v => !v)} className={btnPrimary}>
-          {showForm ? 'Cancel' : '+ New Payment'}
-        </button>
+        {canManage && (
+          <button onClick={() => setShowForm(v => !v)} className={btnPrimary}>
+            {showForm ? 'Cancel' : '+ New Payment'}
+          </button>
+        )}
       </div>
 
       {/* new payment form */}

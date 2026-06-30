@@ -1220,6 +1220,20 @@ def create_draft(
     _actor: AuthUser = Depends(require_permission("process_sale")),
 ):
     """Create a draft sale. No stock is deducted and no ledger entries are written."""
+    if not has_action(_actor, "apply_discount", db):
+        if (
+            (payload.cart_discount_pct  or 0) != 0
+            or (payload.cart_discount_flat or 0) != 0
+            or (payload.discount_amount   or 0) != 0
+            or any(
+                (i.discount_pct or 0) != 0 or (i.discount_flat or 0) != 0
+                for i in (payload.items or [])
+            )
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to apply discounts.",
+            )
     # Idempotency: return existing sale if the key is already in use
     if payload.idempotency_key:
         existing = (
@@ -1328,6 +1342,28 @@ def update_draft(
 ):
     """Update header fields and/or replace line items on an open draft."""
     sale = _load_draft(sale_id, db)
+
+    if not has_action(_actor, "apply_discount", db):
+        cur_pct  = float(sale.cart_discount_pct  or 0)
+        cur_flat = float(sale.cart_discount_flat or 0)
+        if (
+            float(payload.cart_discount_pct  or 0) > cur_pct
+            or float(payload.cart_discount_flat or 0) > cur_flat
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to apply discounts.",
+            )
+        if payload.items is not None:
+            existing_variants = {i.variant_id for i in sale.items}
+            for pi in payload.items:
+                if pi.variant_id not in existing_variants and (
+                    (pi.discount_pct or 0) != 0 or (pi.discount_flat or 0) != 0
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You do not have permission to apply discounts.",
+                    )
 
     if payload.register_id is not None:
         if not db.query(models.CashRegister).filter(
@@ -3362,7 +3398,7 @@ def list_credit_memos(
 def issue_credit_memo(
     payload: schemas.CreditMemoCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_customers")),
+    _actor: AuthUser = Depends(require_permission("issue_credit_memo")),
 ):
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than zero")
@@ -3452,7 +3488,7 @@ def get_credit_memo(
 def cancel_credit_memo(
     memo_id: int,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_customers")),
+    _actor: AuthUser = Depends(require_permission("cancel_credit_memo")),
 ):
     memo = (
         db.query(models.CreditMemo)

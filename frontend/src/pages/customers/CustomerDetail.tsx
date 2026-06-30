@@ -4,6 +4,7 @@ import { useQueryClient, useQueries } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import { salesApi, type ArLedgerOut, type SaleOut, type CustomerPaymentOut, type PaymentMode, type SalesReturnOut } from '../../services/api'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
@@ -38,6 +39,8 @@ const PAYMENTS_PAGE  = 10
 const RETURNS_PAGE   = 10
 
 export default function CustomerDetail() {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_customers') ?? false
   const { customerId } = useParams<{ customerId: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -290,7 +293,7 @@ export default function CustomerDetail() {
             )}
           </div>
           <div className="flex gap-2">
-            {!editing && <button onClick={startEdit} className="px-3 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">Edit</button>}
+            {!editing && canManage && <button onClick={startEdit} className="px-3 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">Edit</button>}
             <button onClick={() => navigate(`/sales/new?customer_id=${cid}`)}
               className="px-3 py-1 text-xs rounded text-white"
               style={{ backgroundColor: 'var(--accent)' }}>New Sale</button>

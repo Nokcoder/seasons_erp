@@ -5,6 +5,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { normalize } from '../../lib/normalize'
+import { useAuth } from '../../context/AuthContext'
 import {
   purchaseOrderApi, catalogueApi, inventoryApi,
   type POOut, type POCreate, type POItemCreate,
@@ -287,6 +288,8 @@ function CreatePOModal({ onClose }: CreateModalProps) {
 // ── List Page ──────────────────────────────────────────────────────────────────
 
 export default function PurchaseOrders() {
+  const { user } = useAuth()
+  const canManage = user?.action_keys?.includes('manage_purchase_orders') ?? false
   const navigate = useNavigate()
 
   const { data: orders = [], isLoading, isFetching } = useQuery({
@@ -323,11 +326,13 @@ export default function PurchaseOrders() {
         <select className={`${inputCls} w-44`} value={statusFilter} onChange={e => setStatusFilter(e.target.value as StatusOption)}>
           {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
         </select>
-        <button onClick={() => setShowCreate(true)}
-          className="ml-auto px-3 py-1.5 text-xs rounded text-white font-medium"
-          style={{ backgroundColor: 'var(--accent)' }}>
-          + New PO
-        </button>
+        {canManage && (
+          <button onClick={() => setShowCreate(true)}
+            className="ml-auto px-3 py-1.5 text-xs rounded text-white font-medium"
+            style={{ backgroundColor: 'var(--accent)' }}>
+            + New PO
+          </button>
+        )}
       </div>
 
       <div className="overflow-x-auto">

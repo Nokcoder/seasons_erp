@@ -3,7 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
+import { useAuth } from '../../context/AuthContext'
 import { apApi, catalogueApi } from '../../services/api'
+import * as XLSX from 'xlsx'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +36,9 @@ const REASON_CLS: Record<string, string> = {
 const selCls = 'px-2 py-1 text-xs rounded border t-border t-bg-surface t-text-1 focus:outline-none focus:ring-1 focus:ring-blue-500'
 
 export default function ApLedger() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_ap_ledger') ?? false
+
   const [supplierId, setSupplierId] = useState('')
 
   const suppQ = useQuery({
@@ -50,6 +55,22 @@ export default function ApLedger() {
 
   const rows = ledgerQ.data ?? []
 
+  function handleExport() {
+    const today = new Date().toISOString().slice(0, 10)
+    const ws = XLSX.utils.json_to_sheet(rows.map(entry => ({
+      'Date':          fmtDate(entry.occurred_at),
+      'Supplier':      entry.supplier_name ?? `#${entry.supplier_id}`,
+      'Reason':        entry.reason,
+      'Amount Change': Number(entry.amount_change),
+      'Reference':     entry.reference_type && entry.reference_id
+                         ? `${entry.reference_type} #${entry.reference_id}`
+                         : '',
+    })))
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'AP Ledger')
+    XLSX.writeFile(wb, `ap_ledger_${today}.xlsx`)
+  }
+
   return (
     <div className="p-4 space-y-3">
       <FetchingBar show={ledgerQ.isFetching && !ledgerQ.isLoading} />
@@ -62,6 +83,15 @@ export default function ApLedger() {
             <option key={s.supplier_id} value={s.supplier_id}>{s.supplier_name}</option>
           ))}
         </select>
+        {canExport && (
+          <button
+            onClick={handleExport}
+            disabled={rows.length === 0}
+            className="ml-auto px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong disabled:opacity-40"
+          >
+            Export XLSX
+          </button>
+        )}
       </div>
 
       {/* table */}

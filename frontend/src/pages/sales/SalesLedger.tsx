@@ -6,6 +6,7 @@ import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { normalize } from '../../lib/normalize'
+import { useAuth } from '../../context/AuthContext'
 import {
   salesApi, inventoryApi, authApi, catalogueApi,
   type SaleOut, type SaleItemOut, type CustomerPaymentOut, type Location,
@@ -253,6 +254,8 @@ const COL_LABELS: [keyof ColVis, string][] = [
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function SalesLedger() {
+  const { user } = useAuth()
+  const canExport = user?.action_keys?.includes('export_sales') ?? false
   const navigate = useNavigate()
 
   // ── filter state ──────────────────────────────────────────────────────────
@@ -661,10 +664,12 @@ export default function SalesLedger() {
                 )}
               </div>
 
-              <button onClick={handleExport}
-                className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
-                Export XLSX
-              </button>
+              {canExport && (
+                <button onClick={handleExport}
+                  className="px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
+                  Export XLSX
+                </button>
+              )}
             </div>
           </div>
 

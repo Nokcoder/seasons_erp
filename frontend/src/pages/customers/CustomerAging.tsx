@@ -1,5 +1,4 @@
 import { useState, useMemo } from 'react'
-import { Navigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
@@ -8,8 +7,6 @@ import { useAuth } from '../../context/AuthContext'
 import { salesApi } from '../../services/api'
 import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
-
-const ALLOWED_ROLES = ['ADMIN', 'STORE_MANAGER']
 
 interface AgingRowOut {
   customer_id:  number
@@ -55,7 +52,7 @@ const ZERO_TOTALS = { current_amt: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0
 
 export default function CustomerAging() {
   const { user } = useAuth()
-  if (!user || !user.roles.some(r => ALLOWED_ROLES.includes(r))) return <Navigate to="/customers" replace />
+  const canExport = user?.action_keys?.includes('export_customer_aging') ?? false
 
   const [search, setSearch] = useState('')
 
@@ -133,10 +130,12 @@ export default function CustomerAging() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-2.5 border-b t-border t-bg-surface shrink-0">
           <span className="text-xs t-text-3">{filtered.length} invoice{filtered.length !== 1 ? 's' : ''}</span>
-          <button onClick={handleExport}
-            className="ml-auto px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
-            Export XLSX
-          </button>
+          {canExport && (
+            <button onClick={handleExport}
+              className="ml-auto px-2.5 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
+              Export XLSX
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-auto">
