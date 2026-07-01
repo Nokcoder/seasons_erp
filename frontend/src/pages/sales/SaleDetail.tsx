@@ -328,7 +328,7 @@ export default function SaleDetail() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b t-border-strong">
-                  {['Payment Mode', 'Amount', 'Reference', 'Money Type'].map(h => (
+                  {['Payment Mode', 'Amount', 'Reference', 'Collection Receipt No.', 'Money Type'].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">{h}</th>
                   ))}
                 </tr>
@@ -345,6 +345,7 @@ export default function SaleDetail() {
                       <td className="px-3 py-2 t-text-2">{modeName}</td>
                       <td className="px-3 py-2 tabular-nums t-text-1">₱{fmt(p.amount)}</td>
                       <td className="px-3 py-2 font-mono t-text-3 text-[10px]">{p.reference_number || '—'}</td>
+                      <td className="px-3 py-2 font-mono t-text-3 text-[10px]">{p.collection_receipt_no || '—'}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${isArCharge ? 'bg-amber-950 text-amber-400' : isPhysical ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}`}>
                           {isArCharge ? 'On Account' : isPhysical ? 'Physical' : 'Virtual'}
@@ -365,13 +366,13 @@ export default function SaleDetail() {
                   const onAccount  = pmts.filter(p =>  isAr(p)).reduce((s, p) => s + Number(p.amount), 0)
                   return (
                     <>
-                      {physical   > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Physical</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(physical)}</td><td /><td /></tr>}
-                      {virtual    > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Virtual</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(virtual)}</td><td /><td /></tr>}
-                      {onAccount  > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">On Account</td><td className="px-3 py-1.5 tabular-nums text-amber-400">₱{fmt(onAccount)}</td><td /><td /></tr>}
+                      {physical   > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Physical</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(physical)}</td><td /><td /><td /></tr>}
+                      {virtual    > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">Total Virtual</td><td className="px-3 py-1.5 tabular-nums t-text-2">₱{fmt(virtual)}</td><td /><td /><td /></tr>}
+                      {onAccount  > 0 && <tr><td className="px-3 py-1.5 text-[10px] t-text-3">On Account</td><td className="px-3 py-1.5 tabular-nums text-amber-400">₱{fmt(onAccount)}</td><td /><td /><td /></tr>}
                       <tr>
                         <td className="px-3 py-2 text-[10px] font-semibold uppercase tracking-widest t-text-3">Total Tendered</td>
                         <td className="px-3 py-2 tabular-nums font-bold t-text-1">₱{fmt(physical + virtual)}</td>
-                        <td /><td />
+                        <td /><td /><td />
                       </tr>
                     </>
                   )

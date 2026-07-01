@@ -184,6 +184,7 @@ export default function CustomerDetail() {
   const [payMode,      setPayMode]      = useState('')
   const [payAmount,    setPayAmount]    = useState('')
   const [payRef,       setPayRef]       = useState('')
+  const [payReceiptNo, setPayReceiptNo] = useState('')
   const [payNotes,     setPayNotes]     = useState('')
   const [payCheckNum,  setPayCheckNum]  = useState('')
   const [payCheckDate, setPayCheckDate] = useState('')
@@ -196,7 +197,7 @@ export default function CustomerDetail() {
   const showRef = selectedMode && selectedMode.is_physical === false && !selectedMode.is_pdc
 
   function openPaymentModal() {
-    setPayDate(todayLocal()); setPayMode(''); setPayAmount(''); setPayRef(''); setPayNotes('')
+    setPayDate(todayLocal()); setPayMode(''); setPayAmount(''); setPayRef(''); setPayReceiptNo(''); setPayNotes('')
     setPayCheckNum(''); setPayCheckDate(''); setPayBank('')
     setPayErr('')
     setShowPayment(true)
@@ -226,6 +227,7 @@ export default function CustomerDetail() {
         amount:          parseFloat(payAmount),
         payment_date:    payDate ? `${payDate}T00:00:00` : undefined,
         reference_number: payRef || undefined,
+        collection_receipt_no: payReceiptNo.trim() || undefined,
         notes:           payNotes.trim() || undefined,
         ...(selectedMode?.is_pdc ? {
           check_number: payCheckNum.trim() || undefined,
@@ -237,7 +239,7 @@ export default function CustomerDetail() {
       await qc.invalidateQueries({ queryKey: qk.customerArLedger(cid) })
       await qc.invalidateQueries({ queryKey: qk.customerPayments(cid) })
       await qc.invalidateQueries({ queryKey: qk.customers() })
-      setShowPayment(false); setPayMode(''); setPayAmount(''); setPayRef(''); setPayNotes('')
+      setShowPayment(false); setPayMode(''); setPayAmount(''); setPayRef(''); setPayReceiptNo(''); setPayNotes('')
     } catch (e: unknown) {
       setPayErr(e instanceof Error ? e.message : 'Payment failed')
     } finally { setPaying(false) }
@@ -474,15 +476,15 @@ export default function CustomerDetail() {
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b t-border-strong">
-                {['Date', 'Mode', 'Amount', 'Reference', 'Unapplied'].map(h => (
+                {['Date', 'Mode', 'Amount', 'Reference', 'Collection Receipt No.', 'Unapplied'].map(h => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {qPayments.isLoading && <SkeletonTable rows={3} cols={5} />}
+              {qPayments.isLoading && <SkeletonTable rows={3} cols={6} />}
               {!qPayments.isLoading && payments.length === 0 && (
-                <tr><td colSpan={5} className="px-3 py-6 text-center t-text-4">No payments.</td></tr>
+                <tr><td colSpan={6} className="px-3 py-6 text-center t-text-4">No payments.</td></tr>
               )}
               {payments.map((p: CustomerPaymentOut) => (
                 <tr key={p.payment_id} className="border-b t-border">
@@ -490,6 +492,7 @@ export default function CustomerDetail() {
                   <td className="px-3 py-2 t-text-2">{paymentModes.find((m: PaymentMode) => m.payment_mode_id === p.payment_mode_id)?.name ?? `Mode ${p.payment_mode_id}`}</td>
                   <td className="px-3 py-2 tabular-nums text-emerald-400 font-medium">₱{fmt(p.amount)}</td>
                   <td className="px-3 py-2 t-text-3 font-mono text-[10px]">{p.reference_number || '—'}</td>
+                  <td className="px-3 py-2 t-text-3 font-mono text-[10px]">{p.collection_receipt_no || '—'}</td>
                   <td className="px-3 py-2 tabular-nums t-text-3">{p.unapplied_amount > 0 ? `₱${fmt(p.unapplied_amount)}` : '—'}</td>
                 </tr>
               ))}
@@ -578,6 +581,11 @@ export default function CustomerDetail() {
                     placeholder="GCash ref, card approval…" />
                 </div>
               )}
+              <div>
+                <label className={lCls}>Collection Receipt No.</label>
+                <input className={inputCls} value={payReceiptNo} onChange={e => setPayReceiptNo(e.target.value)}
+                  placeholder="Optional" />
+              </div>
               {selectedMode?.is_pdc && (
                 <>
                   <div>

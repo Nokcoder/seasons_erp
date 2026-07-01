@@ -639,6 +639,7 @@ def get_ar_ledger_sale_payments(
                           if r.payment.payment_date else date.today()),
             payment_mode=r.payment.payment_mode.name,
             reference_number=r.payment.reference_number,
+            collection_receipt_no=r.payment.collection_receipt_no,
             amount_applied=r.amount_applied,
         )
         for r in rows
@@ -805,6 +806,7 @@ def record_customer_payment(
         payment_mode_id=payload.payment_mode_id,
         amount=payload.amount,
         reference_number=payload.reference_number,
+        collection_receipt_no=payload.collection_receipt_no,
         notes=payload.notes,
         payment_date=payload.payment_date or datetime.now(timezone.utc),
         unapplied_amount=Decimal("0") if payload.sale_id else payload.amount,

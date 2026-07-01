@@ -101,8 +101,9 @@ class Role(Base):
     __tablename__ = "roles"
     __table_args__ = {"schema": "auth"}
 
-    role_id   = Column(Integer, primary_key=True)
-    role_name = Column(String, unique=True, nullable=False)
+    role_id            = Column(Integer, primary_key=True)
+    role_name          = Column(String, unique=True, nullable=False)
+    is_cashiering_mode = Column(Boolean, nullable=False, default=False)
 
     users    = relationship("User",    secondary="auth.user_roles",    back_populates="roles")
     programs = relationship("Program", secondary="auth.role_programs", back_populates="roles")

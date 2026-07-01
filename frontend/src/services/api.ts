@@ -52,6 +52,7 @@ export interface RoleEntry {
   role_id: number
   role_name: string
   user_count?: number
+  is_cashiering_mode: boolean
 }
 
 export interface EmployeeOut {
@@ -111,6 +112,7 @@ export interface RolePermissions {
 export interface UserProgramsOut {
   program_keys: string[]
   action_keys:  string[]
+  is_cashiering_mode: boolean
 }
 
 export interface UserProfileOut {
@@ -154,6 +156,8 @@ export const authApi = {
     getPermissions:  (id: number)                    => get<RolePermissions>(`/auth/roles/${id}/permissions`),
     setPermissions:  (id: number, payload: RolePermissions) =>
       request<RolePermissions>('PUT', `/auth/roles/${id}/permissions`, payload),
+    setCashieringMode: (roleId: number, value: boolean) =>
+      patch<RoleEntry>(`/auth/roles/${roleId}/cashiering-mode`, { is_cashiering_mode: value }),
   },
   programs: {
     list: () => get<ModuleGroup[]>('/auth/programs'),
@@ -336,6 +340,7 @@ export interface CustomerPaymentOut {
   amount: number
   payment_date: string | null
   reference_number: string | null
+  collection_receipt_no: string | null
   notes: string | null
   unapplied_amount: number
   applications: { apply_id: number; payment_id: number; sale_id: number; amount_applied: number; applied_at: string }[]
@@ -375,6 +380,7 @@ export interface ARLedgerPaymentRowOut {
   payment_date:     string  // "YYYY-MM-DD"
   payment_mode:     string
   reference_number: string | null
+  collection_receipt_no: string | null
   amount_applied:   number
 }
 
@@ -647,7 +653,7 @@ export const salesApi = {
       const qs = q.toString()
       return get<CustomerPaymentOut[]>(`/sales/customers/${id}/payments${qs ? '?' + qs : ''}`)
     },
-    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; notes?: string; sale_id?: number; check_number?: string; check_date?: string; bank_name?: string }) =>
+    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; collection_receipt_no?: string; notes?: string; sale_id?: number; check_number?: string; check_date?: string; bank_name?: string }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
     clearBouncedFlag: (id: number) =>
                      patch<CustomerOut>(`/sales/customers/${id}/clear-bounced-flag`, {}),
@@ -863,6 +869,7 @@ export interface InvVariant {
   is_default: boolean
   is_deleted: boolean
   include_in_ordering: boolean
+  is_phased_out: boolean
   attributes: Record<string, unknown> | null
   current_stock: StockEntry[]
   suppliers: InvVariantSupplier[]

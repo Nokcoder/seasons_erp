@@ -260,6 +260,7 @@ class VariantCreate(BaseModel):
     is_default: bool = False
     attributes: Optional[Dict[str, Any]] = None
     include_in_ordering: bool = True
+    is_phased_out: bool = False
 
 class VariantUpdate(BaseModel):
     variant_name: Optional[str] = None
@@ -269,6 +270,7 @@ class VariantUpdate(BaseModel):
     is_default: Optional[bool] = None
     attributes: Optional[Dict[str, Any]] = None
     include_in_ordering: Optional[bool] = None
+    is_phased_out: Optional[bool] = None
 
 class BundleAvailableStock(BaseModel):
     """Computed available bundle count at one physical location."""
@@ -288,6 +290,7 @@ class VariantOut(BaseModel):
     is_default: bool
     is_deleted: bool
     include_in_ordering: bool
+    is_phased_out: bool
     attributes: Optional[Dict[str, Any]] = None
     current_stock: List[CurrentStockOut] = []
     suppliers: List[VariantSupplierOut] = []

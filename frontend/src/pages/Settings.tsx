@@ -713,6 +713,7 @@ function PermissionMatrix({
   onClose: () => void
 }) {
   const qc = useQueryClient()
+  const { refreshPrograms } = useAuth()
 
   const { data: catalogue = [], isLoading: catalogueLoading } = useQuery({
     queryKey: qk.programs(),
@@ -743,6 +744,9 @@ function PermissionMatrix({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.rolePermissions(role.role_id!) })
       setSaveErr(null)
+      // Always refresh — cheap call, and ensures the acting admin sees their
+      // own permissions update live if they happen to hold the edited role.
+      refreshPrograms()
       onClose()
     },
     onError: (e: unknown) => {
@@ -876,6 +880,7 @@ function PermissionMatrix({
 
 function RolesTab() {
   const qc = useQueryClient()
+  const { refreshPrograms } = useAuth()
   const { data: roles = [], isLoading, isFetching } = useQuery({ queryKey: qk.roles(), queryFn: authApi.roles.list, ...stale.auth })
   const { data: allUsers = [] }                     = useQuery({ queryKey: qk.users(), queryFn: authApi.users.all,  ...stale.auth })
   const users = allUsers.filter(u => u.is_active)
@@ -888,6 +893,7 @@ function RolesTab() {
   const [editingAssign, setEditingAssign] = useState<number | null>(null)
   const [selectedRoles, setSelectedRoles] = useState<string[]>([])
   const [editingPerms,  setEditingPerms]  = useState<RoleEntry | null>(null)
+  const [savingCashiering, setSavingCashiering] = useState<number | null>(null)
 
   async function invalidateAll() {
     await Promise.all([qc.invalidateQueries({ queryKey: qk.roles() }), qc.invalidateQueries({ queryKey: qk.users() })])
@@ -917,6 +923,17 @@ function RolesTab() {
     } finally { setLoading(false) }
   }
 
+  async function toggleCashieringMode(r: RoleEntry) {
+    setSavingCashiering(r.role_id!)
+    try {
+      await authApi.roles.setCashieringMode(r.role_id!, !r.is_cashiering_mode)
+      await qc.invalidateQueries({ queryKey: qk.roles() })
+      await refreshPrograms()
+    } finally {
+      setSavingCashiering(null)
+    }
+  }
+
   return (
     <div className="space-y-8">
       <div>
@@ -935,13 +952,29 @@ function RolesTab() {
           </InlineForm>
         )}
         <table className="w-full text-sm">
-          <TableHead cols={['Role Name', 'Assigned Users', 'Actions']} />
+          <TableHead cols={['Role Name', 'Assigned Users', 'Cashiering Mode', 'Actions']} />
           <tbody>
-            {isLoading && <SkeletonTable rows={3} cols={3} />}
+            {isLoading && <SkeletonTable rows={3} cols={4} />}
             {roles.map(r => (
               <tr key={r.role_id} className="border-b t-border">
                 <td className="px-3 py-2 t-text-1 font-medium font-mono text-xs">{r.role_name}</td>
                 <td className="px-3 py-2 t-text-2 text-xs tabular-nums">{r.user_count ?? 0}</td>
+                <td className="px-3 py-2">
+                  {/* Role behavior setting — a toggle switch, deliberately not a button,
+                      to read as distinct from the Permissions action below. */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleCashieringMode(r)}
+                      disabled={savingCashiering === r.role_id}
+                      className={`relative shrink-0 w-9 h-5 rounded-full transition-colors disabled:opacity-50 ${r.is_cashiering_mode ? '' : 't-bg-input border t-border-strong'}`}
+                      style={r.is_cashiering_mode ? { backgroundColor: 'var(--accent)' } : undefined}
+                      aria-label={`Toggle cashiering mode for ${r.role_name}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${r.is_cashiering_mode ? 'translate-x-4' : 'translate-x-0'}`} />
+                    </button>
+                    <span className="text-[10px] t-text-3">{r.is_cashiering_mode ? 'On' : 'Off'}</span>
+                  </div>
+                </td>
                 <td className="px-3 py-2">
                   <div className="flex gap-2">
                     <Btn onClick={() => { setEditing(r); setRoleName(r.role_name); setShowForm(true) }}>Rename</Btn>

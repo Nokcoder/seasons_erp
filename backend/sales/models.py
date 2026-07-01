@@ -229,6 +229,7 @@ class CustomerPayment(Base):
     amount           = Column(Numeric(15, 2), nullable=False)
     payment_date     = Column(DateTime(timezone=True), server_default=func.now())
     reference_number = Column(String(100), nullable=True)
+    collection_receipt_no = Column(String(100), nullable=True)
     notes            = Column(String(500), nullable=True)
     unapplied_amount = Column(Numeric(15, 2), default=0, nullable=False)
     check_number     = Column(String(50), nullable=True)

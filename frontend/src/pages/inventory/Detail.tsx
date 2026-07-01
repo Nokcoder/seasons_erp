@@ -715,6 +715,26 @@ export default function Detail() {
               </p>
             </div>
           )}
+          <div>
+            <label className={lCls}>Phased Out</label>
+            {canEdit ? (
+              <label
+                className="flex items-center gap-2 mt-1 cursor-pointer"
+                title="Mark this variant as phased out — still tracked in stock and reports, but flagged as discontinued."
+              >
+                <input
+                  type="checkbox"
+                  checked={variant.is_phased_out}
+                  onChange={e => vEdit('is_phased_out', e.target.checked as never)}
+                />
+                <span className="text-xs text-gray-400">
+                  {variant.is_phased_out ? 'Yes' : 'No'}
+                </span>
+              </label>
+            ) : (
+              <input className={iCls} value={variant.is_phased_out ? 'Yes' : 'No'} readOnly />
+            )}
+          </div>
         </div>
 
         {/* ── PRICING ── */}

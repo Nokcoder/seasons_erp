@@ -284,6 +284,7 @@ def list_roles(
             role_id=r.role_id,
             role_name=r.role_name,
             user_count=len(r.users),
+            is_cashiering_mode=r.is_cashiering_mode,
         )
         for r in roles
     ]
@@ -304,7 +305,10 @@ def create_role(
     db.add(role)
     db.commit()
     db.refresh(role)
-    return schemas.RoleDetailOut(role_id=role.role_id, role_name=role.role_name, user_count=0)
+    return schemas.RoleDetailOut(
+        role_id=role.role_id, role_name=role.role_name, user_count=0,
+        is_cashiering_mode=role.is_cashiering_mode,
+    )
 
 
 # ── PATCH /auth/roles/{role_id} ───────────────────────────────────────────────
@@ -323,8 +327,27 @@ def update_role(
     db.commit()
     db.refresh(role)
     return schemas.RoleDetailOut(
-        role_id=role.role_id, role_name=role.role_name, user_count=len(role.users)
+        role_id=role.role_id, role_name=role.role_name, user_count=len(role.users),
+        is_cashiering_mode=role.is_cashiering_mode,
     )
+
+
+# ── PATCH /auth/roles/{role_id}/cashiering-mode ──────────────────────────────
+
+@router.patch("/roles/{role_id}/cashiering-mode", response_model=schemas.RoleOut)
+def set_role_cashiering_mode(
+    role_id: int,
+    payload: schemas.RoleCashieringModeUpdate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_roles")),
+):
+    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    role.is_cashiering_mode = payload.is_cashiering_mode
+    db.commit()
+    db.refresh(role)
+    return role
 
 
 # ── DELETE /auth/roles/{role_id} ──────────────────────────────────────────────
@@ -534,9 +557,11 @@ def get_my_programs(
         .distinct()
         .all()
     )
+    is_cashiering_mode = any(r.is_cashiering_mode for r in current_user.roles)
     return schemas.UserProgramsOut(
         program_keys=[r.program_key for r in program_rows],
         action_keys=[r.action_key for r in action_rows],
+        is_cashiering_mode=is_cashiering_mode,
     )
 
 

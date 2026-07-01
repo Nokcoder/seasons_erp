@@ -177,6 +177,7 @@ class ARLedgerPaymentRowOut(BaseModel):
     payment_date:     date
     payment_mode:     str
     reference_number: Optional[str] = None
+    collection_receipt_no: Optional[str] = None
     amount_applied:   Decimal
 
 
@@ -423,6 +424,7 @@ class CustomerPaymentOut(BaseModel):
     amount: Decimal
     payment_date: Optional[datetime] = None
     reference_number: Optional[str] = None
+    collection_receipt_no: Optional[str] = None
     notes: Optional[str] = None
     unapplied_amount: Decimal
     applications: List[CustomerPaymentAppliedOut] = []
@@ -449,6 +451,7 @@ class RecordPaymentIn(BaseModel):
     amount: Decimal
     payment_date: Optional[datetime] = None
     reference_number: Optional[str] = None
+    collection_receipt_no: Optional[str] = None
     notes: Optional[str] = None
     sale_id: Optional[int] = None  # when provided, applies payment to this specific sale
     # PDC fields — required when payment mode has is_pdc=True

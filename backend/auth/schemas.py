@@ -9,6 +9,7 @@ from pydantic import BaseModel
 class RoleOut(BaseModel):
     role_id: int
     role_name: str
+    is_cashiering_mode: bool
 
     class Config:
         from_attributes = True
@@ -19,6 +20,7 @@ class RoleDetailOut(BaseModel):
     role_id: int
     role_name: str
     user_count: int
+    is_cashiering_mode: bool
 
 
 class RoleCreate(BaseModel):
@@ -27,6 +29,10 @@ class RoleCreate(BaseModel):
 
 class RolePatch(BaseModel):
     role_name: str
+
+
+class RoleCashieringModeUpdate(BaseModel):
+    is_cashiering_mode: bool
 
 
 # ==========================================
@@ -161,6 +167,7 @@ class UserProgramsOut(BaseModel):
     """Scoped to the calling user's roles — not the full catalogue."""
     program_keys: List[str]
     action_keys:  List[str] = []
+    is_cashiering_mode: bool = False
 
 
 class UserProfileOut(BaseModel):

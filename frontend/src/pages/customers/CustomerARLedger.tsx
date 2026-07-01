@@ -52,14 +52,14 @@ function DetailRows({ saleId }: { saleId: number }) {
   if (isLoading) {
     return (
       <tr className="border-b t-border t-bg-surface">
-        <td colSpan={10} className="px-6 py-3 text-xs t-text-4">Loading…</td>
+        <td colSpan={9} className="px-6 py-3 text-xs t-text-4">Loading…</td>
       </tr>
     )
   }
   if (!data?.length) {
     return (
       <tr className="border-b t-border t-bg-surface">
-        <td colSpan={10} className="px-6 py-2 text-xs t-text-4 italic">
+        <td colSpan={9} className="px-6 py-2 text-xs t-text-4 italic">
           No payments recorded for this invoice.
         </td>
       </tr>
@@ -73,11 +73,12 @@ function DetailRows({ saleId }: { saleId: number }) {
           <td className="px-3 py-1.5 text-xs t-text-3">{fmtDate(p.payment_date)}</td>
           <td className="px-3 py-1.5 text-xs t-text-3">{p.payment_mode}</td>
           <td className="px-3 py-1.5 text-xs t-text-4">{p.reference_number ?? ''}</td>
-          <td /><td />
+          <td className="px-3 py-1.5 text-xs t-text-4">{p.collection_receipt_no ? `Rcpt: ${p.collection_receipt_no}` : ''}</td>
+          <td />
           <td className="px-3 py-1.5 tabular-nums text-right text-xs t-text-4 italic">
             −₱{fmt(Number(p.amount_applied))}
           </td>
-          <td /><td /><td />
+          <td /><td />
         </tr>
       ))}
     </>
@@ -110,6 +111,7 @@ export default function CustomerARLedger() {
   const [payModeId,     setPayModeId]     = useState('')
   const [payAmount,     setPayAmount]     = useState('')
   const [payRef,        setPayRef]        = useState('')
+  const [payReceiptNo,  setPayReceiptNo]  = useState('')
   const [payNotes,      setPayNotes]      = useState('')
   const [payCheckNum,   setPayCheckNum]   = useState('')
   const [payCheckDate,  setPayCheckDate]  = useState('')
@@ -167,7 +169,7 @@ export default function CustomerARLedger() {
   const arPayModes   = allPayModes.filter(m => m.is_active && !m.is_ar_charge && !m.is_ar_credit)
   const selectedMode = arPayModes.find(m => String(m.payment_mode_id) === payModeId)
 
-  // ── grouped rows: isFirst flag + per-customer balance subtotal ────────────
+  // ── grouped rows: isFirst/isLast flags + per-customer balance subtotal ────
   const tableRows = useMemo(() => {
     const subs = new Map<number, number>()
     for (const r of rows) {
@@ -176,6 +178,7 @@ export default function CustomerARLedger() {
     return rows.map((row, i) => ({
       ...row,
       isFirst:  i === 0 || rows[i - 1].customer_id !== row.customer_id,
+      isLast:   i === rows.length - 1 || rows[i + 1].customer_id !== row.customer_id,
       subtotal: subs.get(row.customer_id) ?? 0,
     }))
   }, [rows])
@@ -214,6 +217,7 @@ export default function CustomerARLedger() {
     setPayModeId('')
     setPayAmount(String(Number(row.balance_due)))
     setPayRef('')
+    setPayReceiptNo('')
     setPayNotes('')
     setPayCheckNum('')
     setPayCheckDate('')
@@ -251,6 +255,7 @@ export default function CustomerARLedger() {
         amount,
         payment_date:     payDate || undefined,
         reference_number: payRef.trim()   || undefined,
+        collection_receipt_no: payReceiptNo.trim() || undefined,
         notes:            payNotes.trim() || undefined,
         sale_id:          recvSale.sale_id,
         ...(selectedMode?.is_pdc ? {
@@ -276,18 +281,18 @@ export default function CustomerARLedger() {
       'Invoice #':     r.sale_pid,
       'Issue Date':    fmtDate(r.transaction_date),
       'Due Date':      fmtDate(r.due_date),
-      'Total Amount':  Number(r.grand_total),
-      'Balance Due':   Number(r.balance_due) > 0 ? Number(r.balance_due) : '',
       'Status':        r.status,
+      'Balance Due':   Number(r.balance_due) > 0 ? Number(r.balance_due) : '',
+      'Total Amount':  r.isLast ? Number(r.subtotal) : '',
     }))
     const totalsRow = {
       'Customer Name': 'Total',
       'Invoice #':     '',
       'Issue Date':    '',
       'Due Date':      '',
-      'Total Amount':  totalAmount,
-      'Balance Due':   totalBalanceDue,
       'Status':        '',
+      'Balance Due':   totalBalanceDue,
+      'Total Amount':  totalAmount,
     }
     const ws = XLSX.utils.json_to_sheet([...dataRows, totalsRow])
     const wb = XLSX.utils.book_new()
@@ -396,11 +401,10 @@ export default function CustomerARLedger() {
                 ['Invoice #',     'text-left'],
                 ['Issue Date',    'text-left'],
                 ['Due Date',      'text-left'],
-                ['Total Amount',  'text-right'],
-                ['Balance Due',   'text-right'],
                 ['Status',        'text-left'],
+                ['Balance Due',   'text-right'],
+                ['Total Amount',  'text-right'],
                 ['Actions',       'text-left'],
-                ['Subtotal',      'text-right'],
               ] as [string, string][]).map(([h, align]) => (
                 <th
                   key={h}
@@ -412,10 +416,10 @@ export default function CustomerARLedger() {
           </thead>
 
           <tbody>
-            {isLoading && <SkeletonTable rows={10} cols={10} />}
+            {isLoading && <SkeletonTable rows={10} cols={9} />}
             {!isLoading && tableRows.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-3 py-10 text-center t-text-4">No invoices.</td>
+                <td colSpan={9} className="px-3 py-10 text-center t-text-4">No invoices.</td>
               </tr>
             )}
 
@@ -465,9 +469,13 @@ export default function CustomerARLedger() {
                       {fmtDate(row.due_date)}
                     </td>
 
-                    {/* total amount */}
-                    <td className="px-3 py-2 tabular-nums text-right t-text-2">
-                      ₱{fmt(Number(row.grand_total))}
+                    {/* status badge */}
+                    <td className="px-3 py-2">
+                      <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${
+                        STATUS_BADGE[row.status] ?? 't-bg-elevated t-text-3'
+                      }`}>
+                        {row.status}
+                      </span>
                     </td>
 
                     {/* balance due — blank when 0 */}
@@ -477,13 +485,9 @@ export default function CustomerARLedger() {
                       {Number(row.balance_due) > 0 ? `₱${fmt(Number(row.balance_due))}` : null}
                     </td>
 
-                    {/* status badge */}
-                    <td className="px-3 py-2">
-                      <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${
-                        STATUS_BADGE[row.status] ?? 't-bg-elevated t-text-3'
-                      }`}>
-                        {row.status}
-                      </span>
+                    {/* total amount (per-customer balance_due subtotal) — last row of customer group only */}
+                    <td className="px-3 py-2 tabular-nums text-right font-semibold t-text-1">
+                      {row.isLast && row.subtotal > 0 ? `₱${fmt(row.subtotal)}` : null}
                     </td>
 
                     {/* actions */}
@@ -503,11 +507,6 @@ export default function CustomerARLedger() {
                         </button>
                       </div>
                     </td>
-
-                    {/* subtotal — first row of customer group only */}
-                    <td className="px-3 py-2 tabular-nums text-right font-semibold t-text-1">
-                      {row.isFirst && row.subtotal > 0 ? `₱${fmt(row.subtotal)}` : null}
-                    </td>
                   </tr>
 
                   {isExpanded && <DetailRows saleId={row.sale_id} />}
@@ -521,14 +520,14 @@ export default function CustomerARLedger() {
               <tr className="t-bg-elevated border-t-2 t-border-strong">
                 <td />
                 <td className="px-3 py-2 text-xs font-bold t-text-1">Total</td>
-                <td colSpan={3} />
-                <td className="px-3 py-2 tabular-nums text-right text-xs font-bold t-text-1">
-                  ₱{fmt(totalAmount)}
-                </td>
+                <td colSpan={4} />
                 <td className="px-3 py-2 tabular-nums text-right text-xs font-bold t-text-1">
                   ₱{fmt(totalBalanceDue)}
                 </td>
-                <td colSpan={3} />
+                <td className="px-3 py-2 tabular-nums text-right text-xs font-bold t-text-1">
+                  ₱{fmt(totalAmount)}
+                </td>
+                <td />
               </tr>
             </tfoot>
           )}
@@ -619,6 +618,17 @@ export default function CustomerARLedger() {
                   />
                 </div>
               )}
+
+              {/* collection receipt no. — always visible, optional, unlike Reference Number */}
+              <div>
+                <label className={lCls}>Collection Receipt No.</label>
+                <input
+                  className={iCls + ' w-full'}
+                  placeholder="Optional"
+                  value={payReceiptNo}
+                  onChange={e => setPayReceiptNo(e.target.value)}
+                />
+              </div>
 
               {/* PDC fields */}
               {selectedMode?.is_pdc && (

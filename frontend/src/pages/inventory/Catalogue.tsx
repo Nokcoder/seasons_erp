@@ -160,11 +160,12 @@ interface ColVis {
   promo:      boolean
   totalStock: boolean
   status:     boolean
+  phasedOut:  boolean
   locIds:     number[]
 }
 const COL_DEFAULTS: ColVis = {
   sku: false, type: true, category: true, price: true, promo: true,
-  totalStock: true, status: true, locIds: [],
+  totalStock: true, status: true, phasedOut: true, locIds: [],
 }
 function loadCols(): ColVis {
   try { return { ...COL_DEFAULTS, ...JSON.parse(localStorage.getItem(COL_STORAGE_KEY) ?? '{}') } }
@@ -254,6 +255,7 @@ export default function Catalogue() {
   const [supFilter,      setSupFilter]      = useState<number | ''>('')
   const [attrFilters,    setAttrFilters]    = useState<Record<string, string>>({})
   const [negativeStock,  setNegativeStock]  = useState(false)
+  const [hidePhasedOut,  setHidePhasedOut]  = useState(false)
 
   // ── pagination ────────────────────────────────────────────────────────────
   const ROWS_PER_PAGE_OPTIONS = [10, 30, 50, 100, 500] as const
@@ -334,10 +336,11 @@ export default function Catalogue() {
       if (negativeStock && !v.current_stock.some(
         s => s.location.location_type !== 'Virtual' && Number(s.quantity) < 0
       )) return false
+      if (hidePhasedOut && v.is_phased_out) return false
       return true
     })
     return sortRows(base, sort)
-  }, [allRows, searchTags, liveInput, catFilter, typeFilter, statusFilter, supFilter, attrFilters, negativeStock, sort])
+  }, [allRows, searchTags, liveInput, catFilter, typeFilter, statusFilter, supFilter, attrFilters, negativeStock, hidePhasedOut, sort])
 
   // ── pagination over filtered rows ─────────────────────────────────────────
   useEffect(() => { setPage(1) }, [filteredRows, pageSize])
@@ -398,6 +401,7 @@ export default function Catalogue() {
   const PERMANENT_COLS = 3
   const toggleableCols = (cols.sku ? 1 : 0) + (cols.type ? 1 : 0) + (cols.category ? 1 : 0)
     + (cols.price ? 1 : 0) + (cols.promo ? 1 : 0) + (cols.totalStock ? 1 : 0) + (cols.status ? 1 : 0)
+    + (cols.phasedOut ? 1 : 0)
   const totalCols = PERMANENT_COLS + toggleableCols + selectedLocs.length + 1
 
   return (
@@ -450,6 +454,15 @@ export default function Catalogue() {
               checked={negativeStock}
               onChange={e => setNegativeStock(e.target.checked)} />
             Show negative stock only
+          </label>
+        </div>
+        <div>
+          <label className={labelCls}>Phased Out</label>
+          <label className="flex items-center gap-2 text-xs t-text-2 cursor-pointer mt-1">
+            <input type="checkbox" className="accent-[var(--accent)]"
+              checked={hidePhasedOut}
+              onChange={e => setHidePhasedOut(e.target.checked)} />
+            Hide Phased Out
           </label>
         </div>
         <div>
@@ -525,6 +538,7 @@ export default function Catalogue() {
                     ['promo',      'Promo Price'],
                     ['totalStock', 'Total Stock'],
                     ['status',     'Status'],
+                    ['phasedOut',  'Phased Out'],
                   ] as [keyof ColVis, string][]).map(([key, label]) => (
                     <label key={key} className="flex items-center gap-2 text-xs t-text-1 mb-1 cursor-pointer">
                       <input type="checkbox" className="accent-[var(--accent)]"
@@ -581,9 +595,9 @@ export default function Catalogue() {
           <table className="w-full text-xs border-collapse">
             <thead className="sticky top-0 z-10">
               <tr className="t-bg-elevated border-b t-border-strong">
+                <SortTh k="PID"          label="PID" />
                 <SortTh k="brand"        label="Brand" />
                 <SortTh k="variant_name" label="Variant Name" />
-                <SortTh k="PID"          label="PID" />
                 {cols.sku        && <SortTh k="sku" label="SKU" />}
                 {cols.type       && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Type</th>}
                 {cols.category   && <SortTh k="category" label="Category" />}
@@ -591,6 +605,7 @@ export default function Catalogue() {
                 {cols.promo      && <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Promo Price</th>}
                 {cols.totalStock && <SortTh k="totalStock" label="Total Stock" right />}
                 {cols.status     && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Status</th>}
+                {cols.phasedOut  && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Phased Out</th>}
                 {selectedLocs.map(l => {
                   const locKey = `loc_${l.location_id}` as SortKey
                   const isVirt = l.location_type === 'Virtual'
@@ -619,6 +634,7 @@ export default function Catalogue() {
                 const rowCls = `border-b t-border ${canManageProducts ? 'hover:t-bg-surface cursor-pointer' : ''} transition-colors group${isDefault ? '' : ' opacity-80'}`
                 return (
                   <tr key={v.variant_id} onClick={canManageProducts ? () => navigate(`/inventory/${v.variant_id}`) : undefined} className={rowCls}>
+                    <td className="px-3 py-2 font-mono t-text-2 whitespace-nowrap">{v.PID}</td>
                     {/* Brand — max-w + truncate prevents layout shifts from long names */}
                     <td className={`px-3 py-2 whitespace-nowrap max-w-[180px] truncate ${isDefault ? 't-text-1 font-semibold' : 't-text-2'}`}>
                       {p.brand}
@@ -627,7 +643,6 @@ export default function Catalogue() {
                     <td className={`px-3 py-2 whitespace-nowrap max-w-[200px] truncate ${isDefault ? 't-text-1 font-semibold' : 't-text-2'}`}>
                       {v.variant_name}
                     </td>
-                    <td className="px-3 py-2 font-mono t-text-2 whitespace-nowrap">{v.PID}</td>
                     {cols.sku        && <td className="px-3 py-2 font-mono t-text-3 whitespace-nowrap">{v.sku ?? '—'}</td>}
                     {cols.type       && <td className="px-3 py-2 t-text-3 whitespace-nowrap">{p.product_type}</td>}
                     {cols.category   && <td className="px-3 py-2 t-text-3 whitespace-nowrap max-w-[140px] truncate">{p.categories[0]?.category_name ?? '—'}</td>}
@@ -656,6 +671,13 @@ export default function Catalogue() {
                       <td className="px-3 py-2 whitespace-nowrap">
                         <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${p.status === 'Active' ? 'bg-emerald-950 text-emerald-500' : 't-bg-elevated t-text-4'}`}>
                           {p.status}
+                        </span>
+                      </td>
+                    )}
+                    {cols.phasedOut  && (
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${v.is_phased_out ? 'bg-amber-950 text-amber-500' : 't-bg-elevated t-text-4'}`}>
+                          {v.is_phased_out ? 'Phased Out' : 'Active'}
                         </span>
                       </td>
                     )}

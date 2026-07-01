@@ -16,6 +16,7 @@ export interface AuthUser {
   roles: string[]
   programs: string[]
   action_keys: string[]
+  is_cashiering_mode: boolean
 }
 
 interface AuthContextValue {
@@ -23,6 +24,7 @@ interface AuthContextValue {
   token: string | null
   login: (username: string, password: string) => Promise<void>
   logout: () => void
+  refreshPrograms: () => Promise<void>
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -60,9 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(() => {
     const raw = localStorage.getItem('erp_user')
     if (!raw) return null
-    // Backwards-compat: records saved before `programs`/`action_keys` was added default to []
+    // Backwards-compat: records saved before these fields existed default to [] / false
     const parsed = JSON.parse(raw) as Partial<AuthUser>
-    return { programs: [], action_keys: [], ...parsed } as AuthUser
+    return { programs: [], action_keys: [], is_cashiering_mode: false, ...parsed } as AuthUser
   })
 
   // Global 401 handler — fired by the api request wrapper
@@ -74,6 +76,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     window.addEventListener('auth:unauthorized', handle)
     return () => window.removeEventListener('auth:unauthorized', handle)
+  }, [])
+
+  // Re-fetches program_keys/action_keys from the live DB state and updates
+  // both localStorage and in-memory state. A 401 here is handled by the
+  // global 'auth:unauthorized' listener above (dispatched by the api request
+  // wrapper), so we only need to swallow the rejection — any other error
+  // (network, 500) is also swallowed, leaving the cached values untouched.
+  const refreshPrograms = useCallback(async () => {
+    try {
+      const result = await authApi.me.programs()
+      setUser(prev => {
+        if (!prev) return prev
+        const updated: AuthUser = {
+          ...prev,
+          programs:           result.program_keys,
+          action_keys:        result.action_keys ?? [],
+          is_cashiering_mode: result.is_cashiering_mode ?? false,
+        }
+        localStorage.setItem('erp_user', JSON.stringify(updated))
+        return updated
+      })
+    } catch {
+      // 401 already handled globally; anything else fails silently.
+    }
+  }, [])
+
+  // On app load, refresh permissions from the DB in the background — the
+  // localStorage-derived state above renders immediately, this just brings
+  // it up to date without blocking or showing a loading state.
+  useEffect(() => {
+    if (token) refreshPrograms()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
@@ -89,10 +123,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     let programs: string[] = []
     let action_keys: string[] = []
+    let is_cashiering_mode = false
     try {
       const result = await authApi.me.programs()
-      programs    = result.program_keys
-      action_keys = result.action_keys ?? []
+      programs           = result.program_keys
+      action_keys        = result.action_keys ?? []
+      is_cashiering_mode = result.is_cashiering_mode ?? false
     } catch {
       // Programs fetch failed — user can re-login to retry
     }
@@ -103,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       roles,
       programs,
       action_keys,
+      is_cashiering_mode,
     }
 
     localStorage.setItem('erp_user', JSON.stringify(authUser))
@@ -117,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout }}>
+    <AuthContext.Provider value={{ user, token, login, logout, refreshPrograms }}>
       {children}
     </AuthContext.Provider>
   )

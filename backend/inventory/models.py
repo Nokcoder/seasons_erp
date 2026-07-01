@@ -134,6 +134,7 @@ class Variant(Base):
     promo_price = Column(Numeric(15, 2), nullable=True)
     is_deleted          = Column(Boolean, default=False)
     include_in_ordering = Column(Boolean, nullable=False, default=True, server_default="TRUE")
+    is_phased_out       = Column(Boolean, nullable=False, default=False, server_default="FALSE")
 
     product          = relationship("Product", back_populates="variants")
     current_stock    = relationship("CurrentStock", back_populates="variant")

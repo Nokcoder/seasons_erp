@@ -4,6 +4,7 @@ import ProtectedRoute from './components/ProtectedRoute'
 import AppShell from './components/AppShell'
 import Login from './pages/Login'
 import RequireProgram from './components/RequireProgram'
+import { useAuth } from './context/AuthContext'
 
 // Route-level code splitting — each module chunk loads on first visit
 const Sales       = lazy(() => import('./pages/Sales'))
@@ -22,6 +23,26 @@ function PageFallback() {
   )
 }
 
+// Cascades through every RequireProgram-gated top-level module below, in the
+// same order they appear in AppShell's NAV_ITEMS, and lands on the first one
+// the user actually has a program for. Falls back to /no-access — unchanged
+// from the previous hardcoded behavior — when nothing matches.
+function getDefaultRoute(programs: string[]): string {
+  if (programs.includes('sales_workstation')) return '/sales/new'
+  if (programs.includes('inventory_catalogue')) return '/inventory'
+  if (['stock_transfers', 'stock_receiving', 'stock_ledger'].some(p => programs.includes(p))) return '/stock'
+  if (['procurement_suppliers', 'procurement_purchase_orders'].some(p => programs.includes(p))) return '/procurement'
+  if (['ap_invoices', 'ap_payments', 'ap_ledger', 'ap_aging'].some(p => programs.includes(p))) return '/ap'
+  if (['customers_list', 'customers_aging', 'customers_ar_ledger', 'customers_credit_memo', 'customers_pdc_vault'].some(p => programs.includes(p))) return '/customers'
+  if (programs.includes('settings')) return '/admin/users'
+  return '/no-access'
+}
+
+function DefaultRoute() {
+  const { user } = useAuth()
+  return <Navigate to={getDefaultRoute(user?.programs ?? [])} replace />
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -33,8 +54,8 @@ export default function App() {
           {/* Protected — all pages require a valid token */}
           <Route element={<ProtectedRoute />}>
             <Route element={<AppShell />}>
-              {/* Root → redirect to Sales (first meaningful page) */}
-              <Route index element={<Navigate to="/sales" replace />} />
+              {/* Root → redirect to the first module the user has access to */}
+              <Route index element={<DefaultRoute />} />
 
               {/* Landing page for authenticated users with zero programs */}
               <Route path="/no-access" element={<NoAccess />} />
@@ -76,8 +97,8 @@ export default function App() {
                 </RequireProgram>
               } />
 
-              {/* Catch-all inside shell → back to Sales */}
-              <Route path="*" element={<Navigate to="/sales" replace />} />
+              {/* Catch-all inside shell → first accessible module */}
+              <Route path="*" element={<DefaultRoute />} />
             </Route>
           </Route>
         </Routes>

@@ -159,11 +159,12 @@ export default function Workstation() {
     retry: false,
   })
 
-  // Live data is authoritative; localStorage value is the instant fallback while
-  // myPrograms is in-flight so the badge/UI render correctly on the first paint.
+  // Live data is authoritative; the persisted AuthUser value is the instant
+  // fallback while myPrograms is in-flight so the badge/UI render correctly
+  // on the first paint.
   const cashieringMode =
-    myPrograms?.action_keys?.includes('cashiering_mode')
-    ?? (user?.action_keys?.includes('cashiering_mode') ?? false)
+    myPrograms?.is_cashiering_mode
+    ?? (user?.is_cashiering_mode ?? false)
 
   const canDiscount =
     myPrograms?.action_keys?.includes('apply_discount')
