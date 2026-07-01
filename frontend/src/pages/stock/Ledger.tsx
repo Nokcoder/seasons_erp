@@ -123,7 +123,8 @@ export default function Ledger() {
         normalize(e.variant?.variant_name   ?? '').includes(term) ||
         normalize(e.variant?.PID            ?? '').includes(term) ||
         normalize(e.variant?.sku            ?? '').includes(term) ||
-        normalize(e.reference_id            ?? '').includes(term)
+        normalize(e.reference_id            ?? '').includes(term) ||
+        normalize(e.document_pid            ?? '').includes(term)
       return allTerms.every(hit)
     })
   }, [allEntries, searchTags, liveInput])
@@ -163,7 +164,7 @@ export default function Ledger() {
             tags={searchTags}
             onTagsChange={setSearchTags}
             onPartialChange={setLiveInput}
-            placeholder="Brand, PID, ref ID…"
+            placeholder="Brand, PID, SKU, Doc ID…"
             className="w-56"
           />
         </div>
