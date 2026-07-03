@@ -384,6 +384,19 @@ export interface ARLedgerPaymentRowOut {
   amount_applied:   number
 }
 
+export interface TransactionLedgerRowOut {
+  seq:             number
+  date:            string  // "YYYY-MM-DD"
+  type:            'SALE' | 'PAYMENT'
+  sale_id:         number | null
+  payment_id:      number | null
+  sales_id:        string
+  debit:           number
+  credit:          number
+  running_balance: number
+  status:          'Paid' | 'Partially Paid' | 'Unpaid' | 'Payment'
+}
+
 export interface CustomerAgingOut {
   customer_id:   number
   customer_name: string
@@ -629,16 +642,6 @@ export const salesApi = {
     patch:   (id: number, p: { customer_name?: string; credit_limit?: number | null; terms_days?: number }) =>
                patch<CustomerOut>(`/sales/customers/${id}`, p),
     delete:  (id: number)                                         => del<void>(`/sales/customers/${id}`),
-    arLedger: (id: number, params?: { date_from?: string; date_to?: string; reason?: string; limit?: number; cursor?: number }) => {
-      const q = new URLSearchParams()
-      if (params?.date_from) q.set('date_from', params.date_from)
-      if (params?.date_to)   q.set('date_to',   params.date_to)
-      if (params?.reason)    q.set('reason',     params.reason)
-      if (params?.limit)     q.set('limit',      String(params.limit))
-      if (params?.cursor)    q.set('cursor',     String(params.cursor))
-      const qs = q.toString()
-      return get<ArLedgerOut[]>(`/sales/customers/${id}/ar-ledger${qs ? '?' + qs : ''}`)
-    },
     sales:    (id: number, cursor?: number, limit?: number) => {
       const q = new URLSearchParams()
       if (cursor) q.set('cursor', String(cursor))
@@ -653,6 +656,15 @@ export const salesApi = {
       const qs = q.toString()
       return get<CustomerPaymentOut[]>(`/sales/customers/${id}/payments${qs ? '?' + qs : ''}`)
     },
+    transactionLedger: (id: number, cursor?: number, limit?: number) => {
+      const q = new URLSearchParams()
+      if (cursor != null) q.set('cursor', String(cursor))
+      if (limit)           q.set('limit',  String(limit))
+      const qs = q.toString()
+      return get<TransactionLedgerRowOut[]>(`/sales/customers/${id}/transaction-ledger${qs ? '?' + qs : ''}`)
+    },
+    transactionLedgerExport: (id: number) =>
+      get<TransactionLedgerRowOut[]>(`/sales/customers/${id}/transaction-ledger/export`),
     recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; collection_receipt_no?: string; notes?: string; sale_id?: number; check_number?: string; check_date?: string; bank_name?: string }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
     clearBouncedFlag: (id: number) =>

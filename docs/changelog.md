@@ -1,5 +1,88 @@
 # Changelog
 
+## 2026-07-04 — Feature: remove AR Ledger section, add Transaction Ledger Excel export
+
+### Removed — AR Ledger section on CustomerDetail
+
+The per-customer "AR Ledger" section (all sales incl. cash, superseded by the Transaction Ledger added 2026-07-03) is removed from `frontend/src/pages/customers/CustomerDetail.tsx`, along with its query, Load More pagination state (`arLedger`, `arMore`, `arLoading`, `loadMoreArLedger`), the `arWithBalance` backward-running-balance computation, the `AR_LEDGER_PAGE` constant, and the now-unused `ArLedgerOut` import.
+
+Checked reuse before touching the backend: `salesApi.customers.arLedger()` / `qk.customerArLedger()` had exactly one caller (this page). The backend route `GET /sales/customers/{customer_id}/ar-ledger` (`get_customer_ar_ledger` in `backend/sales/router.py`) was therefore **deleted** — confirmed via `grep` across the whole repo and by re-registering the FastAPI router in-process to verify it no longer resolves. Two other routes share the `ArLedgerOut` response schema and were **left alone** since they're independently used elsewhere: `GET /sales/customers/ar-ledger` (the invoice-level view behind `CustomerARLedger.tsx`) and `GET /sales/ar-ledger` (the general ledger list). The `ArLedgerOut` schema/type itself is still used by those two and was not removed.
+
+### Added — Transaction Ledger Excel export
+
+- **`backend/sales/router.py`**: extracted the row-building logic out of `get_customer_transaction_ledger` into `_build_customer_transaction_ledger(customer_id, db)`, which returns the full, chronologically-sorted, running-balance-and-status-computed list with no pagination. The existing paginated endpoint now calls this helper and slices by `seq`/`limit` as before (no behavior change). Added `GET /sales/customers/{customer_id}/transaction-ledger/export`, which calls the same helper and returns everything unsliced — the frontend export pulls full history in one call rather than looping the paginated endpoint.
+- **`frontend/src/services/api.ts`**: added `salesApi.customers.transactionLedgerExport(id)`.
+- **`frontend/src/pages/customers/CustomerDetail.tsx`**: added an "Export to Excel" button next to the Transaction Ledger heading. `handleExportLedger()` fetches the full export endpoint, builds a workbook client-side with the `xlsx` package (`aoa_to_sheet` for a leading statement-header block, `sheet_add_json` with an `origin` offset to append the table below it) — the same library every other export in the app already uses (`ApLedger.tsx`, `CustomerARLedger.tsx`, `SalesLedger.tsx`, etc.), all of which are client-side; no backend-generated files exist elsewhere to match instead.
+  - Header block: Customer Name, Terms, Credit Limit, Outstanding Balance, "Statement generated on [date]". No address/contact fields exist on the `Customer` model (checked `sales/models.py` and `docs/schema.dbml`), so none are included.
+  - Table: Date, Sales ID, Status, Debit, Credit, Balance — same columns/order as on-screen, full history oldest→newest.
+  - Filename: `{customer_name_sanitized}_transaction_ledger_{YYYY-MM-DD}.xlsx`, matching the `{entity}_{date}.xlsx` convention used by every other export (e.g. `ar_ledger_${today}.xlsx`, `ar_aging_${todayLocal()}.xlsx`). Customer name is stripped of non-alphanumeric characters since no other export embeds a free-text name in the filename.
+
+Verified: `tsc --noEmit` clean; backend router imports and both new/removed routes confirmed present/absent by re-registering the FastAPI app in-process (`/sales/customers/{customer_id}/transaction-ledger/export` present, `/sales/customers/{customer_id}/ar-ledger` absent, `/sales/customers/ar-ledger` and `/sales/customers/ar-ledger/{sale_id}/payments` unaffected). Not yet exercised against a rebuilt container.
+
+---
+
+## 2026-07-04 — Fix: stale query invalidation after Record Payment
+
+`frontend/src/pages/customers/CustomerDetail.tsx`'s `handleRecordPayment` invalidated `qk.customerPayments(cid)` after recording a payment — a query key left over from the "Payments" section removed on 2026-07-03, no longer subscribed to by anything on the page. As a result, recording a payment against an AR-Charge sale updated the customer's balance and the AR Ledger section correctly, but the new Transaction Ledger table (and its per-row Status) went stale until a full page reload.
+
+Changed the invalidation target to `qk.customerTransactionLedger(cid)`, matching the query key the Transaction Ledger section actually reads from. `tsc --noEmit` clean.
+
+---
+
+## 2026-07-04 — Enhancement: Status column on Customer Transaction Ledger
+
+Added a per-sale `status` field to the Transaction Ledger introduced 2026-07-03, computed server-side in the same query that builds `running_balance` so both stay consistent.
+
+### `backend/sales/router.py`
+
+- `get_customer_transaction_ledger`: added `applied_by_sale`, a dict summing `amount_applied` from the already-queried `collection_rows` (non-AR-charge `customer_payment_applied` rows), grouped by `sale_id`. No new query — reuses the same rows the Credit column is built from.
+- SALE rows: `status = "Paid"` when `total_applied >= charged` (the sale's AR-charged debit), `"Unpaid"` when `total_applied <= 0`, else `"Partially Paid"`. This is scoped strictly to payments applied against that specific `sale_id` — independent of the customer's overall balance or other sales.
+- PAYMENT rows: fixed `status = "Payment"`.
+
+### `backend/sales/schemas.py`
+
+- `TransactionLedgerRowOut`: added `status: str`.
+
+### `frontend/src/services/api.ts`, `frontend/src/pages/customers/CustomerDetail.tsx`
+
+- `TransactionLedgerRowOut` type: added `status: 'Paid' | 'Partially Paid' | 'Unpaid' | 'Payment'`.
+- Table column order: Date, Sales ID, **Status**, Debit, Credit, Balance. `colSpan` on loading/empty rows bumped 5 → 6.
+- Badge reuses the exact classes from the pre-existing (now-removed) Sales History `payment_status` badge — emerald/Paid, yellow/Partially Paid, red/Unpaid — and the neutral `t-bg-elevated t-text-3` style (same as the header's Inactive badge) for the `Payment` label on collection rows. No new colors introduced.
+
+Verified: `tsc --noEmit` clean, backend files parse. Hand-traced against live DB data (customer 3 / sale 38: charged 600, applied 600 → Paid; customer 2 / sales 3,4,5,41: applied 0 → Unpaid). No sale in current test data has a partial collection, so "Partially Paid" wasn't observed live — logic verified by inspection instead. Containers not rebuilt as part of this change.
+
+---
+
+## 2026-07-03 — Feature: Customer Transaction Ledger (AR Charge sales + collections)
+
+Replaced the "Sales History" and "Payments" sections on the customer detail page with a single Transaction Ledger scoped to AR Charge activity only. The pre-existing "AR Ledger" section on the same page was left as-is — it intentionally covers *every* sale tied to the customer (cash included), whereas this new ledger excludes cash/non-credit sales entirely.
+
+### `backend/sales/schemas.py`
+
+- Added `TransactionLedgerRowOut`: `seq`, `date`, `type` (`SALE`|`PAYMENT`), `sale_id`, `payment_id`, `sales_id`, `debit`, `credit`, `running_balance`.
+
+### `backend/sales/router.py`
+
+- Added `GET /sales/customers/{id}/transaction-ledger` (permission: `view_ar_ledger`).
+- A sale qualifies only if at least one `customer_payment_applied` row against it comes from a payment mode with `is_ar_charge = true`. The debit amount is the AR-charged portion only (correctly handles split tender, e.g. part Cash / part AR Charge), not the full `grand_total`.
+- Collection rows are every `customer_payment_applied` against those same sales where the mode is **not** AR Charge — mirrors the existing exclusion pattern already used by `get_ar_ledger_sale_payments` and the AR Aging report.
+- Rows are sorted oldest → newest with a running balance computed from the start of the customer's AR-Charge history (no windowed/opening balance needed). Pagination uses an ordinal `seq` field as the Load More cursor, computed after the full set is balanced, so correctness doesn't depend on page boundaries.
+- Voided AR-charged sales are excluded (only `status == 'Posted'` sales are considered) — their debt reversal isn't represented as a row in this view.
+
+### `frontend/src/services/api.ts`, `frontend/src/lib/queryKeys.ts`
+
+- Added `TransactionLedgerRowOut` type, `salesApi.customers.transactionLedger(id, cursor?, limit?)`, and `qk.customerTransactionLedger(id)`.
+
+### `frontend/src/pages/customers/CustomerDetail.tsx`
+
+- Removed the "Sales History" and "Payments" sections and their query/pagination state (`qSales`, `qPayments`, `sales`, `payments`, `loadMoreSales`, `loadMorePayments`).
+- Added a single "Transaction Ledger" section (Date, Sales ID, Debit, Credit, Balance) backed by the new endpoint, same Load More / skeleton / empty-state conventions as the rest of the page. Sale rows link to `/sales/ledger/{sale_id}`; payment rows are not clickable.
+- `salesApi.customers.sales()` / `.payments()` and their backend endpoints are now unused by this page but were left in place (not deleted) since no other caller was confirmed absent and removing a public endpoint wasn't requested.
+
+Verified with `npx tsc --noEmit` (clean) and by importing `sales/router.py` / `sales/schemas.py` directly to confirm the route registers with no errors. Not yet exercised end-to-end against a running stack.
+
+---
+
 ## 2026-07-01 — Enhancement: Add SKU to Inventory Ledger keyword search
 
 Added variant SKU as a searchable field in the keyword search bar on the Inventory Ledger page (`frontend/src/pages/stock/Ledger.tsx`). A single line added to the `hit` function inside the `filtered` useMemo:

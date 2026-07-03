@@ -181,6 +181,22 @@ class ARLedgerPaymentRowOut(BaseModel):
     amount_applied:   Decimal
 
 
+class TransactionLedgerRowOut(BaseModel):
+    """One row of a customer's AR-Charge transaction ledger — either the
+    original credit sale (debit) or a subsequent collection payment against
+    it (credit). Sorted oldest to newest with a running balance."""
+    seq:             int  # ordinal position in the full chronological ledger; used as the Load More cursor
+    date:            date
+    type:            str  # 'SALE' | 'PAYMENT'
+    sale_id:         Optional[int] = None
+    payment_id:      Optional[int] = None
+    sales_id:        str  # receipt_no for a sale row, collection_receipt_no for a payment row
+    debit:           Decimal
+    credit:          Decimal
+    running_balance: Decimal
+    status:          str  # 'Paid' | 'Partially Paid' | 'Unpaid' (SALE rows) | 'Payment' (PAYMENT rows)
+
+
 # ==========================================
 # AR LEDGER  (read-only; written programmatically)
 # ==========================================

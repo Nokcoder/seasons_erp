@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient, useQueries } from '@tanstack/react-query'
+import * as XLSX from 'xlsx'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
-import { salesApi, type ArLedgerOut, type SaleOut, type CustomerPaymentOut, type PaymentMode, type SalesReturnOut } from '../../services/api'
+import { salesApi, type PaymentMode, type SalesReturnOut, type TransactionLedgerRowOut } from '../../services/api'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
 
@@ -33,9 +34,7 @@ function termsLabel(days: number) {
 }
 
 // Page sizes for "Load More" pagination (ui_standards §5 — never unbounded)
-const AR_LEDGER_PAGE = 20
-const SALES_PAGE     = 10
-const PAYMENTS_PAGE  = 10
+const TX_LEDGER_PAGE = 20
 const RETURNS_PAGE   = 10
 
 export default function CustomerDetail() {
@@ -49,14 +48,12 @@ export default function CustomerDetail() {
   const refQueries = useQueries({
     queries: [
       { queryKey: qk.customer(cid),         queryFn: () => salesApi.customers.get(cid),                                          ...stale.transactional, enabled: !!cid },
-      { queryKey: qk.customerArLedger(cid),  queryFn: () => salesApi.customers.arLedger(cid, { limit: AR_LEDGER_PAGE }),          ...stale.transactional, enabled: !!cid },
-      { queryKey: qk.customerSales(cid),     queryFn: () => salesApi.customers.sales(cid, undefined, SALES_PAGE),                ...stale.transactional, enabled: !!cid },
-      { queryKey: qk.customerPayments(cid),  queryFn: () => salesApi.customers.payments(cid, undefined, PAYMENTS_PAGE),          ...stale.transactional, enabled: !!cid },
+      { queryKey: qk.customerTransactionLedger(cid), queryFn: () => salesApi.customers.transactionLedger(cid, undefined, TX_LEDGER_PAGE), ...stale.transactional, enabled: !!cid },
       { queryKey: qk.paymentModes(),         queryFn: () => salesApi.paymentModes.list(),                                        ...stale.reference },
       { queryKey: qk.customerReturns(cid),   queryFn: () => salesApi.returns.list({ customer_id: cid, limit: RETURNS_PAGE }),    ...stale.transactional, enabled: !!cid },
     ],
   })
-  const [qCustomer, qArLedger, qSales, qPayments, qModes, qReturns] = refQueries
+  const [qCustomer, qTxLedger, qModes, qReturns] = refQueries
   const customer    = qCustomer.data
   const paymentModes = (qModes.data ?? []).filter((m: PaymentMode) => m.is_active)
   // Record Payment excludes AR Charge/Credit modes (point-of-sale only)
@@ -66,49 +63,60 @@ export default function CustomerDetail() {
   // ── Load More pagination (ui_standards §5 — never unbounded) ──────────────
   // First page comes from React Query; subsequent pages are appended to local
   // state via cursor-based fetches (cursor = id of the last loaded row).
-  const [arLedger,  setArLedger]  = useState<ArLedgerOut[]>([])
-  const [arMore,    setArMore]    = useState(false)
-  const [arLoading, setArLoading] = useState(false)
+  // Transaction Ledger is sorted oldest → newest with a server-computed
+  // running balance, so "Load More" appends the next (more recent) chunk to
+  // the bottom using `seq` (an ordinal position, not a row id) as the cursor.
+  const [txLedger,        setTxLedger]        = useState<TransactionLedgerRowOut[]>([])
+  const [txLedgerMore,    setTxLedgerMore]    = useState(false)
+  const [txLedgerLoading, setTxLedgerLoading] = useState(false)
   useEffect(() => {
-    if (qArLedger.data) { setArLedger(qArLedger.data as ArLedgerOut[]); setArMore((qArLedger.data as ArLedgerOut[]).length === AR_LEDGER_PAGE) }
-  }, [qArLedger.data])
-  async function loadMoreArLedger() {
-    if (!arLedger.length) return
-    setArLoading(true)
+    if (qTxLedger.data) { setTxLedger(qTxLedger.data as TransactionLedgerRowOut[]); setTxLedgerMore((qTxLedger.data as TransactionLedgerRowOut[]).length === TX_LEDGER_PAGE) }
+  }, [qTxLedger.data])
+  async function loadMoreTxLedger() {
+    if (!txLedger.length) return
+    setTxLedgerLoading(true)
     try {
-      const next = await salesApi.customers.arLedger(cid, { limit: AR_LEDGER_PAGE, cursor: arLedger[arLedger.length - 1].ar_ledger_id })
-      setArLedger(p => [...p, ...next]); setArMore(next.length === AR_LEDGER_PAGE)
-    } finally { setArLoading(false) }
+      const next = await salesApi.customers.transactionLedger(cid, txLedger[txLedger.length - 1].seq, TX_LEDGER_PAGE)
+      setTxLedger(p => [...p, ...next]); setTxLedgerMore(next.length === TX_LEDGER_PAGE)
+    } finally { setTxLedgerLoading(false) }
   }
 
-  const [sales,        setSales]        = useState<SaleOut[]>([])
-  const [salesMore,    setSalesMore]    = useState(false)
-  const [salesLoading, setSalesLoading] = useState(false)
-  useEffect(() => {
-    if (qSales.data) { setSales(qSales.data as SaleOut[]); setSalesMore((qSales.data as SaleOut[]).length === SALES_PAGE) }
-  }, [qSales.data])
-  async function loadMoreSales() {
-    if (!sales.length) return
-    setSalesLoading(true)
+  // Export pulls the full, unpaginated ledger from its own backend endpoint
+  // (not just what's currently loaded via Load More) and builds the workbook
+  // client-side with `xlsx`, same as every other export in the app.
+  const [exportingLedger, setExportingLedger] = useState(false)
+  async function handleExportLedger() {
+    if (!customer) return
+    setExportingLedger(true)
     try {
-      const next = await salesApi.customers.sales(cid, sales[sales.length - 1].sale_id, SALES_PAGE)
-      setSales(p => [...p, ...next]); setSalesMore(next.length === SALES_PAGE)
-    } finally { setSalesLoading(false) }
-  }
-
-  const [payments,        setPayments]        = useState<CustomerPaymentOut[]>([])
-  const [paymentsMore,    setPaymentsMore]    = useState(false)
-  const [paymentsLoading, setPaymentsLoading] = useState(false)
-  useEffect(() => {
-    if (qPayments.data) { setPayments(qPayments.data as CustomerPaymentOut[]); setPaymentsMore((qPayments.data as CustomerPaymentOut[]).length === PAYMENTS_PAGE) }
-  }, [qPayments.data])
-  async function loadMorePayments() {
-    if (!payments.length) return
-    setPaymentsLoading(true)
-    try {
-      const next = await salesApi.customers.payments(cid, payments[payments.length - 1].payment_id, PAYMENTS_PAGE)
-      setPayments(p => [...p, ...next]); setPaymentsMore(next.length === PAYMENTS_PAGE)
-    } finally { setPaymentsLoading(false) }
+      const rows = await salesApi.customers.transactionLedgerExport(cid)
+      const today = new Date().toISOString().slice(0, 10)
+      const headerRows: (string | number)[][] = [
+        ['Customer Statement'],
+        ['Customer Name', customer.customer_name],
+        ['Terms', termsLabel(customer.terms_days)],
+        ['Credit Limit', customer.credit_limit != null ? Number(customer.credit_limit) : 'No Limit'],
+        ['Outstanding Balance', Number(customer.outstanding_balance)],
+        ['Statement generated on', today],
+        [],
+      ]
+      const dataRows = rows.map(r => ({
+        'Date':     fmtDateOnly(r.date),
+        'Sales ID': r.sales_id,
+        'Status':   r.status,
+        'Debit':    r.debit > 0 ? Number(r.debit) : '',
+        'Credit':   r.credit > 0 ? Number(r.credit) : '',
+        'Balance':  Number(r.running_balance),
+      }))
+      const ws = XLSX.utils.aoa_to_sheet(headerRows)
+      XLSX.utils.sheet_add_json(ws, dataRows, { origin: headerRows.length, skipHeader: false })
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Transaction Ledger')
+      const safeName = customer.customer_name.replace(/[^a-zA-Z0-9]+/g, '_')
+      XLSX.writeFile(wb, `${safeName}_transaction_ledger_${today}.xlsx`)
+    } finally {
+      setExportingLedger(false)
+    }
   }
 
   const [returns_,        setReturns_]        = useState<SalesReturnOut[]>([])
@@ -236,8 +244,7 @@ export default function CustomerDetail() {
         } : {}),
       })
       await qc.invalidateQueries({ queryKey: qk.customer(cid) })
-      await qc.invalidateQueries({ queryKey: qk.customerArLedger(cid) })
-      await qc.invalidateQueries({ queryKey: qk.customerPayments(cid) })
+      await qc.invalidateQueries({ queryKey: qk.customerTransactionLedger(cid) })
       await qc.invalidateQueries({ queryKey: qk.customers() })
       setShowPayment(false); setPayMode(''); setPayAmount(''); setPayRef(''); setPayReceiptNo(''); setPayNotes('')
     } catch (e: unknown) {
@@ -256,17 +263,6 @@ export default function CustomerDetail() {
     </div>
   )
   if (!customer) return <div className="p-8 t-text-4 text-sm">Customer not found.</div>
-
-  // running balance for AR ledger
-  // Ledger is in descending order (most recent first).
-  // Start from the current outstanding_balance and subtract each entry's
-  // amount_change as we walk backwards, giving the balance AFTER each event.
-  let runningBalance = customer.outstanding_balance
-  const arWithBalance = arLedger.map(row => {
-    const displayBalance = runningBalance      // balance after this transaction
-    runningBalance = runningBalance - row.amount_change  // balance before it
-    return { ...row, runningBalance: displayBalance }
-  })
 
   return (
     <div className="min-h-full t-bg-base px-6 py-6 max-w-5xl">
@@ -366,143 +362,55 @@ export default function CustomerDetail() {
         )}
       </div>
 
-      {/* AR Ledger */}
+      {/* Transaction Ledger — AR Charge sales and their collection payments only */}
       <section className="mb-6">
-        <h2 className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mb-3">AR Ledger</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-[10px] font-semibold uppercase tracking-widest t-text-3">Transaction Ledger</h2>
+          <button onClick={handleExportLedger} disabled={exportingLedger}
+            className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40 transition-colors font-medium">
+            {exportingLedger ? 'Exporting…' : 'Export to Excel'}
+          </button>
+        </div>
         <div className="t-bg-surface border t-border rounded-lg overflow-hidden">
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b t-border-strong">
-                {['Date', 'Type', 'Reference', 'Amount Change', 'Running Balance'].map(h => (
+                {['Date', 'Sales ID', 'Status', 'Debit', 'Credit', 'Balance'].map(h => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {qArLedger.isLoading && <SkeletonTable rows={5} cols={5} />}
-              {!qArLedger.isLoading && arLedger.length === 0 && (
-                <tr><td colSpan={5} className="px-3 py-6 text-center t-text-4">No AR entries.</td></tr>
+              {qTxLedger.isLoading && <SkeletonTable rows={4} cols={6} />}
+              {!qTxLedger.isLoading && txLedger.length === 0 && (
+                <tr><td colSpan={6} className="px-3 py-6 text-center t-text-4">No AR Charge transactions.</td></tr>
               )}
-              {arWithBalance.map(row => (
-                <tr key={row.ar_ledger_id} className="border-b t-border">
-                  <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDate(row.occurred_at)}</td>
+              {txLedger.map(row => (
+                <tr key={`${row.type}-${row.seq}`}
+                  onClick={() => row.sale_id != null && navigate(`/sales/ledger/${row.sale_id}`)}
+                  className={`border-b t-border ${row.sale_id != null ? 'hover:t-bg-elevated cursor-pointer' : ''}`}>
+                  <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDateOnly(row.date)}</td>
+                  <td className="px-3 py-2 font-mono t-text-1">{row.sales_id}</td>
                   <td className="px-3 py-2">
                     <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${
-                      row.reason === 'SALE'        ? 'bg-blue-950 text-blue-400' :
-                      row.reason === 'PAYMENT'     ? 'bg-emerald-950 text-emerald-400' :
-                      row.reason === 'RETURN'      ? 'bg-purple-950 text-purple-400' :
-                      row.reason === 'AR_CHARGE'   ? 'bg-amber-950 text-amber-400' :
-                      row.reason === 'AR_CREDIT'   ? 'bg-cyan-950 text-cyan-400' :
+                      row.status === 'Paid'           ? 'bg-emerald-950 text-emerald-500' :
+                      row.status === 'Partially Paid' ? 'bg-yellow-950 text-yellow-500' :
+                      row.status === 'Unpaid'         ? 'bg-red-950 text-red-500' :
                       't-bg-elevated t-text-3'
-                    }`}>{row.reason.replace('_', ' ')}</span>
+                    }`}>{row.status}</span>
                   </td>
-                  <td className="px-3 py-2 t-text-3 font-mono">
-                    {row.reference_type === 'sales' ? (
-                      <button onClick={() => navigate(`/sales/ledger/${row.reference_id}`)}
-                        className="text-blue-400 hover:underline">{row.reference_type}/{row.reference_id}</button>
-                    ) : <span>{row.reference_type}/{row.reference_id}</span>}
-                  </td>
-                  <td className={`px-3 py-2 tabular-nums font-medium text-right ${row.amount_change > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                    {row.amount_change > 0 ? `+₱${fmt(row.amount_change)}` : `-₱${fmt(Math.abs(row.amount_change))}`}
-                  </td>
-                  <td className="px-3 py-2 tabular-nums t-text-2 text-right">₱{fmt(row.runningBalance)}</td>
+                  <td className="px-3 py-2 tabular-nums text-red-400 font-medium">{row.debit > 0 ? `₱${fmt(row.debit)}` : '—'}</td>
+                  <td className="px-3 py-2 tabular-nums text-emerald-400 font-medium">{row.credit > 0 ? `₱${fmt(row.credit)}` : '—'}</td>
+                  <td className="px-3 py-2 tabular-nums t-text-2 text-right">₱{fmt(row.running_balance)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        {arMore && (
-          <button onClick={loadMoreArLedger} disabled={arLoading}
+        {txLedgerMore && (
+          <button onClick={loadMoreTxLedger} disabled={txLedgerLoading}
             className="mt-2 text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40 transition-colors font-medium">
-            {arLoading ? 'Loading…' : 'Load more'}
-          </button>
-        )}
-      </section>
-
-      {/* Sales History */}
-      <section className="mb-6">
-        <h2 className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mb-3">Sales History</h2>
-        <div className="t-bg-surface border t-border rounded-lg overflow-hidden">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b t-border-strong">
-                {['Sale PID', 'Date', 'Grand Total', 'Payment', 'Status'].map(h => (
-                  <th key={h} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {qSales.isLoading && <SkeletonTable rows={4} cols={5} />}
-              {!qSales.isLoading && sales.length === 0 && (
-                <tr><td colSpan={5} className="px-3 py-6 text-center t-text-4">No sales.</td></tr>
-              )}
-              {sales.map((s: SaleOut) => (
-                <tr key={s.sale_id}
-                  onClick={() => navigate(`/sales/ledger/${s.sale_id}`)}
-                  className="border-b t-border hover:t-bg-elevated cursor-pointer">
-                  <td className="px-3 py-2 font-mono t-text-1">{s.sale_pid ?? '—'}</td>
-                  <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDateOnly(s.transaction_date)}</td>
-                  <td className="px-3 py-2 tabular-nums t-text-1 font-medium">₱{fmt(s.grand_total)}</td>
-                  <td className="px-3 py-2">
-                    <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${
-                      s.payment_status === 'Paid' ? 'bg-emerald-950 text-emerald-500' :
-                      s.payment_status === 'Partial' ? 'bg-yellow-950 text-yellow-500' :
-                      'bg-red-950 text-red-500'
-                    }`}>{s.payment_status}</span>
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${
-                      s.status === 'Posted' ? 'bg-blue-950 text-blue-400' :
-                      s.status === 'Voided' ? 't-bg-elevated t-text-3' : 't-bg-elevated t-text-4'
-                    }`}>{s.status}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {salesMore && (
-          <button onClick={loadMoreSales} disabled={salesLoading}
-            className="mt-2 text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40 transition-colors font-medium">
-            {salesLoading ? 'Loading…' : 'Load more'}
-          </button>
-        )}
-      </section>
-
-      {/* Payments */}
-      <section className="mb-6">
-        <h2 className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mb-3">Payments</h2>
-        <div className="t-bg-surface border t-border rounded-lg overflow-hidden">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b t-border-strong">
-                {['Date', 'Mode', 'Amount', 'Reference', 'Collection Receipt No.', 'Unapplied'].map(h => (
-                  <th key={h} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {qPayments.isLoading && <SkeletonTable rows={3} cols={6} />}
-              {!qPayments.isLoading && payments.length === 0 && (
-                <tr><td colSpan={6} className="px-3 py-6 text-center t-text-4">No payments.</td></tr>
-              )}
-              {payments.map((p: CustomerPaymentOut) => (
-                <tr key={p.payment_id} className="border-b t-border">
-                  <td className="px-3 py-2 t-text-3 whitespace-nowrap">{fmtDate(p.payment_date)}</td>
-                  <td className="px-3 py-2 t-text-2">{paymentModes.find((m: PaymentMode) => m.payment_mode_id === p.payment_mode_id)?.name ?? `Mode ${p.payment_mode_id}`}</td>
-                  <td className="px-3 py-2 tabular-nums text-emerald-400 font-medium">₱{fmt(p.amount)}</td>
-                  <td className="px-3 py-2 t-text-3 font-mono text-[10px]">{p.reference_number || '—'}</td>
-                  <td className="px-3 py-2 t-text-3 font-mono text-[10px]">{p.collection_receipt_no || '—'}</td>
-                  <td className="px-3 py-2 tabular-nums t-text-3">{p.unapplied_amount > 0 ? `₱${fmt(p.unapplied_amount)}` : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {paymentsMore && (
-          <button onClick={loadMorePayments} disabled={paymentsLoading}
-            className="mt-2 text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40 transition-colors font-medium">
-            {paymentsLoading ? 'Loading…' : 'Load more'}
+            {txLedgerLoading ? 'Loading…' : 'Load more'}
           </button>
         )}
       </section>

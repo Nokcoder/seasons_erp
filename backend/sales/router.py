@@ -701,34 +701,6 @@ def delete_customer(
     db.commit()
 
 
-@router.get("/customers/{customer_id}/ar-ledger", response_model=List[schemas.ArLedgerOut])
-def get_customer_ar_ledger(
-    customer_id: int,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-    reason: Optional[str] = None,
-    limit: int = 50,
-    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
-    cursor: Optional[int] = None,
-    db: Session = Depends(get_db),
-):
-    _load_customer(customer_id, db)  # 404 guard
-    q = (
-        db.query(models.ArLedger)
-        .filter(models.ArLedger.customer_id == customer_id)
-        .order_by(models.ArLedger.occurred_at.desc(), models.ArLedger.ar_ledger_id.desc())
-    )
-    if date_from:
-        q = q.filter(models.ArLedger.occurred_at >= date_from)
-    if date_to:
-        q = q.filter(models.ArLedger.occurred_at <= date_to)
-    if reason:
-        q = q.filter(models.ArLedger.reason == reason)
-    if cursor:
-        q = q.filter(models.ArLedger.ar_ledger_id < cursor)
-    return q.limit(limit).all()
-
-
 @router.get("/customers/{customer_id}/sales", response_model=List[schemas.SaleOut])
 def get_customer_sales(
     customer_id: int,
@@ -776,6 +748,169 @@ def get_customer_payments(
     if cursor:
         q = q.filter(models.CustomerPayment.payment_id < cursor)
     return q.limit(limit).all()
+
+
+def _build_customer_transaction_ledger(customer_id: int, db: Session) -> list[dict]:
+    """Build the full, chronologically-sorted AR-Charge transaction ledger
+    for one customer, with running balance and per-row status computed.
+
+    Scope: only Posted sales that were (at least partially) charged to this
+    customer's AR balance via an AR Charge payment mode, plus every
+    collection payment subsequently applied against those sales. Cash/
+    non-credit sales are excluded entirely — they never carry an AR Charge
+    tender. Rows are sorted oldest to newest; the running balance starts
+    from zero since there is no earlier unshown balance to carry in.
+
+    Shared by the paginated `GET .../transaction-ledger` endpoint (which
+    slices this by `seq`/`limit`) and the `GET .../transaction-ledger/export`
+    endpoint (which returns it in full for the Excel export).
+    """
+    # AR Charge amount per sale — the portion of the sale actually charged to
+    # AR (not necessarily the full grand_total, e.g. split tender).
+    ar_charge_rows = (
+        db.query(
+            models.CustomerPaymentApplied.sale_id,
+            func.sum(models.CustomerPaymentApplied.amount_applied).label("charged"),
+        )
+        .join(models.CustomerPayment,
+              models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id)
+        .join(models.PaymentMode,
+              models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
+        .join(models.Sale,
+              models.CustomerPaymentApplied.sale_id == models.Sale.sale_id)
+        .filter(
+            models.Sale.customer_id == customer_id,
+            models.Sale.status == "Posted",
+            models.PaymentMode.is_ar_charge == True,
+        )
+        .group_by(models.CustomerPaymentApplied.sale_id)
+        .all()
+    )
+    if not ar_charge_rows:
+        return []
+
+    charged_by_sale = {r.sale_id: r.charged for r in ar_charge_rows}
+    ar_sale_ids = list(charged_by_sale.keys())
+
+    sales_by_id = {
+        s.sale_id: s
+        for s in db.query(models.Sale).filter(models.Sale.sale_id.in_(ar_sale_ids)).all()
+    }
+
+    # Collection payments applied against those same sales — excludes the
+    # AR Charge tender itself, which is the debit above, not a collection.
+    collection_rows = (
+        db.query(models.CustomerPaymentApplied, models.CustomerPayment)
+        .join(models.CustomerPayment,
+              models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id)
+        .join(models.PaymentMode,
+              models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
+        .filter(
+            models.CustomerPaymentApplied.sale_id.in_(ar_sale_ids),
+            models.PaymentMode.is_ar_charge == False,
+        )
+        .all()
+    )
+
+    # Per-sale total of collections applied — drives the per-sale Status
+    # column. This is intentionally scoped to amounts applied against THIS
+    # sale_id only, not the customer's overall balance: a sale is Paid when
+    # payments specifically applied to it cover its own AR-charged debit,
+    # independent of what's happening on the customer's other sales.
+    applied_by_sale: dict[int, Decimal] = {}
+    for applied, _payment in collection_rows:
+        applied_by_sale[applied.sale_id] = (
+            applied_by_sale.get(applied.sale_id, Decimal("0")) + applied.amount_applied
+        )
+
+    entries = []
+    for sale_id, charged in charged_by_sale.items():
+        sale = sales_by_id.get(sale_id)
+        if not sale:
+            continue
+        total_applied = applied_by_sale.get(sale_id, Decimal("0"))
+        if total_applied <= 0:
+            sale_status = "Unpaid"
+        elif total_applied >= charged:
+            sale_status = "Paid"
+        else:
+            sale_status = "Partially Paid"
+        entries.append({
+            "sort_key": (sale.transaction_date, 0, sale.sale_id),
+            "date": sale.transaction_date,
+            "type": "SALE",
+            "sale_id": sale.sale_id,
+            "payment_id": None,
+            "sales_id": sale.receipt_no or sale.sale_pid or f"sale/{sale.sale_id}",
+            "debit": charged,
+            "credit": Decimal("0"),
+            "status": sale_status,
+        })
+    for applied, payment in collection_rows:
+        pdate = payment.payment_date.date() if payment.payment_date else date.today()
+        entries.append({
+            "sort_key": (pdate, 1, payment.payment_id),
+            "date": pdate,
+            "type": "PAYMENT",
+            "sale_id": applied.sale_id,
+            "payment_id": payment.payment_id,
+            "sales_id": payment.collection_receipt_no or payment.reference_number or "—",
+            "debit": Decimal("0"),
+            "credit": applied.amount_applied,
+            "status": "Payment",
+        })
+
+    entries.sort(key=lambda e: e["sort_key"])
+
+    running = Decimal("0")
+    for i, e in enumerate(entries):
+        running += e["debit"] - e["credit"]
+        e["running_balance"] = running
+        e["seq"] = i
+
+    return entries
+
+
+@router.get("/customers/{customer_id}/transaction-ledger", response_model=List[schemas.TransactionLedgerRowOut])
+def get_customer_transaction_ledger(
+    customer_id: int,
+    limit: int = 20,
+    cursor: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
+):
+    """Paginated AR-Charge transaction ledger for one customer.
+
+    Pagination follows the same Load More convention as the rest of the app,
+    but since the running balance must be correct on every page, the full
+    chronological ledger is built and balanced first (see
+    `_build_customer_transaction_ledger`), then sliced using `seq` (an
+    ordinal position) as the cursor. Per-customer AR-Charge history is small
+    enough that this is cheap.
+    """
+    _load_customer(customer_id, db)  # 404 guard
+    entries = _build_customer_transaction_ledger(customer_id, db)
+    if cursor is not None:
+        entries = [e for e in entries if e["seq"] > cursor]
+    return entries[:limit]
+
+
+@router.get("/customers/{customer_id}/transaction-ledger/export", response_model=List[schemas.TransactionLedgerRowOut])
+def export_customer_transaction_ledger(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_ar_ledger")),
+):
+    """Full, unpaginated AR-Charge transaction ledger, for the Excel export.
+
+    Same rows, ordering, and running balance as `GET .../transaction-ledger`
+    with no Load More slicing. The frontend pulls this once and builds the
+    workbook client-side with the `xlsx` package, matching every other
+    export in the app (no backend-generated files elsewhere to be
+    consistent with).
+    """
+    _load_customer(customer_id, db)  # 404 guard
+    return _build_customer_transaction_ledger(customer_id, db)
 
 
 @router.post("/customers/{customer_id}/payment", response_model=schemas.CustomerPaymentOut, status_code=201)

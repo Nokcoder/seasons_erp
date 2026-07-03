@@ -180,6 +180,18 @@ Spec: `/docs/bulk_import.md`
 
 ---
 
+## Customer Transaction Ledger — implemented (2026-07-03)
+
+- [x] **`GET /sales/customers/{id}/transaction-ledger`** — new endpoint scoped to Posted sales charged (in whole or in part) to the customer's AR balance via an AR Charge payment mode, plus every collection payment subsequently applied against those sales. Cash/non-credit sales excluded. Sorted oldest→newest with a server-computed running balance; ordinal `seq` used as the Load More cursor.
+- [x] **`CustomerDetail.tsx`** — "Sales History" and "Payments" sections replaced with a single "Transaction Ledger" table (Date, Sales ID, Debit, Credit, Balance). The general "AR Ledger" section on the same page (all sales, not just AR-charge) was left in place at this point — see 2026-07-04 entry below, it's since been removed.
+- [x] **Status column (2026-07-04)** — added `status` per row: SALE rows compare total collections applied to that specific `sale_id` against its AR-charged debit (`Paid` / `Partially Paid` / `Unpaid`); PAYMENT rows are always `Payment`. Computed in the same query as `running_balance`. Column order: Date, Sales ID, Status, Debit, Credit, Balance.
+- Known gap: voided AR-charged sales are excluded from this ledger (their debt reversal isn't shown as a row here); returns credited to account against an AR-charged sale also don't appear as rows. Address if this ledger needs to reconcile 1:1 against `customer.outstanding_balance` in the future.
+- [x] **Stale invalidation fixed (2026-07-04)** — `handleRecordPayment` was invalidating the dead `qk.customerPayments(cid)` query key (left over from the removed "Payments" section) instead of `qk.customerTransactionLedger(cid)`, so recording a payment didn't auto-refresh the Transaction Ledger until a full page reload. Now invalidates the correct key. Flagged during the 2026-07-03 diagnostic session, fixed here.
+- [x] **AR Ledger section removed (2026-07-04)** — superseded by the Transaction Ledger. `GET /sales/customers/{customer_id}/ar-ledger` backend route deleted (confirmed zero other callers); the invoice-level `GET /sales/customers/ar-ledger` and `GET /sales/ar-ledger` routes are separate endpoints and were left untouched, as was the shared `ArLedgerOut` schema they still use.
+- [x] **Transaction Ledger Excel export (2026-07-04)** — `GET /sales/customers/{customer_id}/transaction-ledger/export` returns the full unpaginated history (row-building logic shared with the paginated endpoint via `_build_customer_transaction_ledger`). Frontend builds the workbook client-side with `xlsx` (same library as every other export in the app): a statement header block (Customer Name, Terms, Credit Limit, Outstanding Balance, generation date — no address/contact fields exist on `Customer`) followed by the same Date/Sales ID/Status/Debit/Credit/Balance table shown on screen. Filename: `{customer_name}_transaction_ledger_{date}.xlsx`.
+
+---
+
 ## Still out of scope (do not implement until explicitly instructed)
 
 - Reporting and analytics layer
