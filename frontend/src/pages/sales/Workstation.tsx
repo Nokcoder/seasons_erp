@@ -24,7 +24,6 @@ interface SessionHeader {
   originSaleId: string   // '' = none; stores numeric sale_id as string
   salePID:      string
   pidMode:      'auto' | 'manual'
-  receiptNo:    string
 }
 
 interface CartItem {
@@ -112,6 +111,10 @@ function calcLineTotal(item: CartItem): number {
 
 function fmt(n: number): string {
   return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function pidSku(v: { PID: string; sku?: string | null }): string {
+  return v.sku ? `${v.PID} — ${v.sku}` : v.PID
 }
 
 
@@ -230,7 +233,6 @@ export default function Workstation() {
     originSaleId: '',
     salePID:      'SALE-00001',
     pidMode:      'auto',
-    receiptNo:    '',
   })
 
   // ── customer search ───────────────────────────────────────────────────────
@@ -482,7 +484,7 @@ export default function Workstation() {
       setCartItems(prev => [...prev, {
         localId:      uid(),
         variant_id:   variant.variant_id,
-        label:        `${productName} — ${variant.variant_name} (${variant.PID})`,
+        label:        `${productName} — ${variant.variant_name} (${pidSku(variant)})`,
         unit_price:   String(uomEffectivePrice(uomOverride)),
         isPromoPrice: uomOverride.promo_price != null,
         qty:          '1',
@@ -509,7 +511,7 @@ export default function Workstation() {
       setCartItems(prev => [...prev, {
         localId:      uid(),
         variant_id:   variant.variant_id,
-        label:        `${productName} — ${variant.variant_name} (${variant.PID})`,
+        label:        `${productName} — ${variant.variant_name} (${pidSku(variant)})`,
         unit_price:   String(effectivePrice(variant)),
         isPromoPrice: isPromo,
         qty:          '1',
@@ -614,7 +616,7 @@ export default function Workstation() {
           localId:      uid(),
           variant_id:   i.variant_id,
           label:        i.variant
-            ? `${i.variant.variant_name} (${i.variant.PID})`
+            ? `${i.variant.variant_name} (${pidSku(i.variant)})`
             : `Variant ${i.variant_id}`,
           unit_price:   String(i.unit_price),
           isPromoPrice: false,
@@ -634,7 +636,6 @@ export default function Workstation() {
         registerId: draft.register_id  ? String(draft.register_id)  : h.registerId,
         employeeId: draft.employee_id  ? String(draft.employee_id)  : h.employeeId,
         shiftId:    draft.shift_id     ? String(draft.shift_id)     : h.shiftId,
-        receiptNo:  draft.receipt_no   ?? '',
       }))
       setTrayOpen(false)
     } catch (e: unknown) {
@@ -657,7 +658,6 @@ export default function Workstation() {
       customer_id:        header.customerId    ? parseInt(header.customerId)    : null,
       origin_sale_id:     header.originSaleId  ? parseInt(header.originSaleId)  : null,
       sale_pid:           header.salePID       || undefined,
-      receipt_no:         header.receiptNo     || undefined,
       idempotency_key:    txnKey,
       cart_discount_pct:  cartDiscPct  ? parseFloat(cartDiscPct)  : null,
       cart_discount_flat: cartDiscFlat ? parseFloat(cartDiscFlat) : null,
@@ -680,7 +680,6 @@ export default function Workstation() {
       employee_id:        resolveEmployeeId(),
       shift_id:           header.shiftId    ? parseInt(header.shiftId)    : null,
       customer_id:        header.customerId ? parseInt(header.customerId) : null,
-      receipt_no:         header.receiptNo  || undefined,
       cart_discount_pct:  canDiscount && cartDiscPct  ? parseFloat(cartDiscPct)  : null,
       cart_discount_flat: canDiscount && cartDiscFlat ? parseFloat(cartDiscFlat) : null,
       discount_amount:    canDiscount ? cartDiscountAmt : null,
@@ -794,7 +793,6 @@ export default function Workstation() {
       setActiveDraftId(null)
       setTxnKey(uid())
       clearOriginSale()
-      setHeaderField('receiptNo', '')
       await refreshDrafts()
       flash(`Posted ${posted.sale_pid ?? 'sale'} successfully.`)
     } catch (e: unknown) {
@@ -815,7 +813,6 @@ export default function Workstation() {
       setTenders([{ localId: uid(), payment_mode_id: cashModePID ? String(cashModePID) : '', amount: '', reference_number: '', memo_code: '', memo_valid: null, memo_invalid_reason: '', check_number: '', check_date: '', bank_name: '' }])
       setActiveDraftId(null)
       clearOriginSale()
-      setHeaderField('receiptNo', '')
       await refreshDrafts()
       flash('Draft voided.')
     } catch (e: unknown) {
@@ -833,7 +830,6 @@ export default function Workstation() {
     setActiveDraftId(null)
     setTxnKey(uid())
     clearOriginSale()
-    setHeaderField('receiptNo', '')
     setError('')
   }
 
@@ -1078,9 +1074,9 @@ export default function Workstation() {
           )}
         </div>
 
-        {/* Sale PID */}
+        {/* Receipt No. (sale_pid) */}
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Sale PID</span>
+          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Receipt No.</span>
           <div className="flex items-center gap-1.5">
             <input
               type="text"
@@ -1096,18 +1092,6 @@ export default function Workstation() {
               {header.pidMode === 'auto' ? 'Auto' : 'Manual'}
             </button>
           </div>
-        </div>
-
-        {/* Receipt No. */}
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-medium uppercase tracking-widest t-text-3">Receipt No.</span>
-          <input
-            type="text"
-            value={header.receiptNo}
-            onChange={e => setHeaderField('receiptNo', e.target.value)}
-            placeholder="optional"
-            className={`${hdrInput} w-28`}
-          />
         </div>
       </div>
 
@@ -1153,7 +1137,7 @@ export default function Workstation() {
                 >
                   <p className="text-xs font-semibold t-text-1 leading-snug">{item.product_brand}</p>
                   <p className="text-xs t-text-2">{variant.variant_name}</p>
-                  <p className="text-[10px] t-text-3 font-mono tracking-wide">{variant.PID}</p>
+                  <p className="text-[10px] t-text-3 font-mono tracking-wide">{pidSku(variant)}</p>
                   {isPromo ? (
                     <p className="text-sm font-bold mt-0.5 tabular-nums">
                       <span className="line-through text-xs text-gray-600 font-normal mr-1.5">₱{fmt(variant.price ?? 0)}</span>

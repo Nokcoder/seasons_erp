@@ -358,13 +358,15 @@ export default function Catalogue() {
   // ── export ────────────────────────────────────────────────────────────────
   function handleExport() {
     const data = filteredRows.map(({ product: p, variant: v }) => {
-      const row: Record<string, unknown> = {
-        Brand: p.brand, 'Variant Name': v.variant_name, PID: v.PID,
-        SKU: v.sku ?? '', 'Product Type': p.product_type,
-        Category: p.categories[0]?.category_name ?? '',
-        Price: v.price, 'Promo Price': v.promo_price ?? '',
-        'Total Stock': physicalStock(v), Status: p.status,
-      }
+      const row: Record<string, unknown> = { Brand: p.brand, 'Variant Name': v.variant_name, PID: v.PID }
+      if (cols.sku)        row['SKU'] = v.sku ?? ''
+      if (cols.type)       row['Product Type'] = p.product_type
+      if (cols.category)   row['Category'] = p.categories[0]?.category_name ?? ''
+      if (cols.price)      row['Price'] = v.price
+      if (cols.promo)      row['Promo Price'] = v.promo_price ?? ''
+      if (cols.totalStock) row['Total Stock'] = physicalStock(v)
+      if (cols.status)     row['Status'] = p.status
+      if (cols.phasedOut)  row['Phased Out'] = v.is_phased_out ? 'Yes' : 'No'
       selectedLocs.forEach(l => { row[l.location_name] = stockAtLoc(v, l.location_id) })
       if (extraCost && v.cost_layers.length) {
         row['Net Unit Cost'] = v.cost_layers[0].net_unit_cost; row['FIFO Layers'] = v.cost_layers.length
