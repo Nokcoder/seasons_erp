@@ -31,7 +31,7 @@ const PAGE = 100
 
 function DocIdCell({ entry }: { entry: LedgerEntry }) {
   const navigate = useNavigate()
-  const pid = entry.document_pid
+  const pid = entry.document_id
   if (!pid) return <span className="t-text-4">—</span>
 
   if (entry.reason === 'TRANSFER_IN' || entry.reason === 'TRANSFER_OUT') {
@@ -124,7 +124,7 @@ export default function Ledger() {
         normalize(e.variant?.PID            ?? '').includes(term) ||
         normalize(e.variant?.sku            ?? '').includes(term) ||
         normalize(e.reference_id            ?? '').includes(term) ||
-        normalize(e.document_pid            ?? '').includes(term)
+        normalize(e.document_id             ?? '').includes(term)
       return allTerms.every(hit)
     })
   }, [allEntries, searchTags, liveInput])
@@ -138,7 +138,7 @@ export default function Ledger() {
       Location:       e.location?.location_name ?? '',
       Reason:         e.reason,
       'Qty Change':   e.qty_change,
-      'Document ID':  e.document_pid ?? '',
+      'Document ID':  e.document_id ?? '',
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
     const wb = XLSX.utils.book_new()

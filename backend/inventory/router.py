@@ -530,7 +530,7 @@ def list_ledger(
     """Top-level ledger browser. Excludes SALE reason. Cursor-based pagination.
 
     reason accepts a single value OR comma-separated list (e.g. RECEIVE,TRANSFER_IN).
-    document_pid is resolved via batch lookup against inventory_transfers and
+    document_id is resolved via batch lookup against inventory_transfers and
     procurement.inventory_shipments so the frontend can display and link to source docs.
     """
     from procurement import models as proc_models
@@ -582,29 +582,30 @@ def list_ledger(
         transfer_pid_map = {str(r.transfer_id): r.transfer_pid or f"TRF-{r.transfer_id:06d}"
                             for r in rows}
 
-    shipment_pid_map: dict[str, str] = {}
+    # Document ID = the physical/supplier document reference (reference_number),
+    # not the system-generated shipment_pid — see docs/changelog.md.
+    shipment_docid_map: dict[str, str] = {}
     if shipment_ids:
         rows = (
             db.query(proc_models.InventoryShipment.shipment_id,
-                     proc_models.InventoryShipment.shipment_pid)
+                     proc_models.InventoryShipment.reference_number)
             .filter(proc_models.InventoryShipment.shipment_id.in_(
                 [int(x) for x in shipment_ids if x.isdigit()]
             ))
             .all()
         )
-        shipment_pid_map = {str(r.shipment_id): r.shipment_pid or f"SHP-{r.shipment_id:06d}"
-                            for r in rows}
+        shipment_docid_map = {str(r.shipment_id): r.reference_number for r in rows}
 
     result = []
     for entry in entries:
         out = schemas.LedgerEntryContextOut.model_validate(entry)
         ref = entry.reference_id or ""
         if entry.reference_type == "inventory_transfer":
-            out.document_pid = transfer_pid_map.get(ref)
+            out.document_id = transfer_pid_map.get(ref)
         elif entry.reference_type == "inventory_shipments":
-            out.document_pid = shipment_pid_map.get(ref)
+            out.document_id = shipment_docid_map.get(ref)
         else:
-            out.document_pid = ref or None
+            out.document_id = ref or None
         result.append(out)
     return result
 
@@ -1301,6 +1302,7 @@ def get_purchase_history(
     rows = (
         db.query(
             proc_models.InventoryShipment.shipment_pid,
+            proc_models.InventoryShipment.reference_number,
             proc_models.ReceivingDetail.received_at,
             proc_models.ReceivingDetail.quantity_actual,
             proc_models.ReceivingDetail.quantity_rejected,
@@ -1333,7 +1335,7 @@ def get_purchase_history(
             .first()
         )
         result.append(schemas.PurchaseHistoryItem(
-            shipment_pid=r.shipment_pid,
+            document_id=r.reference_number,
             received_at=r.received_at,
             supplier_name=r.supplier_name,
             quantity_received=qty_received,

@@ -1313,8 +1313,8 @@ export default function Detail() {
         {/* ── PURCHASE HISTORY ── */}
         <SectionHead title="Purchase History" />
         <HistoryTable
-          cols={['Shipment PID','Date','Supplier','Qty Received','Net Unit Cost','QC Status']}
-          rows={purchaseHist.map(h => [h.shipment_pid, fmtDate(h.received_at), h.supplier_name, h.quantity_received, fmt(h.net_unit_cost), h.qc_status])}
+          cols={['Document ID','Date','Supplier','Qty Received','Net Unit Cost','QC Status']}
+          rows={purchaseHist.map(h => [h.document_id, fmtDate(h.received_at), h.supplier_name, h.quantity_received, fmt(h.net_unit_cost), h.qc_status])}
           hasMore={purchHasMore}
           onLoadMore={() => loadMore('purchase', purchaseHist.length)}
           loading={histLoading === 'purchase'}

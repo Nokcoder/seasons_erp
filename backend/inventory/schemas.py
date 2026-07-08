@@ -426,7 +426,7 @@ class LedgerEntryContextOut(BaseModel):
     reference_type: Optional[str] = None
     reference_id:   Optional[str] = None
     occurred_at:    datetime
-    document_pid:   Optional[str] = None
+    document_id:    Optional[str] = None
     variant:        Optional[VariantBriefOut]  = None
     location:       Optional[LocationBriefOut] = None
     class Config: from_attributes = True
@@ -522,7 +522,7 @@ class SalesHistoryItem(BaseModel):
 
 # ── PURCHASE HISTORY ITEM (derived from receiving_details + shipments) ────────
 class PurchaseHistoryItem(BaseModel):
-    shipment_pid:      Optional[str]      = None
+    document_id:       Optional[str]      = None  # shipment.reference_number — the physical/supplier document reference, not shipment_pid
     received_at:       Optional[datetime] = None
     supplier_name:     Optional[str]      = None
     quantity_received: Decimal

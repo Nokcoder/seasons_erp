@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-07-08 — Rename: LedgerEntryContextOut.document_pid → document_id
+
+Follow-up to the same-day "Document ID" data-source fix below. That fix corrected *what* both fields resolve to (`reference_number`, not `shipment_pid`) but left the two API field names inconsistent: `LedgerEntryContextOut.document_pid` vs `PurchaseHistoryItem.document_id` for the same underlying value. `document_pid` was also a misleading name on its own — the value is a manually-entered reference number, not an auto-generated PID (except for the transfer branch, which does resolve a real `transfer_pid`, but the field carries either kind depending on `reference_type`, so `document_id` — the generic name — is the more honest one throughout).
+
+- **`backend/inventory/schemas.py`** — `LedgerEntryContextOut.document_pid` → `.document_id`.
+- **`backend/inventory/router.py`** — `list_ledger` (the only endpoint emitting this schema): docstring updated, all three `out.document_pid = ...` assignments (transfer branch, shipment branch, fallback branch) renamed to `out.document_id`.
+- **`frontend/src/services/api.ts`** — `LedgerEntry.document_pid` → `.document_id`.
+- **`frontend/src/pages/stock/Ledger.tsx`** — 3 usages renamed: `DocIdCell`'s `pid` lookup, the keyword-search predicate, the XLSX export column source.
+
+Grepped the full frontend and backend afterward — zero remaining `document_pid` references in code; only the two prior changelog/backlog entries below still say `document_pid`, left untouched since they're an accurate historical record of what the field was called at the time.
+
+Verified live: rebuilt the backend container, confirmed `GET /products/ledger?reason=RECEIVE` now returns `document_id` (not `document_pid`) with the correct `reference_number` values; no `TRANSFER_IN` rows existed in the current DB to re-exercise that branch directly, but the code path is unchanged apart from the field name and was already covered by inspection.
+
+## 2026-07-08 — Fix: receiving "Document ID" columns were showing shipment_pid instead of reference_number
+
+Two display points on `inventory_shipments`-linked data were pulling the wrong field. `shipment_pid` (`SHP-000001`, system-generated) and `reference_number` (the supplier's physical document reference, labeled "Document ID" everywhere else in the app — `Receiving.tsx`, `ReceivingDetail.tsx`, `ReceivingConfirm.tsx`) are different fields; these two spots were conflating them.
+
+### Inventory Ledger (`/stock/ledger`) — `backend/inventory/router.py`, `list_ledger`
+
+- Was: `document_pid` for `reference_type == "inventory_shipments"` rows was resolved from `InventoryShipment.shipment_pid` (with a `f"SHP-{id:06d}"` synthetic fallback if null).
+- Now: resolved from `InventoryShipment.reference_number` (`shipment_docid_map`, renamed from `shipment_pid_map`). No synthetic fallback — a shipment with no reference number on file now shows `—` (existing frontend behavior for a falsy `document_pid`) rather than a fabricated shipment-PID-shaped placeholder.
+- Link behavior unchanged — `DocIdCell` in `Ledger.tsx` navigates on `entry.reference_id` (the shipment_id), never on the displayed text, so `/stock/receiving/:shipment_id` navigation was never affected either way.
+
+### Variant Detail → Purchase History (`/inventory/:variant_id`) — `backend/inventory/router.py` `get_purchase_history`, `schemas.py`, `frontend/services/api.ts`, `Detail.tsx`
+
+- Was: `PurchaseHistoryItem.shipment_pid`, sourced from `InventoryShipment.shipment_pid`, rendered under a column literally labeled "Shipment PID."
+- Now: field renamed to `PurchaseHistoryItem.document_id`, sourced from `InventoryShipment.reference_number`; column relabeled "Document ID." Table has no row-level link, so no navigation behavior to preserve.
+- Left untouched: the `cost_layer` lookup inside the same function still matches by `InventoryShipment.shipment_pid == r.shipment_pid` — that's an internal join key to find the right cost layer, not a display value, and is out of scope per this fix's boundary. `shipment_pid` is still selected in the query for that purpose.
+
+### Confirmed untouched
+
+`shipment_pid` still drives the "Shipment PID" column on Receiving Overview (`Receiving.tsx`) and the Shipment Detail pages (`ReceivingDetail.tsx`, `ReceivingConfirm.tsx`) — verified via live API check against `GET /procurement/shipments/1` after the fix (`shipment_pid: "SHP-000001"`, `reference_number: "test1"`, both correct and independent).
+
+### Verified live (Docker stack rebuilt, tested against real shipment data, throwaway test user cleaned up after)
+
+- `GET /products/ledger?reason=RECEIVE` — `document_pid` now returns `"test1"`/`"test2"`/`"test3"` (real `reference_number` values already in the DB) instead of `"SHP-000001"` etc.
+- `GET /products/variants/1/purchase-history` — `document_id` now returns `"test1"`/`"test2"` instead of the shipment PIDs; `net_unit_cost` still populated correctly, confirming the untouched internal `shipment_pid` join still works.
+
 ## 2026-07-07 — Fix: reverse barcode resolver, DB-level collision triggers, PID/barcode hardening (completes pid_editability_fix.md batch)
 
 Completes the batch below: the previous same-day entry covered Fix 1 (PID unlock), the forward half of Fix 2, and the app-level half of Fix 3. This pass adds the reverse resolver, the DB-level enforcement, closes two collision-check gaps left on the variant-creation paths, and audits the redirected Fix 5 scope.

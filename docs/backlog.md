@@ -232,6 +232,18 @@ Spec: `/docs/pid_editability_fix.md`. See `/docs/changelog.md` for detail.
 
 ---
 
+## Receiving "Document ID" data-source fix — implemented (2026-07-08)
+
+See `/docs/changelog.md` for detail.
+
+- [x] **Inventory Ledger (`/stock/ledger`)** — `document_pid` for RECEIVE entries was resolving from `shipment_pid` (system-generated), corrected to `reference_number` (the actual "Document ID" field, per the label already used on Receiving Overview/Detail/Confirm). Link target (`reference_id` → shipment_id) was already correct and untouched.
+- [x] **Variant Detail → Purchase History** — was displaying `shipment_pid` under a column literally labeled "Shipment PID," corrected to `reference_number` under "Document ID." Renamed `PurchaseHistoryItem.shipment_pid` → `.document_id` end to end (schema, API type, table).
+- [x] **Confirmed untouched** — `shipment_pid` still drives the Shipment PID column on Receiving Overview and Shipment Detail; the internal `cost_layer` lookup inside `get_purchase_history` still joins on `shipment_pid` (not a display value, out of scope for this fix).
+- [x] **Follow-up: `LedgerEntryContextOut.document_pid` renamed to `document_id`** — for consistency with `PurchaseHistoryItem.document_id` (same underlying value, both now the same field name) and because `document_pid` was a misleading name for a manually-entered reference number. Backend schema + `list_ledger`, frontend `api.ts` type + `Ledger.tsx` (3 usages). Confirmed zero remaining `document_pid` references in code.
+- Verified live against real shipment data (Docker stack rebuilt) — both endpoints now return `reference_number` values instead of shipment PIDs; `net_unit_cost` still resolves correctly, confirming the untouched internal join wasn't broken.
+
+---
+
 ## Still out of scope (do not implement until explicitly instructed)
 
 - Reporting and analytics layer

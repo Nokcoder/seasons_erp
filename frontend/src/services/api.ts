@@ -923,7 +923,7 @@ export interface SalesHistoryItem {
   quantity: number; unit_price: number; line_total: number; sale_status: string
 }
 export interface PurchaseHistoryItem {
-  shipment_pid: string | null; received_at: string | null; supplier_name: string | null
+  document_id: string | null; received_at: string | null; supplier_name: string | null
   quantity_received: number; net_unit_cost: number | null; qc_status: string | null
 }
 
@@ -1281,7 +1281,7 @@ export interface LedgerEntry {
   reference_type: string | null
   reference_id: string | null
   occurred_at: string
-  document_pid: string | null
+  document_id: string | null
   variant?: { variant_id: number; PID: string; variant_name: string; sku?: string | null
               product?: { brand: string } }
   location?: { location_id: number; location_name: string }
