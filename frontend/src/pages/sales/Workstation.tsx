@@ -541,6 +541,21 @@ export default function Workstation() {
         }
       }
     }
+
+    // Reverse resolver, step 2 (docs/pid_editability_fix.md Fix 2) — no
+    // explicit barcode matched; fall back to the variant's own current PID.
+    // A PID that has been renamed away from matches nothing here.
+    for (const catalogItem of catalog) {
+      for (const v of catalogItem.variants) {
+        if (v.PID.toLowerCase() === ql) {
+          addToCart(v, catalogItem.product_brand)
+          setSearch('')
+          return
+        }
+      }
+    }
+
+    flash(`Item not found for "${q}"`, true)
   }
 
   function handleUomChange(localId: string, fromUomId: string, variant: POSVariant | undefined) {

@@ -244,6 +244,19 @@ export default function Detail() {
   // ── save handler ──────────────────────────────────────────────────────────
   async function handleSave() {
     if (!variant || !product) return
+
+    if ('PID' in variantEdits) {
+      const hasExplicitBaseUomBarcode = variant.barcodes.some(
+        bc => bc.is_primary && bc.uom_id === product.base_uom_id
+      )
+      if (!hasExplicitBaseUomBarcode) {
+        const proceed = window.confirm(
+          'This item has no barcode on file — its scannable code will change to match the new PID. Reprint any physical labels currently in use.'
+        )
+        if (!proceed) return
+      }
+    }
+
     setSaving(true)
     try {
       const promises: Promise<unknown>[] = []

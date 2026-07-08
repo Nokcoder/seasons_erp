@@ -791,7 +791,11 @@ def cost_confirm(
             continue
         try:
             variant = db.query(inv_models.Variant).filter_by(PID=pid).first()
+            if not variant:
+                raise ValueError(f"PID '{pid}' not found")
             supplier = db.query(inv_models.Supplier).filter_by(supplier_code=sup).first()
+            if not supplier:
+                raise ValueError(f"Supplier code '{sup}' not found")
             vs = db.query(inv_models.VariantSupplier).filter_by(
                 variant_id=variant.variant_id, supplier_id=supplier.supplier_id
             ).first()

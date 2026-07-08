@@ -13,6 +13,7 @@ import {
   type ARLedgerPaymentRowOut,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 const PAGE_SIZE = 200
 const STATUSES = ['Open', 'Partial', 'Overdue', 'Paid'] as const
@@ -282,8 +283,10 @@ export default function CustomerARLedger() {
       'Issue Date':    fmtDate(r.transaction_date),
       'Due Date':      fmtDate(r.due_date),
       'Status':        r.status,
-      'Balance Due':   Number(r.balance_due) > 0 ? Number(r.balance_due) : '',
-      'Total Amount':  r.isLast ? Number(r.subtotal) : '',
+      'Balance Due':   Number(r.balance_due),
+      // Total Amount is a per-customer-group subtotal, shown once on the
+      // group's last row only — genuinely not applicable to earlier rows.
+      'Total Amount':  r.isLast ? Number(r.subtotal) : undefined,
     }))
     const totalsRow = {
       'Customer Name': 'Total',
@@ -294,7 +297,9 @@ export default function CustomerARLedger() {
       'Balance Due':   totalBalanceDue,
       'Total Amount':  totalAmount,
     }
-    const ws = XLSX.utils.json_to_sheet([...dataRows, totalsRow])
+    const ws = jsonToFormattedSheet([...dataRows, totalsRow], {
+      'Balance Due': MONEY_FORMAT, 'Total Amount': MONEY_FORMAT,
+    })
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'AR Ledger')
     XLSX.writeFile(wb, `ar_ledger_${today}.xlsx`)

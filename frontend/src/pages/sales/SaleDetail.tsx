@@ -11,6 +11,7 @@ import {
   type SaleOut, type SalesReturnOut,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT, PCT_FORMAT } from '../../lib/xlsxMoney'
 
 function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
@@ -132,30 +133,40 @@ export default function SaleDetail() {
       'Sale PID': sale.sale_pid ?? '', 'Date': fmtDateOnly(sale.transaction_date),
       'Cashier': sale.employee_id ? (employeeMap.get(sale.employee_id) ?? '') : '',
       'Customer': sale.customer_id ? (customerMap.get(sale.customer_id)?.customer_name ?? '') : 'Walk-in',
-      'Grand Total': sale.grand_total, 'Receipt Total': sale.receipt_grand_total ?? '',
-      'Variance': sale.audit_variance ?? '', 'Payment Status': sale.payment_status, 'Sale Status': sale.status,
+      'Grand Total': Number(sale.grand_total),
+      'Receipt Total': sale.receipt_grand_total != null ? Number(sale.receipt_grand_total) : undefined,
+      'Variance': sale.audit_variance != null ? Number(sale.audit_variance) : undefined,
+      'Payment Status': sale.payment_status, 'Sale Status': sale.status,
     }
     // Sheet 1 — Tender Breakdown
-    const tenderRows = ((sale as SaleOut).payments ?? []).map((p: CustomerPaymentOut) => {
+    const tenderRows: Record<string, unknown>[] = ((sale as SaleOut).payments ?? []).map((p: CustomerPaymentOut) => {
       const fallback   = modeMap.get(p.payment_mode_id)
       const modeName   = p.payment_mode_name ?? fallback?.name ?? `Mode ${p.payment_mode_id}`
       const isPhysical = p.payment_mode_is_physical != null ? p.payment_mode_is_physical : (fallback?.is_physical ?? true)
-      return { ...hdr, 'Payment Mode': modeName, Amount: p.amount, 'Reference Number': p.reference_number ?? '', 'Money Type': isPhysical ? 'Physical' : 'Virtual' }
+      return { ...hdr, 'Payment Mode': modeName, Amount: Number(p.amount), 'Reference Number': p.reference_number ?? '', 'Money Type': isPhysical ? 'Physical' : 'Virtual' }
     })
-    if (tenderRows.length === 0) tenderRows.push({ ...hdr, 'Payment Mode': '', Amount: '', 'Reference Number': '', 'Money Type': '' })
+    if (tenderRows.length === 0) tenderRows.push({ ...hdr, 'Payment Mode': '', Amount: undefined, 'Reference Number': '', 'Money Type': '' })
 
     // Sheet 2 — Line Item Detail
     const itemRows = (sale.items ?? []).map((i: SaleItemOut) => ({
       ...hdr,
       Brand: i.variant?.product_brand ?? '', 'Variant Name': i.variant?.variant_name ?? '', PID: i.variant?.PID ?? '',
-      Qty: i.quantity, 'Unit Price': i.unit_price, 'Disc %': i.discount_pct ?? '', 'Disc ₱': i.discount_flat ?? '',
-      'Line Total': i.line_total, 'Net Unit Cost': i.net_unit_cost ?? '',
+      Qty: i.quantity, 'Unit Price': Number(i.unit_price),
+      'Disc %': i.discount_pct != null ? Number(i.discount_pct) : undefined,
+      'Disc ₱': i.discount_flat != null ? Number(i.discount_flat) : undefined,
+      'Line Total': Number(i.line_total),
+      'Net Unit Cost': i.net_unit_cost != null ? Number(i.net_unit_cost) : undefined,
       'Cost Source': i.cost_source ?? '', 'Product Type': i.variant?.product_type ?? '',
     }))
 
+    const numFormats = {
+      'Grand Total': MONEY_FORMAT, 'Receipt Total': MONEY_FORMAT, 'Variance': MONEY_FORMAT,
+      'Amount': MONEY_FORMAT, 'Unit Price': MONEY_FORMAT, 'Disc ₱': MONEY_FORMAT,
+      'Line Total': MONEY_FORMAT, 'Net Unit Cost': MONEY_FORMAT, 'Disc %': PCT_FORMAT,
+    }
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tenderRows), 'Tender Breakdown')
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemRows),   'Line Item Detail')
+    XLSX.utils.book_append_sheet(wb, jsonToFormattedSheet(tenderRows, numFormats), 'Tender Breakdown')
+    XLSX.utils.book_append_sheet(wb, jsonToFormattedSheet(itemRows, numFormats),   'Line Item Detail')
     XLSX.writeFile(wb, `sale_${sale.sale_pid ?? sid}.xlsx`)
   }
 

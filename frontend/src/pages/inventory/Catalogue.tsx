@@ -12,6 +12,7 @@ import {
 } from '../../services/api'
 import * as XLSX from 'xlsx'
 import { normalize } from '../../lib/normalize'
+import { jsonToFormattedSheet, MONEY_FORMAT, PCT_FORMAT } from '../../lib/xlsxMoney'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -296,6 +297,7 @@ export default function Catalogue() {
   const [extraSupplier, setExtraSupplier] = useState(false)
   const [extraAttrs,    setExtraAttrs]    = useState(false)
   const [extraBarcodes, setExtraBarcodes] = useState(false)
+  const [extraVariantId, setExtraVariantId] = useState(false)
 
   // ── unique attribute keys ─────────────────────────────────────────────────
   const attrKeys = useMemo(() => {
@@ -359,28 +361,33 @@ export default function Catalogue() {
   function handleExport() {
     const data = filteredRows.map(({ product: p, variant: v }) => {
       const row: Record<string, unknown> = { Brand: p.brand, 'Variant Name': v.variant_name, PID: v.PID }
+      if (extraVariantId) row['variant_id'] = v.variant_id
       if (cols.sku)        row['SKU'] = v.sku ?? ''
       if (cols.type)       row['Product Type'] = p.product_type
       if (cols.category)   row['Category'] = p.categories[0]?.category_name ?? ''
-      if (cols.price)      row['Price'] = v.price
-      if (cols.promo)      row['Promo Price'] = v.promo_price ?? ''
+      if (cols.price)      row['Price'] = v.price != null ? Number(v.price) : undefined
+      if (cols.promo)      row['Promo Price'] = v.promo_price != null ? Number(v.promo_price) : undefined
       if (cols.totalStock) row['Total Stock'] = physicalStock(v)
       if (cols.status)     row['Status'] = p.status
       if (cols.phasedOut)  row['Phased Out'] = v.is_phased_out ? 'Yes' : 'No'
       selectedLocs.forEach(l => { row[l.location_name] = stockAtLoc(v, l.location_id) })
       if (extraCost && v.cost_layers.length) {
-        row['Net Unit Cost'] = v.cost_layers[0].net_unit_cost; row['FIFO Layers'] = v.cost_layers.length
+        row['Net Unit Cost'] = Number(v.cost_layers[0].net_unit_cost); row['FIFO Layers'] = v.cost_layers.length
       }
       if (extraSupplier && v.suppliers.length) {
         const ps = v.suppliers.find(s => s.is_primary) ?? v.suppliers[0]
         row['Primary Supplier'] = ps.supplier.supplier_name; row['Supplier SKU'] = ps.supplier_sku ?? ''
-        row['Gross Cost'] = ps.gross_cost ?? ''; row['Supplier Discount %'] = ps.supplier_discount
+        row['Gross Cost'] = ps.gross_cost != null ? Number(ps.gross_cost) : undefined
+        row['Supplier Discount %'] = ps.supplier_discount
       }
       if (extraAttrs) attrKeys.forEach(k => { row[`Attr: ${k}`] = v.attributes?.[k] ?? '' })
       if (extraBarcodes) row['Barcodes'] = v.barcodes.map(b => b.barcode).join(', ')
       return row
     })
-    const ws = XLSX.utils.json_to_sheet(data)
+    const ws = jsonToFormattedSheet(data, {
+      'Price': MONEY_FORMAT, 'Promo Price': MONEY_FORMAT, 'Net Unit Cost': MONEY_FORMAT, 'Gross Cost': MONEY_FORMAT,
+      'Supplier Discount %': PCT_FORMAT,
+    })
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Inventory')
     XLSX.writeFile(wb, `inventory_${new Date().toISOString().slice(0, 10)}.xlsx`)
@@ -722,6 +729,7 @@ export default function Catalogue() {
             <p className="text-xs font-semibold t-text-1 mb-4">Export Options</p>
             <p className="text-[10px] t-text-4 mb-2 uppercase tracking-widest">Additional Fields</p>
             {([
+              ['variant_id (for re-import anchoring)', extraVariantId, setExtraVariantId],
               ['Cost data (net_unit_cost, FIFO layers)', extraCost,     setExtraCost],
               ['Supplier data (gross_cost, discount, SKU)', extraSupplier, setExtraSupplier],
               ['Attributes',  extraAttrs,    setExtraAttrs],

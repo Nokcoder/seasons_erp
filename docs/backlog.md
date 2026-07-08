@@ -104,6 +104,9 @@ The following were implemented and verified. See `/docs/changelog.md` for detail
 - [x] **Non-standard sale PIDs in DB** — Won't fix. Renaming PIDs that appear on physical receipts would break the paper trail. `GET /sales/next-pid` already ignores non-conforming PIDs correctly. Display in the Ledger is acceptable as-is.
 - [x] **CustomerDetail running balance** — Fixed in `CustomerDetail.tsx`. Running balance now correctly computed by starting from `outstanding_balance` and subtracting each `amount_change` as we walk backwards through the descending AR ledger, giving the true balance after each historical transaction.
 - [x] **`confirm_shipment` (old one-step endpoint)** — `POST /shipments/{id}/confirm` replaced with a 410 Gone stub that directs callers to the two-stage workflow. Old function body removed. `ReceivingDetail.tsx` updated: editable reconciliation fields removed (Stage 1 quantities are already locked in the DB); "Confirm Receipt" button replaced with read-only status badge + "Confirm Costs →" navigation to `ReceivingConfirm`.
+- [ ] Legacy `/products/import/*` endpoints (`inventory/router.py`) have no
+  frontend caller and are orphaned dead code — decide whether to build
+  a Catalogue import UI around them or remove them.
 
 ---
 
@@ -189,6 +192,43 @@ Spec: `/docs/bulk_import.md`
 - [x] **Stale invalidation fixed (2026-07-04)** — `handleRecordPayment` was invalidating the dead `qk.customerPayments(cid)` query key (left over from the removed "Payments" section) instead of `qk.customerTransactionLedger(cid)`, so recording a payment didn't auto-refresh the Transaction Ledger until a full page reload. Now invalidates the correct key. Flagged during the 2026-07-03 diagnostic session, fixed here.
 - [x] **AR Ledger section removed (2026-07-04)** — superseded by the Transaction Ledger. `GET /sales/customers/{customer_id}/ar-ledger` backend route deleted (confirmed zero other callers); the invoice-level `GET /sales/customers/ar-ledger` and `GET /sales/ar-ledger` routes are separate endpoints and were left untouched, as was the shared `ArLedgerOut` schema they still use.
 - [x] **Transaction Ledger Excel export (2026-07-04)** — `GET /sales/customers/{customer_id}/transaction-ledger/export` returns the full unpaginated history (row-building logic shared with the paginated endpoint via `_build_customer_transaction_ledger`). Frontend builds the workbook client-side with `xlsx` (same library as every other export in the app): a statement header block (Customer Name, Terms, Credit Limit, Outstanding Balance, generation date — no address/contact fields exist on `Customer`) followed by the same Date/Sales ID/Status/Debit/Credit/Balance table shown on screen. Filename: `{customer_name}_transaction_ledger_{date}.xlsx`.
+
+---
+
+## Money-column export formatting — implemented (2026-07-04)
+
+Two-step audit + fix: Step 1 inventoried every export/download feature in the app (18 found) and flagged 8 with mixed number/string money columns. Step 2 fixed those 8.
+
+- [x] **Shared helper `frontend/src/lib/xlsxMoney.ts`** — `jsonToFormattedSheet()` (aoa_to_sheet + `.z` number-format stamping, replacing `json_to_sheet`) and `stampNumberFormat()` (lower-level, for worksheets built by other means). `MONEY_FORMAT`/`PCT_FORMAT` constants matching the backend `xlsxwriter` convention already used in `procurement/router.py`'s shipment invoice export.
+- [x] **`CustomerAging.tsx`** — 5 AR Aging bucket columns no longer blank a real `0`.
+- [x] **`CustomerARLedger.tsx`** — `Balance Due` no longer blanks on zero; `Total Amount` per-group subtotal now genuinely blank (`undefined`) instead of `''` on non-last rows.
+- [x] **`CustomerDetail.tsx`** — `Credit Limit` genuinely blank when unset (was text label `'No Limit'`); `Debit`/`Credit` keyed off `row.type` instead of `> 0` so a real $0 entry on the applicable side is never hidden.
+- [x] **`SupplierAging.tsx`** — same bucket fix as CustomerAging.tsx.
+- [x] **`CustomerList.tsx`** — `Credit Limit` genuinely blank when null.
+- [x] **`SaleDetail.tsx`** — `Disc %`, `Disc ₱`, `Net Unit Cost` genuinely blank on absence; also fixed `Receipt Total`/`Variance` (same bug, adjacent, not in the original per-file list but already flagged in Step 1).
+- [x] **`SalesLedger.tsx`** — same `Disc %`/`Disc ₱`/`Net Unit Cost`/`Receipt Total`/`Variance`/`Unit Cost` fixes across all 3 sheets; negative return totals keep the existing plain-minus-sign convention.
+- [x] **`Catalogue.tsx`** — `Promo Price`/`Gross Cost` genuinely blank on absence; also fixed `Price`, which can legitimately be `null` per `InvVariant.price: number | null` (missed by the Step 1 audit, which assumed it was always populated) — now guarded instead of silently coercing `null` to `₱0.00`.
+
+Out of scope, untouched per instructions: backend `xlsxwriter` exports (Shipment Invoice, `import_hub` templates), and `ApLedger.tsx`/`CreditMemo.tsx`/`Returns.tsx` (already fully numeric in Step 1).
+
+Not yet exercised by opening a generated file in Excel/LibreOffice to visually confirm the number formatting renders as expected — flagged for confirmation.
+
+---
+
+## PID editability + computed barcode resolver — implemented (2026-07-07)
+
+Spec: `/docs/pid_editability_fix.md`. See `/docs/changelog.md` for detail.
+
+- [x] **Unlock PID field on Product Detail** — `VariantUpdate` was missing `PID`, so the already-editable frontend field silently failed to persist. Added `PID` to the schema plus a uniqueness check (`PID already in use`) in `update_variant`.
+- [x] **Computed barcode resolver** — `_resolve_barcode()`: explicit primary base-UOM `variant_barcodes` row, else falls back to `variant.PID`. Never written/materialized — resolved fresh on every read (`_load_product`, `list_products`, `get_variant`, `update_variant`). Exposed as `VariantOut.resolved_barcode`. Replaces an earlier same-day cascade/reprint-on-save design.
+- [x] **Cross-namespace collision checks** — PID rename rejected if it matches another variant's explicit barcode; new explicit barcode rejected if it matches another variant's current PID.
+- [x] **Import upsert confirmed unchanged** — still keys strictly off current `variants.PID`.
+- All 5 smoke tests passed against the live stack (rename with/without explicit barcode, both collision directions, renamed-PID reuse via import).
+- [x] **Reverse resolver** (scanned string → variant) — `GET /products/resolve?code=...`; wired into `Workstation.tsx`'s barcode-scan field with a PID fallback and "Item not found" flash.
+- [x] **DB-level collision triggers** — migration `s9t0u1v2w3x4`, `BEFORE INSERT OR UPDATE` on `inventory.variants` and `inventory.variant_barcodes`. App-level check extended to `add_variant`/`create_product` (previously only `update_variant`/`add_barcode`).
+- [x] **PID history confirmed still out of scope** — no such table/model exists.
+- [~] **variant_id-aware import anchor** — redirected per user decision: legacy `/products/import/*` endpoints left untouched (no frontend page uses them); `variant_id` added to Catalogue export only. Audited `import_hub`'s PID-anchored entities instead — found and fixed a bug in `cost_confirm` (missing `None` guard threw a raw `AttributeError` instead of a clean row error on an unresolvable PID/supplier).
+- All 10 smoke tests run against the live stack; tests 6–9 (full catalogue re-import round trip) not applicable given the above — substitute check run against the live `variant-prices` bulk import instead. See `/docs/changelog.md` for full detail.
 
 ---
 

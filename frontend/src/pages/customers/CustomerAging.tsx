@@ -7,6 +7,7 @@ import { useAuth } from '../../context/AuthContext'
 import { salesApi } from '../../services/api'
 import { normalize } from '../../lib/normalize'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 interface AgingRowOut {
   customer_id:  number
@@ -79,30 +80,34 @@ export default function CustomerAging() {
   [filtered])
 
   function handleExport() {
-    const ws = XLSX.utils.json_to_sheet([
+    const rows = [
       ...filtered.map(r => ({
         'Customer':     r.customer_name,
         'Invoice #':    r.invoice_id,
         'Invoice Date': fmtDate(r.invoice_date),
         'Due Date':     fmtDate(r.due_date),
-        'Current':      r.current_amt   || '',
-        '1-30 Days':    r.days_1_30     || '',
-        '31-60 Days':   r.days_31_60    || '',
-        '61-90 Days':   r.days_61_90    || '',
-        '90+ Days':     r.days_91_plus  || '',
+        'Current':      Number(r.current_amt),
+        '1-30 Days':    Number(r.days_1_30),
+        '31-60 Days':   Number(r.days_31_60),
+        '61-90 Days':   Number(r.days_61_90),
+        '90+ Days':     Number(r.days_91_plus),
       })),
       {
         'Customer':     'Total',
         'Invoice #':    '',
         'Invoice Date': '',
         'Due Date':     '',
-        'Current':      totals.current_amt   || '',
-        '1-30 Days':    totals.days_1_30     || '',
-        '31-60 Days':   totals.days_31_60    || '',
-        '61-90 Days':   totals.days_61_90    || '',
-        '90+ Days':     totals.days_91_plus  || '',
+        'Current':      totals.current_amt,
+        '1-30 Days':    totals.days_1_30,
+        '31-60 Days':   totals.days_31_60,
+        '61-90 Days':   totals.days_61_90,
+        '90+ Days':     totals.days_91_plus,
       },
-    ])
+    ]
+    const ws = jsonToFormattedSheet(rows, {
+      'Current': MONEY_FORMAT, '1-30 Days': MONEY_FORMAT, '31-60 Days': MONEY_FORMAT,
+      '61-90 Days': MONEY_FORMAT, '90+ Days': MONEY_FORMAT,
+    })
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'AR Aging')
     XLSX.writeFile(wb, `ar_aging_${todayLocal()}.xlsx`)

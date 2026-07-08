@@ -15,6 +15,7 @@ import {
   type SalesReturnItemOut, type InvProduct,
 } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT, PCT_FORMAT } from '../../lib/xlsxMoney'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -405,8 +406,8 @@ export default function SalesLedger() {
         Register: s.register_id ? (registerMap.get(s.register_id) ?? '') : '',
         Cashier: cashierName(s), Customer: customerName(s),
         'Grand Total': Number(s.grand_total),
-        'Receipt Total': !isRet ? (s.receipt_grand_total ?? '') : '',
-        Variance: !isRet ? (s.audit_variance ?? '') : '',
+        'Receipt Total': !isRet && s.receipt_grand_total != null ? Number(s.receipt_grand_total) : undefined,
+        Variance: !isRet && s.audit_variance != null ? Number(s.audit_variance) : undefined,
         'Payment Status': !isRet ? s.payment_status : '',
         'Sale Status': s.status,
       }
@@ -416,13 +417,13 @@ export default function SalesLedger() {
           tenderRows.push({
             ...hdr,
             'Payment Mode': mode?.name ?? `Mode ${p.payment_mode_id}`,
-            Amount: p.amount,
+            Amount: Number(p.amount),
             'Reference Number': p.reference_number ?? '',
             'Money Type': mode?.is_physical ? 'Physical' : 'Virtual',
           })
         }
       } else {
-        tenderRows.push({ ...hdr, 'Payment Mode': '', Amount: '', 'Reference Number': '', 'Money Type': '' })
+        tenderRows.push({ ...hdr, 'Payment Mode': '', Amount: undefined, 'Reference Number': '', 'Money Type': '' })
       }
     }
 
@@ -442,10 +443,11 @@ export default function SalesLedger() {
             Brand: item.variant?.product_brand ?? '',
             'Variant Name': item.variant?.variant_name ?? '',
             PID: item.variant?.PID ?? '',
-            Qty: item.quantity, 'Unit Price': item.unit_price,
-            'Disc %': item.discount_pct ?? '', 'Disc ₱': item.discount_flat ?? '',
-            'Line Total': item.line_total,
-            'Net Unit Cost': item.net_unit_cost ?? '',
+            Qty: item.quantity, 'Unit Price': Number(item.unit_price),
+            'Disc %': item.discount_pct != null ? Number(item.discount_pct) : undefined,
+            'Disc ₱': item.discount_flat != null ? Number(item.discount_flat) : undefined,
+            'Line Total': Number(item.line_total),
+            'Net Unit Cost': item.net_unit_cost != null ? Number(item.net_unit_cost) : undefined,
             'Cost Source': item.cost_source ?? '',
             'Product Type': item.variant?.product_type ?? '',
           })
@@ -457,10 +459,10 @@ export default function SalesLedger() {
             ...hdr,
             Brand: '', 'Variant Name': item.variant?.variant_name ?? `Variant ${item.variant_id}`,
             PID: item.variant?.PID ?? '',
-            Qty: -Number(item.quantity), 'Unit Price': '',
-            'Disc %': '', 'Disc ₱': '',
+            Qty: -Number(item.quantity), 'Unit Price': undefined,
+            'Disc %': undefined, 'Disc ₱': undefined,
             'Line Total': -Number(item.line_total),
-            'Net Unit Cost': '', 'Cost Source': '', 'Product Type': '',
+            'Net Unit Cost': undefined, 'Cost Source': '', 'Product Type': '',
           })
         }
       }
@@ -520,13 +522,19 @@ export default function SalesLedger() {
         PID: v.PID, SKU: v.sku ?? '', Brand: v.brand, 'Variant Name': v.variantName,
         Supplier: variantSupplierMap.get(vid) ?? '',
         Qty: v.qty, 'Unit Price': v.unitPrice,
-        'Unit Cost': v.unitCost ?? '',
+        'Unit Cost': v.unitCost ?? undefined,
       }))
 
+    const numFormats = {
+      'Grand Total': MONEY_FORMAT, 'Receipt Total': MONEY_FORMAT, Variance: MONEY_FORMAT,
+      Amount: MONEY_FORMAT, 'Unit Price': MONEY_FORMAT, 'Disc ₱': MONEY_FORMAT,
+      'Line Total': MONEY_FORMAT, 'Net Unit Cost': MONEY_FORMAT, 'Unit Cost': MONEY_FORMAT,
+      'Disc %': PCT_FORMAT,
+    }
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tenderRows),  'Tender Breakdown')
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemRows),    'Line Item Detail')
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(variantRows), 'Sales by Variant')
+    XLSX.utils.book_append_sheet(wb, jsonToFormattedSheet(tenderRows, numFormats),  'Tender Breakdown')
+    XLSX.utils.book_append_sheet(wb, jsonToFormattedSheet(itemRows, numFormats),    'Line Item Detail')
+    XLSX.utils.book_append_sheet(wb, jsonToFormattedSheet(variantRows, numFormats), 'Sales by Variant')
     const from = dateFrom || 'all'
     const to   = dateTo   || 'all'
     XLSX.writeFile(wb, `sales_export_${from}_${to}.xlsx`)

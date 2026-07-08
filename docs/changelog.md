@@ -1,5 +1,110 @@
 # Changelog
 
+## 2026-07-07 — Fix: reverse barcode resolver, DB-level collision triggers, PID/barcode hardening (completes pid_editability_fix.md batch)
+
+Completes the batch below: the previous same-day entry covered Fix 1 (PID unlock), the forward half of Fix 2, and the app-level half of Fix 3. This pass adds the reverse resolver, the DB-level enforcement, closes two collision-check gaps left on the variant-creation paths, and audits the redirected Fix 5 scope.
+
+### Fix 2 — Reverse resolver (scanned string → variant) — `backend/inventory/router.py`, `frontend/.../Workstation.tsx`
+
+- New `GET /products/resolve?code=...`: checks `variant_barcodes.barcode` for an exact match first, then a current non-deleted `variants.PID` match, else `404 "item not found"`. A PID renamed away from matches neither step.
+- `Workstation.tsx`'s barcode-scan field (`handleSearchEnter`) now falls back to an exact PID match after the existing exact-barcode match fails, and flashes "Item not found" when neither resolves — previously it silently did nothing on an unmatched Enter.
+
+### Fix 3 — DB-level triggers + closing app-level gaps — new migration `s9t0u1v2w3x4`, `backend/inventory/router.py`
+
+- New `BEFORE INSERT OR UPDATE` triggers on `inventory.variants` and `inventory.variant_barcodes` independently reject both collision directions at the DB layer — the actual guarantee, closing the race condition and any write path that bypasses app validation.
+- App-level check (`_check_pid_barcode_collision`) was only wired into `update_variant`; extended to `add_variant` and `create_product`'s variant-creation loop, which previously validated PID-vs-PID uniqueness but not PID-vs-barcode. All PID/barcode write paths now catch `IntegrityError` from the trigger and return a clean `400` instead of a raw `500`.
+- Bulk-import per-row isolation was in scope only for the legacy `/products/import/*` endpoints, which are unused by the frontend and out of scope per this session's decision (see Fix 5 below) — the trigger's per-row concern doesn't currently apply to any live write path, since the live `import_hub` entities (variant-prices, variant-costs) never write to `PID` or `variant_barcodes.barcode`.
+
+### Fix 4 — Confirmed still out of scope
+
+No PID history table or model exists anywhere in the codebase. Nothing to change.
+
+### Fix 5 — Redirected per user decision, not implemented as originally scoped
+
+The original Fix 5 (variant_id-aware import anchor) targeted "the Product Catalogue import template," which doesn't cleanly exist: `backend/inventory/router.py`'s `/products/import/preview`+`/confirm` handle full product+variant rows but have no frontend page calling them (`Catalogue.tsx` only has an Export modal); the live `import_hub` system's 5 entities are narrow single-purpose imports with no full-catalogue entity. Per user direction, this batch leaves the legacy endpoints untouched and does not build new import UI. Instead:
+
+- Audited `import_hub`'s PID-anchored entities (`variant-prices`, `variant-costs`) for renamed-PID behavior: both give a clean row-level error, not a silent no-op or batch abort. Found and fixed one real bug: `cost_confirm` used `variant.variant_id` / `supplier.supplier_id` without a `None` guard, so a missing PID or supplier code threw `AttributeError: 'NoneType' object has no attribute ...` instead of the clean `"PID '...' not found"` message `price_confirm` already gives. Still caught per-row (didn't abort the batch), just a bad message — now fixed with explicit guards.
+- Added `variant_id` as an optional export column in `Catalogue.tsx`'s "Additional Fields" toggle (the one piece of the original ask with a live UI already in place). Informational only for now — no import path anchors on it yet.
+
+### Incidental bug found and fixed — `create_product` response staleness
+
+While smoke-testing, `POST /products/` returned `resolved_barcode: ""` on newly created variants instead of the PID fallback. Root cause: the endpoint fetched the enriched response object, then did a second `write_audit` + `commit()` afterward, which (`expire_on_commit=True`) discarded the manually-set `resolved_barcode` attribute (not a real mapped column) on the next relationship access. Fixed by moving the final `_load_product` enrichment to after all commits.
+
+### Smoke tests (all 10 run against the live Docker stack; throwaway test user/product/variants cleaned up after)
+
+1. Renamed a PID with no explicit barcode → resolver returned the new PID immediately, no `variant_barcodes` row written. (Reprint warning verified by code inspection — same condition as Fix 2's already-tested forward resolver.)
+2. Renamed a PID with an explicit primary base-UOM barcode present → barcode unchanged, resolver still returns the barcode.
+3. Explicit barcode set to another variant's current PID → `400`.
+4. PID renamed to match another variant's explicit barcode → `400`.
+5. Raw SQL `UPDATE`/`INSERT` bypassing the app layer in both directions → both independently rejected by the DB triggers.
+6–9. Out of scope — target the descoped Product Catalogue import. Substitute check run instead: a live PID-anchored bulk import (`variant-prices/preview`) against a renamed-away PID returns a clean row-level "not found," confirming the rename doesn't corrupt the one bulk-import surface that does exist today.
+10. Renamed variant A's PID `PID-001 → PID-002`; reverse resolver on `PID-001` → `404 "item not found"`; assigned `PID-001` to new variant D; reverse resolver on `PID-001` → resolved to D.
+
+## 2026-07-07 — Fix: PID editability + computed barcode resolver (supersedes same-day cascade approach)
+
+Implements `/docs/pid_editability_fix.md` in full (revised version — replaces the earlier cascade/reprint-on-save design with a computed resolver). PID was inline-editable on the frontend (`readOnly={!canEdit}`, same as every other field) but silently dropped on save — `VariantUpdate` (backend) had no `PID` field, so Pydantic discarded it before it ever reached the row. No prior save attempt ever errored; it just never persisted.
+
+### Fix 1 — Unlock PID field — `backend/inventory/schemas.py`, `backend/inventory/router.py`
+
+- Added `PID: Optional[str]` to `VariantUpdate`.
+- `update_variant` checks the incoming PID against all other variants' current `PID` values (self-match is a no-op, not treated as a change). Collision → `HTTP 400 "PID already in use"`. No history table, no reserved values.
+
+### Fix 2 — Computed barcode resolver — `backend/inventory/router.py`, `schemas.py`, `frontend/.../Detail.tsx`
+
+- New `_resolve_barcode(variant)`: `variant → product.base_uom_id` → look for an explicit `variant_barcodes` row with `is_primary=True` and `uom_id == base_uom_id` → else fall back to `variant.PID`. Never written to `variant_barcodes` — evaluated fresh on every read via `_enrich_resolved_barcode()`, wired into every path that returns a full variant (`_load_product`, `list_products`, `get_variant`, `update_variant`). New `VariantOut.resolved_barcode: str` field exposes it to the frontend.
+- A PID rename requires zero writes to `variant_barcodes` — any variant relying on the fallback resolves to the new PID on the very next read.
+- `Detail.tsx`'s `handleSave` now gates the reprint warning on the actual resolver condition (`variant.barcodes.some(bc => bc.is_primary && bc.uom_id === product.base_uom_id)`), not just "any barcode row exists." Warning text: "This item has no barcode on file — its scannable code will change to match the new PID. Reprint any physical labels currently in use."
+
+### Fix 3 — Cross-namespace collision checks — `backend/inventory/router.py`
+
+- `update_variant`: renaming a PID is also checked against every *other* variant's explicit `variant_barcodes.barcode` values → `HTTP 400 "PID already in use as another variant's barcode"`.
+- `add_barcode`: a new explicit barcode is checked against every *other* variant's current `PID` → `HTTP 400 "Barcode already in use as another variant's PID"`.
+- `update_barcode` was **not** given the equivalent check: `VariantBarcodeUpdate` has no `barcode` field — the endpoint only ever supported changing `uom_id`/`is_primary` (matches the frontend, which has add/delete/toggle-primary but no inline value edit). A value-collision check there would be dead code since the value can never change through that endpoint. Left as-is; flagged as a pre-existing gap, not part of this batch.
+
+### Fix 4 — Confirmed import upsert requires no changes
+
+`import_preview` / `import_confirm` key strictly off the current `variants.PID` column at query time — unaffected by the resolver redesign.
+
+### Smoke tests (all 5 passed against the live stack; test data cleaned up after)
+
+1. Renamed a PID with no explicit barcode → `resolved_barcode` reflected the new PID immediately, zero rows written to `variant_barcodes`.
+2. Renamed a PID with an explicit primary base-UOM barcode present → `resolved_barcode` unchanged.
+3. Explicit barcode set equal to another variant's current PID → rejected (both via direct create attempt).
+4. PID renamed to match another variant's explicit barcode → rejected.
+5. Re-imported using a PID renamed away → preview/confirm both treated it as create mode; old PID freely reusable, new variant created with zero collision.
+
+## 2026-07-04 — Fix: money-column export formatting (Step 2 of money-export audit)
+
+Follow-up to the Step 1 audit of every export/download feature in the app. Fixed the 8 client-side XLSX exports found to have mixed number/string money columns, so every monetary cell is now a true number (SUM()-able, formula-ready) rather than sometimes a formatted string or an empty string standing in for zero.
+
+### Added — `frontend/src/lib/xlsxMoney.ts`
+
+New shared helper used by all 8 fixes below, so the fix is one reusable pattern rather than a one-off per file:
+
+- `jsonToFormattedSheet(rows, colFormats)` — builds a worksheet via `XLSX.utils.aoa_to_sheet` (header row = union of keys across all rows, first-seen order, so rows that conditionally omit a key still line up under the right column) instead of `json_to_sheet`, then stamps `.z` number-format codes (from `colFormats`) onto the numeric cells in the named columns. A cell value of `undefined` produces a genuinely blank cell — the mechanism used everywhere below for "not applicable" data (no credit limit set, no promo price, no cost data, etc.), replacing the old `''`/text-label placeholders.
+- `stampNumberFormat(ws, startRow, colIdxs, rowCount, format)` — lower-level primitive for worksheets built by other means (used by `CustomerDetail.tsx`, which builds a leading statement-header block with `aoa_to_sheet` before appending the ledger table with `sheet_add_json`).
+- `MONEY_FORMAT = '#,##0.00'`, `PCT_FORMAT = '0.00'` — matches the format codes the backend's `xlsxwriter` shipment-invoice export already used (`procurement/router.py`), left untouched as the reference implementation.
+
+### Fixed — the 8 exports
+
+- **`CustomerAging.tsx`** (AR Aging): all 5 bucket columns used `r.current_amt || ''`, which blanked a real `0` balance. Now `Number(r.current_amt)` etc. — always numeric, since every bucket field is non-nullable.
+- **`CustomerARLedger.tsx`** (AR Ledger, legacy invoice-level view): `Balance Due` no longer blanks on zero. `Total Amount` is a per-customer-group subtotal shown once on the group's last row — now `undefined` (genuinely blank) on other rows instead of `''`.
+- **`CustomerDetail.tsx`** (Transaction Ledger + statement export): `Credit Limit` is `undefined` (blank cell) when unset, replacing the `'No Limit'` text label that was mixing types into the column — the informational label is lost from the file; flagged for confirmation. `Debit`/`Credit` are keyed off `row.type` ('SALE' | 'PAYMENT') rather than `> 0`, so the non-applicable side is always blank (standard two-column ledger convention) while the applicable side is never hidden even if it happens to be exactly 0.
+- **`SupplierAging.tsx`** (AP Aging): same bucket-blanking fix as CustomerAging.tsx.
+- **`CustomerList.tsx`**: `Credit Limit` now `undefined` when null, instead of `''`.
+- **`SaleDetail.tsx`** (single sale, 2-sheet export): `Disc %`, `Disc ₱`, `Net Unit Cost` now `undefined` on genuine absence (no discount / no cost data) instead of `''`. Also fixed `Receipt Total` and `Variance` in the same file with the identical pattern — not in the original per-file list but flagged in the Step 1 audit as the same bug, and inconsistent to leave broken next to the columns being fixed.
+- **`SalesLedger.tsx`** (ledger, 3-sheet export): `Receipt Total`/`Variance` blank (`undefined`) for return rows and when null (was `''`); `Disc %`/`Disc ₱`/`Net Unit Cost` same fix as SaleDetail.tsx across both sale-item and return-item rows; `Unit Cost` on the "Sales by Variant" sheet blank when no cost data exists for a variant. Negative return line totals keep the existing plain-minus-sign convention (`-Number(item.line_total)`) — no parentheses-style negatives introduced.
+- **`Catalogue.tsx`**: `Promo Price`/`Gross Cost` now `undefined` on genuine absence instead of `''`. Also fixed `Price`, which the Step 1 audit had assumed was always populated — `InvVariant.price` is actually typed `number | null` (a variant can have no price of its own and fall back to its default sibling's price for *display*, per requirements §6.2, but the raw catalogue payload can still carry `null`). Wrapping it in `Number(v.price)` unconditionally would have silently turned a null price into `₱0.00`; fixed to `v.price != null ? Number(v.price) : undefined`.
+
+### Out of scope (per instructions, untouched)
+
+- Backend `xlsxwriter` exports (Shipment Invoice, `import_hub` templates) — already correct or explicitly excluded.
+- `ApLedger.tsx`, `CreditMemo.tsx`, `Returns.tsx` — already fully numeric with no ambiguity in Step 1; not part of the 8-file fix list.
+
+Verified: `tsc --noEmit -p tsconfig.app.json` shows zero new errors (diffed against a `git stash` of the pre-fix tree — one pre-existing type error surfaced during the fix in `SaleDetail.tsx` from pushing an `undefined` Amount onto a `.map()`-inferred array; resolved by explicitly typing `tenderRows: Record<string, unknown>[]`). `eslint` on all 8 files + the new helper shows zero new warnings/errors (same before/after counts via `git stash` diff). Not yet exercised by opening a generated file in Excel — flagged for confirmation.
+
+---
+
 ## 2026-07-04 — Feature: remove AR Ledger section, add Transaction Ledger Excel export
 
 ### Removed — AR Ledger section on CustomerDetail

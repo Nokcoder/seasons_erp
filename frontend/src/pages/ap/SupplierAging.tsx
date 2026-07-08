@@ -7,6 +7,7 @@ import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
 import { apApi, type SupplierAgingRow } from '../../services/api'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,18 +74,18 @@ export default function SupplierAging() {
 
   function handleExport() {
     if (!agingData) return
-    const ws = XLSX.utils.json_to_sheet([
+    const rows = [
       ...agingData.rows.map(r => ({
         'Supplier':     r.supplier_name,
         'Code':         r.supplier_code ?? '',
         'Invoices':     r.invoice_count,
         'Pending Vetting': r.has_pending_vetting ? 'Yes' : '',
         'Rejected':     r.has_rejected ? 'Yes' : '',
-        'Current':      r.current    || '',
-        '1-30 Days':    r.bucket_30  || '',
-        '31-60 Days':   r.bucket_60  || '',
-        '61-90 Days':   r.bucket_90  || '',
-        '90+ Days':     r.bucket_90p || '',
+        'Current':      Number(r.current),
+        '1-30 Days':    Number(r.bucket_30),
+        '31-60 Days':   Number(r.bucket_60),
+        '61-90 Days':   Number(r.bucket_90),
+        '90+ Days':     Number(r.bucket_90p),
         'Total':        Number(r.total),
       })),
       {
@@ -93,14 +94,18 @@ export default function SupplierAging() {
         'Invoices':     agingData.totals.invoice_count,
         'Pending Vetting': '',
         'Rejected':     '',
-        'Current':      agingData.totals.current    || '',
-        '1-30 Days':    agingData.totals.bucket_30  || '',
-        '31-60 Days':   agingData.totals.bucket_60  || '',
-        '61-90 Days':   agingData.totals.bucket_90  || '',
-        '90+ Days':     agingData.totals.bucket_90p || '',
-        'Total':        Number(agingData.totals.total),
+        'Current':      agingData.totals.current,
+        '1-30 Days':    agingData.totals.bucket_30,
+        '31-60 Days':   agingData.totals.bucket_60,
+        '61-90 Days':   agingData.totals.bucket_90,
+        '90+ Days':     agingData.totals.bucket_90p,
+        'Total':        agingData.totals.total,
       },
-    ])
+    ]
+    const ws = jsonToFormattedSheet(rows, {
+      'Current': MONEY_FORMAT, '1-30 Days': MONEY_FORMAT, '31-60 Days': MONEY_FORMAT,
+      '61-90 Days': MONEY_FORMAT, '90+ Days': MONEY_FORMAT, 'Total': MONEY_FORMAT,
+    })
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'AP Aging')
     XLSX.writeFile(wb, `ap_aging_${asOf}.xlsx`)

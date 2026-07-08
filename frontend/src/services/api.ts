@@ -890,6 +890,7 @@ export interface InvVariant {
   uom_conversions: InvUomConversion[]
   bundle_components: BundleComp[]
   bundle_available_stock: BundleAvailableStock[]
+  resolved_barcode: string
 }
 
 export interface InvProduct {

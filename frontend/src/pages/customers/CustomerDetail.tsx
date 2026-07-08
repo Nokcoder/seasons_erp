@@ -7,6 +7,7 @@ import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
 import { salesApi, type PaymentMode, type SalesReturnOut, type TransactionLedgerRowOut } from '../../services/api'
+import { stampNumberFormat, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
 
@@ -91,25 +92,34 @@ export default function CustomerDetail() {
     try {
       const rows = await salesApi.customers.transactionLedgerExport(cid)
       const today = new Date().toISOString().slice(0, 10)
-      const headerRows: (string | number)[][] = [
+      // Credit Limit is left genuinely blank (undefined, not a "No Limit"
+      // text label) when unset, so the cell stays numeric-or-empty rather
+      // than mixed number/text.
+      const headerRows: (string | number | undefined)[][] = [
         ['Customer Statement'],
         ['Customer Name', customer.customer_name],
         ['Terms', termsLabel(customer.terms_days)],
-        ['Credit Limit', customer.credit_limit != null ? Number(customer.credit_limit) : 'No Limit'],
+        ['Credit Limit', customer.credit_limit != null ? Number(customer.credit_limit) : undefined],
         ['Outstanding Balance', Number(customer.outstanding_balance)],
         ['Statement generated on', today],
         [],
       ]
+      // Debit/Credit are mutually exclusive per row (SALE vs PAYMENT) — the
+      // non-applicable side is `undefined` (a genuinely blank cell), not `0`
+      // or `''`, matching standard two-column ledger convention.
       const dataRows = rows.map(r => ({
         'Date':     fmtDateOnly(r.date),
         'Sales ID': r.sales_id,
         'Status':   r.status,
-        'Debit':    r.debit > 0 ? Number(r.debit) : '',
-        'Credit':   r.credit > 0 ? Number(r.credit) : '',
+        'Debit':    r.type === 'SALE'    ? Number(r.debit)  : undefined,
+        'Credit':   r.type === 'PAYMENT' ? Number(r.credit) : undefined,
         'Balance':  Number(r.running_balance),
       }))
       const ws = XLSX.utils.aoa_to_sheet(headerRows)
       XLSX.utils.sheet_add_json(ws, dataRows, { origin: headerRows.length, skipHeader: false })
+      stampNumberFormat(ws, 3, [1], 1, MONEY_FORMAT)       // Credit Limit
+      stampNumberFormat(ws, 4, [1], 1, MONEY_FORMAT)       // Outstanding Balance
+      stampNumberFormat(ws, headerRows.length + 1, [3, 4, 5], dataRows.length, MONEY_FORMAT) // Debit, Credit, Balance
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Transaction Ledger')
       const safeName = customer.customer_name.replace(/[^a-zA-Z0-9]+/g, '_')

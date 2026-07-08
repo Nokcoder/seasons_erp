@@ -102,6 +102,16 @@ class VariantBarcodeOut(BaseModel):
     class Config: from_attributes = True
 
 
+# ── BARCODE RESOLVER (Fix 2, reverse direction) ──────────────────────────────
+class BarcodeResolveOut(BaseModel):
+    variant_id: int
+    PID: str
+    variant_name: str
+    product_id: int
+    matched_via: str  # "barcode" | "pid"
+    class Config: from_attributes = True
+
+
 # ── VARIANT UOM CONVERSIONS ───────────────────────────────────────────────────
 class VariantUomConversionCreate(BaseModel):
     from_uom_id: int
@@ -263,6 +273,7 @@ class VariantCreate(BaseModel):
     is_phased_out: bool = False
 
 class VariantUpdate(BaseModel):
+    PID: Optional[str] = None
     variant_name: Optional[str] = None
     sku: Optional[str] = None
     price: Optional[Decimal] = None
@@ -299,6 +310,7 @@ class VariantOut(BaseModel):
     uom_conversions: List[VariantUomConversionOut] = []
     bundle_components: List[BundleComponentOut] = []
     bundle_available_stock: List[BundleAvailableStock] = []
+    resolved_barcode: str = ""
     class Config: from_attributes = True
 
 

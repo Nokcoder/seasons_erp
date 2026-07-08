@@ -51,6 +51,7 @@ def _load_product(product_id: int, db: Session) -> models.Product:
     )
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+    _enrich_resolved_barcode([product])
     return product
 
 
@@ -124,6 +125,40 @@ def _enrich_bundle_stock(products: list) -> None:
                 variant.bundle_available_stock = _compute_bundle_available(variant)
             else:
                 variant.bundle_available_stock = []
+
+
+def _resolve_barcode(variant: "models.Variant") -> str:
+    """Computed scannable value for a variant — never written to
+    variant_barcodes, always evaluated fresh on read (see
+    docs/pid_editability_fix.md Fix 2).
+
+    Resolution order: the variant's explicit primary barcode at the
+    product's base UOM, else the variant's own PID. The PID fallback
+    applies only at the base UOM — no fallback exists for other UOMs."""
+    base_uom_id = variant.product.base_uom_id if variant.product else None
+    for bc in variant.barcodes:
+        if bc.is_primary and bc.uom_id == base_uom_id:
+            return bc.barcode
+    return variant.PID
+
+
+def _enrich_resolved_barcode(products: list) -> None:
+    """Attach the computed resolved_barcode to every variant in-place."""
+    for product in products:
+        for variant in product.variants:
+            variant.resolved_barcode = _resolve_barcode(variant)
+
+
+def _check_pid_barcode_collision(pid: str, variant_id: Optional[int], db: Session) -> None:
+    """App-level guard (Fix 3, docs/pid_editability_fix.md): a PID must never
+    match another variant's explicit barcode — that barcode is the other
+    variant's scannable identity and must stay unambiguous. variant_id is
+    None when creating a brand-new variant (nothing yet to exclude)."""
+    q = db.query(models.VariantBarcode).filter(models.VariantBarcode.barcode == pid)
+    if variant_id is not None:
+        q = q.filter(models.VariantBarcode.variant_id != variant_id)
+    if q.first():
+        raise HTTPException(status_code=400, detail="PID already in use as another variant's barcode")
 
 
 def _resolve_categories(names: List[str], db: Session) -> List[models.ProductCategory]:
@@ -367,6 +402,7 @@ def list_products(
 
     products = q.all()
     _enrich_bundle_stock(products)
+    _enrich_resolved_barcode(products)
 
     if sort_by == "total_stock":
         def _phys_total(p: models.Product) -> Decimal:
@@ -573,6 +609,43 @@ def list_ledger(
     return result
 
 
+@router.get("/resolve", response_model=schemas.BarcodeResolveOut)
+def resolve_scanned_code(code: str, db: Session = Depends(get_db)):
+    """Reverse barcode resolver (Fix 2, reverse direction — see
+    docs/pid_editability_fix.md). Given a scanned string, resolves to the
+    variant it identifies:
+      1. An explicit variant_barcodes.barcode exact match, else
+      2. A current, non-deleted variant whose PID exactly matches, else
+      3. 404 "item not found".
+    A PID that has been renamed away from matches neither step — unless a
+    different variant has since taken that value as its own current PID."""
+    bc = db.query(models.VariantBarcode).filter(models.VariantBarcode.barcode == code).first()
+    if bc:
+        variant = db.query(models.Variant).filter(
+            models.Variant.variant_id == bc.variant_id,
+            models.Variant.is_deleted == False,
+        ).first()
+        if variant:
+            return schemas.BarcodeResolveOut(
+                variant_id=variant.variant_id, PID=variant.PID,
+                variant_name=variant.variant_name, product_id=variant.product_id,
+                matched_via="barcode",
+            )
+
+    variant = db.query(models.Variant).filter(
+        models.Variant.PID == code,
+        models.Variant.is_deleted == False,
+    ).first()
+    if variant:
+        return schemas.BarcodeResolveOut(
+            variant_id=variant.variant_id, PID=variant.PID,
+            variant_name=variant.variant_name, product_id=variant.product_id,
+            matched_via="pid",
+        )
+
+    raise HTTPException(status_code=404, detail="item not found")
+
+
 @router.get("/{product_id}", response_model=schemas.ProductOut)
 def get_product(product_id: int, db: Session = Depends(get_db)):
     return _load_product(product_id, db)
@@ -614,6 +687,11 @@ def create_product(
         if db.query(models.Variant).filter(models.Variant.PID == v.PID).first():
             db.rollback()
             raise HTTPException(status_code=400, detail=f"PID '{v.PID}' already exists")
+        try:
+            _check_pid_barcode_collision(v.PID, None, db)
+        except HTTPException:
+            db.rollback()
+            raise
         db.add(models.Variant(
             product_id=product.product_id,
             PID=v.PID,
@@ -625,12 +703,17 @@ def create_product(
             attributes=v.attributes,
         ))
 
-    db.commit()
-    result = _load_product(product.product_id, db)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="PID already in use as another variant's barcode")
     write_audit(db, "inventory.products", str(product.product_id), "INSERT",
                 actor_user_id=_actor.user_id, new_values=_serialize(product))
     db.commit()
-    return result
+    # Enrichment must happen after the final commit — expire_on_commit
+    # discards the resolved_barcode set on any objects fetched earlier.
+    return _load_product(product.product_id, db)
 
 
 @router.put("/{product_id}", response_model=schemas.ProductOut)
@@ -698,6 +781,7 @@ def get_variant(variant_id: int, db: Session = Depends(get_db)):
     variant = (
         db.query(models.Variant)
         .options(
+            selectinload(models.Variant.product),
             selectinload(models.Variant.current_stock)
                 .selectinload(models.CurrentStock.location),
             selectinload(models.Variant.suppliers)
@@ -717,6 +801,7 @@ def get_variant(variant_id: int, db: Session = Depends(get_db)):
     if not variant:
         raise HTTPException(status_code=404, detail="Variant not found")
 
+    variant.resolved_barcode = _resolve_barcode(variant)
     out = schemas.VariantOut.model_validate(variant)
     if out.price is None:
         default_v = (
@@ -762,6 +847,7 @@ def add_variant(
 
     if db.query(models.Variant).filter(models.Variant.PID == payload.PID).first():
         raise HTTPException(status_code=400, detail=f"PID '{payload.PID}' already exists")
+    _check_pid_barcode_collision(payload.PID, None, db)
 
     new_variant = models.Variant(
         product_id=product.product_id,
@@ -780,7 +866,11 @@ def add_variant(
     if payload.is_default:
         _enforce_single_default(product.product_id, new_variant.variant_id, db)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="PID already in use as another variant's barcode")
     return _load_product(product_id, db)
 
 
@@ -800,6 +890,23 @@ def update_variant(
         raise HTTPException(status_code=404, detail="Variant not found")
 
     updates = payload.model_dump(exclude_unset=True)
+
+    if "PID" in updates:
+        if updates["PID"] == variant.PID:
+            del updates["PID"]
+        else:
+            new_pid = updates["PID"]
+            dup_pid = (
+                db.query(models.Variant)
+                .filter(models.Variant.PID == new_pid, models.Variant.variant_id != variant.variant_id)
+                .first()
+            )
+            if dup_pid:
+                raise HTTPException(status_code=400, detail="PID already in use")
+            # Cross-namespace: the resolver falls back to PID for any variant with
+            # no explicit primary base-UOM barcode, so a renamed PID must not
+            # collide with another variant's explicit barcode value either.
+            _check_pid_barcode_collision(new_pid, variant.variant_id, db)
 
     if updates.get("is_default") is True:
         _enforce_single_default(variant.product_id, variant.variant_id, db)
@@ -830,6 +937,7 @@ def update_variant(
     try:
         db.commit()
         db.refresh(variant)
+        variant.resolved_barcode = _resolve_barcode(variant)
         return variant
     except IntegrityError:
         db.rollback()
@@ -1395,6 +1503,14 @@ def add_barcode(
     ).first():
         raise HTTPException(status_code=400, detail="Barcode already exists")
 
+    # Cross-namespace: this value must not collide with another variant's
+    # current PID — that PID is that variant's computed fallback barcode.
+    if db.query(models.Variant).filter(
+        models.Variant.PID == payload.barcode,
+        models.Variant.variant_id != variant_id,
+    ).first():
+        raise HTTPException(status_code=400, detail="Barcode already in use as another variant's PID")
+
     if payload.is_primary:
         db.query(models.VariantBarcode).filter(
             models.VariantBarcode.variant_id == variant_id,
@@ -1407,7 +1523,11 @@ def add_barcode(
         is_primary=payload.is_primary,
     )
     db.add(bc)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Barcode already in use as another variant's PID")
     db.refresh(bc)
     return bc
 

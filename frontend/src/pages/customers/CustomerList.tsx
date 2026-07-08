@@ -8,6 +8,7 @@ import { salesApi } from '../../services/api'
 import { normalize } from '../../lib/normalize'
 import { useAuth } from '../../context/AuthContext'
 import * as XLSX from 'xlsx'
+import { jsonToFormattedSheet, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
 
@@ -102,13 +103,16 @@ export default function CustomerList() {
   }
 
   function handleExport() {
-    const ws = XLSX.utils.json_to_sheet(rows.map(c => ({
+    const exportRows = rows.map(c => ({
       'Customer Name':       c.customer_name,
       'Terms':               termsLabel(c.terms_days),
-      'Credit Limit':        c.credit_limit ?? '',
-      'Outstanding Balance': c.outstanding_balance,
+      'Credit Limit':        c.credit_limit != null ? Number(c.credit_limit) : undefined,
+      'Outstanding Balance': Number(c.outstanding_balance),
       'Status':              c.is_deleted ? 'Inactive' : 'Active',
-    })))
+    }))
+    const ws = jsonToFormattedSheet(exportRows, {
+      'Credit Limit': MONEY_FORMAT, 'Outstanding Balance': MONEY_FORMAT,
+    })
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Customers')
     XLSX.writeFile(wb, `customers_${new Date().toISOString().slice(0, 10)}.xlsx`)
