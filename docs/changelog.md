@@ -1,5 +1,192 @@
 # Changelog
 
+## 2026-07-09 — Fix: voiding a sale permanently retired its sale_pid
+
+Reported bug: a cashier voided a sale, then tried to reuse its `sale_pid` (the "Receipt No."
+field, manually editable via the Auto/Manual toggle in the POS Workstation) on a new sale, and
+was blocked from posting with a raw 500.
+
+**Root cause:** `sale_pid` had an unconditional unique constraint (`sales_sale_pid_key`).
+Voiding a sale (`void_sale`) never clears `sale_pid`, so the value stayed permanently claimed
+even though the sale itself was no longer active. `create_draft` wrote `payload.sale_pid`
+straight onto the row with no pre-check, so a collision only surfaced as an unhandled
+`IntegrityError` → 500 at `db.commit()`.
+
+**Decision:** `sale_pid` stays the field in active use (no migration to `receipt_no`). A voided
+sale's `sale_pid` becomes reusable by a later sale. Genuine duplicates among currently-active
+(`Draft`/`Posted`) sales are still blocked, but now surface as a clean 400.
+
+### Schema — migration `u1v2w3x4y5z6`
+
+Replaced the unconditional `sales_sale_pid_key` unique constraint with a partial unique index,
+`sales_sale_pid_active_key ON sales.sales (sale_pid) WHERE status != 'Voided'`. Confirmed no
+existing active sales shared a `sale_pid` before migrating (0 rows). **This is the first
+conditional-uniqueness pattern in this codebase** — every other unique constraint (e.g.
+`sales_idempotency_key_key`) is unconditional. `sale_pid`'s `unique=True` was removed from the
+SQLAlchemy model (`sales/models.py`) since the ORM no longer owns this constraint; `docs/schema.dbml`
+updated to match.
+
+### `backend/sales/router.py`
+
+- New helper `_assert_sale_pid_available(db, sale_pid, exclude_sale_id=None)` — queries for an
+  existing active (non-Voided) sale with the same `sale_pid` and raises a `400` ("This document
+  number is already in use by an active sale.") if found. Called in `create_draft` before insert,
+  and in `post_draft` before the finalize commit (defends the `f"SALE-{sale.sale_id:05d}"`
+  auto-fallback against colliding with a manually-set active PID on another sale).
+- Both `create_draft`'s and `post_draft`'s `db.commit()` are now wrapped in `try/except
+  IntegrityError`, translating a `sales_sale_pid_active_key` violation (the race-condition case
+  where two requests both pass the precheck) into the same clean 400 instead of a 500. Same
+  division of responsibility as the PID/barcode collision triggers in migration `s9t0u1v2w3x4`:
+  the app-level check is the friendly error, the partial index is the actual guarantee.
+
+### Verified live (Docker stack rebuilt)
+
+- Voided a sale, posted a new sale reusing its `sale_pid` via Manual PID mode — succeeded.
+- Attempted to reuse the `sale_pid` of a currently-Posted (active) sale — clean `400`, not a 500.
+- `GET /sales/next-pid` still returns a non-colliding suggestion.
+- Cleaned up the two collision artifacts flagged during investigation (`SALE-00056`/sale 58,
+  already Voided; `SALE-00042`/sale 42, a genuine active sale with nothing to clean up) plus the
+  new sale created during this verification, via the real void endpoint — no raw deletes.
+
+*Note: the three entries below (bounce_pdc_check fix, payment reversal endpoint, payment audit
+gap fix) were logged together on 2026-07-09 as a backfill — all three were implemented and
+verified in the same session but only the first was explicitly requested to be logged; the other
+two were added retroactively since none had been documented yet.*
+
+## 2026-07-09 — Fix: bounce_pdc_check under-reversed payments with unapplied balance
+
+Surfaced during testing of the new payment-reversal endpoint (see entry below): bouncing a PDC
+check only reversed the portion of the payment tied to a `CustomerPaymentApplied` row. Any PDC
+payment with a nonzero `unapplied_amount` at bounce time — fully unapplied (no application at
+all) or partially applied — was under-reversed by exactly that unapplied amount, permanently
+understating `customer.outstanding_balance`.
+
+**Root cause:** `record_customer_payment` always writes one `ArLedger` `PAYMENT` entry for the
+*full* `payload.amount` at creation, regardless of how much (if any) gets applied to a sale. The
+old `bounce_pdc_check` computed its reversal by summing `CustomerPaymentApplied.amount_applied`
+across the payment's applications — which only equals the full original amount when
+`unapplied_amount == 0`. Payments created via `create_payment` or as sale-tenders inside
+`post_draft` were never affected: those origins only ever write ledger entries for the applied
+portion in the first place, so the old sum-of-applications logic already matched them exactly.
+
+### `backend/sales/router.py` — `bounce_pdc_check`
+
+Split the single per-application loop into two passes, both still inside the existing single
+`db.commit()`:
+
+- **AR/balance reversal** — now queries `ArLedger` where `reference_type='customer_payments' AND
+  reference_id=str(payment_id)`, and reverses (negates) those actual rows, same technique just
+  proven in `reverse_customer_payment` below. This captures the full original amount regardless
+  of application state, and is self-correcting: it reverses whatever the ledger says actually
+  happened, not what the applications imply happened.
+- **Sale restoration** (`balance_due`/`payment_status`) — unchanged, still driven by
+  `CustomerPaymentApplied`, since `ArLedger` rows don't carry sale linkage.
+- Reversal entries keep `reason="PAYMENT"` (not `"ADJUSTMENT"`) — preserves existing bounce
+  semantics/output for the case that already worked; only the amount source changed.
+
+### Verified live (Docker stack rebuilt)
+
+- **Fully unapplied** ($60, 0 applications): bounced → `outstanding_balance` restored exactly to
+  its pre-payment baseline. Previously this wrote nothing.
+- **Fully applied regression** ($90, one application covering the full sale balance): bounced →
+  identical outcome to the pre-fix code (sale `balance_due`/`payment_status` and
+  `outstanding_balance` both restored correctly) — confirms no behavior change for the case that
+  already worked.
+- **Partial application** ($100 created unapplied, $35 later applied to a sale, $65 left
+  unapplied): bounced → both `ArLedger` entries (the $100 creation entry and the $35 apply entry)
+  reversed, `outstanding_balance` and the sale's `balance_due`/`payment_status` both restored
+  exactly to their pre-payment baselines.
+- **Retroactive correction of the one live-affected record**: `payment_id=52`, a test payment
+  bounced under the old code with `unapplied_amount=75.00` and never reversed. `check_status`
+  reset from `BOUNCED` to `IN_VAULT` via a direct status-only DB update (no financial fields
+  touched), then re-bounced through the fixed endpoint so the actual correction went through the
+  normal audited path. `outstanding_balance` corrected by the missing +75.00; new offsetting
+  `ArLedger` row and `audit_log` entry both written.
+
+### Discovered, not fixed (separate, pre-existing issue)
+
+While constructing the partial-application test case, `apply_unapplied_payment`
+(`POST /sales/payments/{id}/apply`) was observed writing a *second* `ArLedger` entry and reducing
+`outstanding_balance` a second time for money already accounted for by the payment's creation-time
+entry — i.e. applying previously-unapplied credit to a sale appears to double-count that credit's
+AR impact. Not investigated further or fixed here; flagged for a follow-up audit.
+
+## 2026-07-09 — Feature: standalone customer payment reversal (correction mechanism)
+
+Closes the gap identified while auditing the payment-audit fix below: `record_customer_payment`
+and `create_payment` had no void/reverse/delete path, unlike sales (`POST /sales/{id}/void`) or
+PDC checks (`PATCH /sales/pdc/{id}/bounce`). Design proposal: `docs/payment_correction_proposal.md`.
+
+### Schema — migration `t0u1v2w3x4y5`
+
+Added to `sales.customer_payments`: `reversed_at` (timestamptz, null), `reversed_reason`
+(varchar(500), null), `reversed_by_user_id` (int, FK → `auth.users`, null). No boolean flag —
+reversal state is inferred from `reversed_at IS NOT NULL`, mirroring how `Sale` has no separate
+`is_voided` column. `docs/schema.dbml` updated to match.
+
+### RBAC — new `reverse_customer_payment` action
+
+Seeded in `main.py`'s `ACTIONS` list under the `customers_list` program (same program as
+`manage_customers`), granted to `ADMIN` (via the existing wildcard grant) and `STORE_MANAGER`
+only — not `CASHIER`. Matches the `issue_credit_memo`/`cancel_credit_memo` split precedent rather
+than folding into `manage_customers`. Surfaces automatically in the Settings RBAC UI, which is
+fully data-driven off `auth.programs`/`auth.actions`.
+
+### `backend/sales/router.py` — `POST /sales/payments/{payment_id}/reverse`
+
+- **Origin-agnostic by design**: rather than re-deriving what a payment did from business rules
+  (`record_customer_payment` and `create_payment` update `outstanding_balance` differently), reads
+  the actual `ArLedger` rows tagged to `reference_type='customer_payments',
+  reference_id=str(payment_id)` and negates exactly those, writing offsetting `ADJUSTMENT` rows.
+- Restores `balance_due`/`payment_status` on every linked sale using the same three-branch logic
+  `bounce_pdc_check` already used. `CustomerPaymentApplied` rows are preserved, not deleted.
+- Full reversal only — no partial-amount correction (see proposal §7 for rationale). To fix a
+  wrong amount: reverse in full, then record a new correct payment.
+- Preconditions (400): payment not found (404), already reversed, PDC `check_status='BOUNCED'`,
+  or `payment_mode.is_credit_memo` (excluded — `CreditMemoRedemption` is keyed by `sale_id`, not
+  `payment_id`, so a redeemed memo can't be safely restored from here).
+- `write_audit()` — first call site in this file to populate `old_values` as well as `new_values`,
+  folded into the same single `db.commit()` as every other mutation (no split-commit).
+
+### Verified live (Docker stack rebuilt)
+
+- Functional: reversed a $150 payment applied to a sale — offsetting `ArLedger` row, restored
+  `outstanding_balance`, restored sale `balance_due`/`payment_status`, preserved
+  `CustomerPaymentApplied`, populated `reversed_at`/`reversed_reason`/`reversed_by_user_id`,
+  `audit_log` UPDATE row with both `old_values` and `new_values`.
+- Precondition rejections confirmed: already-reversed (400), bounced PDC (400), credit-memo-mode
+  (400).
+- Permission: CASHIER → 403; STORE_MANAGER and ADMIN → 200.
+- Atomicity: temporarily injected a forced failure after every mutation but before
+  `write_audit()`/`commit()`, rebuilt, confirmed every touched field (ledger, balance, sale,
+  payment flags) reverted to baseline with nothing partially applied; reverted the injection and
+  reconfirmed the real endpoint still works.
+
+## 2026-07-08 — Fix: payment audit gap — record_customer_payment and post_draft tender loop
+
+Verified as genuinely unimplemented (no commit, no partial work, no stash) before starting —
+`record_customer_payment` (`POST /customers/{id}/payment`) and `post_draft`'s tender-creation loop
+created `CustomerPayment` rows with no corresponding `write_audit()` call, leaving no audit trail
+for who recorded a payment.
+
+### `backend/sales/router.py`
+
+- `record_customer_payment`: added `write_audit()` call folded into the existing single
+  `db.commit()` (not a new commit after it).
+- `post_draft` tender loop: added one `write_audit()` call per tender, immediately after each
+  `CustomerPayment` is flushed, folded into the loop's existing single `db.commit()` — does not
+  reuse the separate `sales.sales` header audit call later in the same function, which is its own
+  commit and covers a different record.
+
+### Verified live (Docker stack rebuilt — plain restart does not pick up code changes, no volume mount)
+
+- Created a payment through both paths; both produced matching `audit_log` INSERT rows.
+- Live cross-reference of all 44 existing `customer_payments` rows against `audit_log`: 0 had a
+  matching INSERT before the fix; all payments created after the fix do.
+- Forced a rollback (second tender referencing a nonexistent credit-memo code) to confirm the
+  first tender's payment and audit row, already added to the session, were not left partially
+  committed.
+
 ## 2026-07-08 — Rename: LedgerEntryContextOut.document_pid → document_id
 
 Follow-up to the same-day "Document ID" data-source fix below. That fix corrected *what* both fields resolve to (`reference_number`, not `shipment_pid`) but left the two API field names inconsistent: `LedgerEntryContextOut.document_pid` vs `PurchaseHistoryItem.document_id` for the same underlying value. `document_pid` was also a misleading name on its own — the value is a manually-entered reference number, not an auto-generated PID (except for the transfer branch, which does resolve a real `transfer_pid`, but the field carries either kind depending on `reference_type`, so `document_id` — the generic name — is the more honest one throughout).

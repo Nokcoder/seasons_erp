@@ -452,6 +452,10 @@ class CustomerPaymentOut(BaseModel):
     check_date:    Optional[date] = None
     bank_name:     Optional[str]  = None
     check_status:  Optional[str]  = None
+    # Reversal — non-null only after POST /sales/payments/{id}/reverse
+    reversed_at:          Optional[datetime] = None
+    reversed_reason:      Optional[str]      = None
+    reversed_by_user_id:  Optional[int]      = None
     class Config: from_attributes = True
 
 
@@ -705,3 +709,8 @@ class PDCDepositIn(BaseModel):
 
 class PDCBounceIn(BaseModel):
     bounce_notes: Optional[str] = None
+
+
+class PaymentReversalRequest(BaseModel):
+    """Payload for POST /sales/payments/{id}/reverse."""
+    reversal_reason: str

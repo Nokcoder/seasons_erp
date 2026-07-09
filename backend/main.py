@@ -266,6 +266,7 @@ def _seed_rbac():
             # Customers
             ("view_customers",         "View Customers",           "customers_list"),
             ("manage_customers",       "Manage Customers",         "customers_list"),
+            ("reverse_customer_payment","Reverse Customer Payment","customers_list"),
             ("view_customer_aging",    "View Customer Aging",      "customers_aging"),
             ("export_customer_aging",  "Export Customer Aging",    "customers_aging"),
             ("view_ar_ledger",         "View AR Ledger",           "customers_ar_ledger"),
@@ -402,7 +403,7 @@ def _seed_rbac():
             "view_returns", "export_returns",
             "view_inventory",
             "view_stock_ledger",
-            "view_customers", "manage_customers",
+            "view_customers", "manage_customers", "reverse_customer_payment",
             "view_customer_aging", "export_customer_aging",
             "view_ar_ledger", "export_ar_ledger",
             "view_credit_memos", "issue_credit_memo", "cancel_credit_memo",

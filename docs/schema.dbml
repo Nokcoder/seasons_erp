@@ -391,7 +391,7 @@ Table ar_ledger {
 // ==========================================
 Table sales {
   sale_id int [pk, increment]
-  sale_pid varchar [unique, not null, note: 'Human-friendly reference e.g. SALE-00123']
+  sale_pid varchar [note: 'Human-friendly reference e.g. SALE-00123. Nullable until set. Unique among ACTIVE (non-Voided) sales only, via partial unique index sales_sale_pid_active_key (WHERE status != \'Voided\') — a voided sale''s PID is reusable by a later sale. Not a column-level unique constraint.']
   transaction_date date [not null, default: `CURRENT_DATE`, note: 'Calendar date the sale occurred. User-supplied at posting time, defaults to today.']
   posted_at datetime [note: 'Timestamp when the sale was finalised (status set to Posted).']
   location_id int [ref: > locations.location_id, note: 'Where the sale occurred. Drives stock deduction.']
@@ -459,6 +459,9 @@ Table customer_payments {
   reference_number varchar [note: 'Check number, transfer ID, etc.']
   notes varchar [note: 'optional auditor context for this payment']
   unapplied_amount decimal(15,2) [default: 0, note: 'Remainder after application. Used for overpayments and advance payments.']
+  reversed_at datetime [note: 'Null unless reversed via POST /sales/payments/{id}/reverse. Never hard-deleted.']
+  reversed_reason varchar [note: 'Required reason captured on reversal']
+  reversed_by_user_id int [ref: > users.user_id]
 }
 
 Table customer_payment_applied {

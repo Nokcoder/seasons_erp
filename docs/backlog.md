@@ -244,6 +244,67 @@ See `/docs/changelog.md` for detail.
 
 ---
 
+> Note: the three sections below (payment audit gap fix, standalone payment reversal,
+> bounce_pdc_check reversal gap) were logged together on 2026-07-09 as a backfill — all three
+> were implemented and verified in the same session but only the bounce_pdc_check fix was
+> explicitly requested to be logged; the other two were added retroactively since none had been
+> documented yet.
+
+## Payment audit gap fix — implemented (2026-07-08)
+
+See `/docs/changelog.md` for detail.
+
+- [x] **`record_customer_payment`** — no `write_audit()` call existed; added, folded into the
+  existing single commit.
+- [x] **`post_draft` tender-creation loop** — same gap, one `write_audit()` call added per tender,
+  folded into the loop's existing single commit.
+- Verified live: cross-referenced all 44 pre-fix `customer_payments` rows against `audit_log`
+  (0 matches before the fix); created payments through both paths post-fix (matching `audit_log`
+  rows in both cases); forced a mid-loop rollback to confirm the audit write and payment write
+  can't exist independently.
+
+---
+
+## Standalone customer payment reversal — implemented (2026-07-09)
+
+Design: `/docs/payment_correction_proposal.md`. See `/docs/changelog.md` for detail.
+
+- [x] **Migration `t0u1v2w3x4y5`** — `reversed_at` / `reversed_reason` / `reversed_by_user_id` on
+  `sales.customer_payments`. `docs/schema.dbml` updated.
+- [x] **New RBAC action `reverse_customer_payment`** — `customers_list` program, granted to ADMIN
+  + STORE_MANAGER only (not CASHIER), same tier as `cancel_credit_memo`.
+- [x] **`POST /sales/payments/{payment_id}/reverse`** — origin-agnostic reversal (reads and negates
+  the payment's actual `ArLedger` rows rather than re-deriving the amount from business rules),
+  restores linked sales' `balance_due`/`payment_status`, full reversal only (no partial-amount
+  correction — see proposal §7), excludes already-reversed / bounced-PDC / credit-memo-mode
+  payments. First call site to populate `write_audit()`'s `old_values`.
+- Verified live: functional reversal (ledger, balance, sale, payment flags, audit — all confirmed);
+  all three precondition rejections; permission enforcement (CASHIER 403, STORE_MANAGER/ADMIN 200);
+  forced-failure atomicity test confirmed no partial persistence.
+
+---
+
+## bounce_pdc_check reversal gap — implemented (2026-07-09)
+
+See `/docs/changelog.md` for detail.
+
+- [x] **Fix** — bounce only reversed `CustomerPaymentApplied`-linked amounts, permanently
+  understating `outstanding_balance` for any PDC payment with a nonzero `unapplied_amount` at
+  bounce time (fully or partially unapplied). Now derives the AR/balance reversal from the
+  payment's actual `ArLedger` rows (same technique as the reversal endpoint above); sale-level
+  `balance_due`/`payment_status` restoration unchanged.
+- [x] **Retroactive correction** — the one live-affected record (`payment_id=52`, a test payment,
+  $75.00 unresolved) re-processed through the fixed endpoint; `outstanding_balance` corrected with
+  a proper audit trail.
+- Verified live: fully-unapplied case (previously broken, now correct), fully-applied case
+  (regression — unchanged), partial-application case (both ledger entries reversed, sale restored).
+- **Discovered, not fixed**: `apply_unapplied_payment` appears to double-count AR impact when
+  applying previously-unapplied credit to a sale (writes a second `ArLedger` entry / balance
+  reduction for money already accounted for at the payment's creation). Flagged for a follow-up
+  audit, not investigated further.
+
+---
+
 ## Still out of scope (do not implement until explicitly instructed)
 
 - Reporting and analytics layer

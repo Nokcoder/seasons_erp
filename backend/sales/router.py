@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import func
 
@@ -34,6 +35,30 @@ def normalize_search(q: str) -> str:
 def _get_allow_negative_stock(db: Session) -> bool:
     row = db.query(SystemSetting).filter_by(key="allow_negative_stock").first()
     return row.value == "true" if row else False
+
+
+def _assert_sale_pid_available(
+    db: Session, sale_pid: Optional[str], exclude_sale_id: Optional[int] = None
+) -> None:
+    """Raise a clean 400 if sale_pid is already held by an active (non-Voided) sale.
+
+    Mirrors the DB-level guarantee (partial unique index sales_sale_pid_active_key,
+    migration u1v2w3x4y5z6) so genuine duplicates get a friendly error instead of a
+    raw IntegrityError. A voided sale's sale_pid is intentionally not checked here.
+    """
+    if not sale_pid:
+        return
+    q = db.query(models.Sale.sale_id).filter(
+        models.Sale.sale_pid == sale_pid,
+        models.Sale.status != "Voided",
+    )
+    if exclude_sale_id is not None:
+        q = q.filter(models.Sale.sale_id != exclude_sale_id)
+    if q.first():
+        raise HTTPException(
+            status_code=400,
+            detail="This document number is already in use by an active sale.",
+        )
 
 
 def _generate_memo_code(db: Session, max_attempts: int = 5) -> str:
@@ -988,6 +1013,9 @@ def record_customer_payment(
         (customer.outstanding_balance or Decimal("0")) - payload.amount
     )
 
+    write_audit(db, "sales.customer_payments", str(payment.payment_id), "INSERT",
+                actor_user_id=_actor.user_id,
+                new_values=_serialize(payment))
     db.commit()
     return _load_payment(payment.payment_id, db)
 
@@ -1208,6 +1236,40 @@ def bounce_pdc_check(
         else reversal_base
     )
 
+    # ── Reverse whatever this payment's AR ledger rows actually did ────────────
+    # Summing CustomerPaymentApplied.amount_applied here would under-reverse any
+    # payment with a nonzero unapplied_amount — record_customer_payment writes
+    # one ArLedger entry for the FULL amount at creation regardless of how much
+    # was applied to a sale, so the applied-only sum can be less than what needs
+    # reversing. Reading the actual ArLedger rows tied to this payment_id (same
+    # technique as reverse_customer_payment) captures the full original amount
+    # regardless of application state.
+    ledger_entries = db.query(models.ArLedger).filter(
+        models.ArLedger.reference_type == "customer_payments",
+        models.ArLedger.reference_id == str(payment_id),
+    ).all()
+
+    total_delta = Decimal("0")
+    for entry in ledger_entries:
+        reversal_amount = -entry.amount_change
+        db.add(models.ArLedger(
+            customer_id=payment.customer_id,
+            amount_change=reversal_amount,
+            reason="PAYMENT",
+            reference_type="customer_payments",
+            reference_id=str(payment.payment_id),
+            notes=reversal_notes,
+        ))
+        total_delta += reversal_amount
+
+    if customer:
+        customer.outstanding_balance = (
+            (customer.outstanding_balance or Decimal("0")) + total_delta
+        )
+
+    # ── Restore balance_due/payment_status on every sale this payment touched ──
+    # ArLedger rows don't carry sale linkage, so this still has to come from
+    # CustomerPaymentApplied — unaffected by the bug above either way.
     for apply in payment.applications:
         sale = db.query(models.Sale).filter(
             models.Sale.sale_id == apply.sale_id
@@ -1224,23 +1286,6 @@ def bounce_pdc_check(
             sale.payment_status = "Partial"
         else:
             sale.payment_status = "Paid"
-
-        # Positive PAYMENT entry reverses the original credit in the AR ledger.
-        # The original payment wrote amount_change = -applied (reducing debt).
-        # This reversal writes +applied (restoring debt), net effect = zero.
-        db.add(models.ArLedger(
-            customer_id=payment.customer_id,
-            amount_change=apply.amount_applied,
-            reason="PAYMENT",
-            reference_type="customer_payments",
-            reference_id=str(payment.payment_id),
-            notes=reversal_notes,
-        ))
-
-        if customer:
-            customer.outstanding_balance = (
-                (customer.outstanding_balance or Decimal("0")) + apply.amount_applied
-            )
 
     payment.check_status = "BOUNCED"
     if customer:
@@ -1411,6 +1456,8 @@ def create_draft(
         ).first():
             raise HTTPException(status_code=404, detail="Customer not found")
 
+    _assert_sale_pid_available(db, payload.sale_pid)
+
     sale = models.Sale(
         transaction_date=_ph_today(),
         location_id=payload.location_id,
@@ -1438,7 +1485,16 @@ def create_draft(
 
     sale.items = _build_sale_items(payload.items)
     _recalculate_totals(sale)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "sales_sale_pid_active_key" in str(e.orig):
+            raise HTTPException(
+                status_code=400,
+                detail="This document number is already in use by an active sale.",
+            )
+        raise
     return _load_draft(sale.sale_id, db)
 
 
@@ -2069,6 +2125,10 @@ def post_draft(
         db.add(payment)
         db.flush()  # need payment_id for the applied row
 
+        write_audit(db, "sales.customer_payments", str(payment.payment_id), "INSERT",
+                    actor_user_id=_actor.user_id,
+                    new_values=_serialize(payment))
+
         if amount_to_apply > 0:
             db.add(models.CustomerPaymentApplied(
                 payment_id=payment.payment_id,
@@ -2158,7 +2218,17 @@ def post_draft(
     if customer and customer.terms_days > 0:
         sale.due_date = sale.transaction_date + timedelta(days=customer.terms_days)
 
-    db.commit()
+    _assert_sale_pid_available(db, sale.sale_pid, exclude_sale_id=sale.sale_id)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "sales_sale_pid_active_key" in str(e.orig):
+            raise HTTPException(
+                status_code=400,
+                detail="This document number is already in use by an active sale.",
+            )
+        raise
 
     # ── Return the posted sale with items collapsed to one row per variant ──────
     loaded = _load_sale(sale.sale_id, db)
@@ -2565,10 +2635,18 @@ def _apply_and_update(
     payment_id: int,
     amount_to_apply: Decimal,
     customer_id: Optional[int],
+    ledger_amount: Optional[Decimal] = None,
 ) -> None:
     """Create a CustomerPaymentApplied row, update the sale's balance/status,
-    and write an AR PAYMENT ledger entry.  Does NOT update outstanding_balance —
-    the caller handles that so it can batch multiple applications.
+    and write an AR PAYMENT ledger entry for `ledger_amount` (defaults to
+    `amount_to_apply`).  Does NOT update outstanding_balance — the caller
+    handles that so it can batch multiple applications.
+
+    `ledger_amount` can be less than `amount_to_apply` (or 0) when part of
+    what's being applied was already reflected in the ledger before this
+    call — see apply_unapplied_payment. The CustomerPaymentApplied row and
+    sale balance/status always reflect the full `amount_to_apply` regardless;
+    only the ledger write is affected.
     """
     db.add(models.CustomerPaymentApplied(
         payment_id=payment_id,
@@ -2578,10 +2656,11 @@ def _apply_and_update(
     sale.balance_due = max(sale.balance_due - amount_to_apply, Decimal("0"))
     sale.payment_status = "Paid" if sale.balance_due <= 0 else "Partial"
 
-    if customer_id:
+    ledger_amount = amount_to_apply if ledger_amount is None else ledger_amount
+    if customer_id and ledger_amount > 0:
         db.add(models.ArLedger(
             customer_id=customer_id,
-            amount_change=-amount_to_apply,
+            amount_change=-ledger_amount,
             reason="PAYMENT",
             reference_type="customer_payments",
             reference_id=str(payment_id),
@@ -2761,20 +2840,152 @@ def apply_unapplied_payment(
     # Cap at sale balance_due so the caller doesn't need to know the exact figure
     amount_to_apply = min(payload.amount_applied, sale.balance_due)
 
+    # ── How much of this amount is already reflected in the ledger? ────────────
+    # record_customer_payment writes one ArLedger entry for the FULL payment
+    # amount at creation regardless of application, so a payment's unapplied
+    # remainder can already be "paid for" in the ledger before this endpoint
+    # ever runs. create_payment/post_draft never write an entry for anything
+    # left unapplied, so this is always 0 for those origins. Origin-agnostic by
+    # design (same technique as reverse_customer_payment / bounce_pdc_check):
+    # read what the ledger actually shows rather than assuming based on which
+    # endpoint created the payment.
+    already_reduced = db.query(
+        func.coalesce(func.sum(models.ArLedger.amount_change), 0)
+    ).filter(
+        models.ArLedger.reference_type == "customer_payments",
+        models.ArLedger.reference_id == str(payment_id),
+        models.ArLedger.amount_change < 0,
+    ).scalar()
+    already_applied = db.query(
+        func.coalesce(func.sum(models.CustomerPaymentApplied.amount_applied), 0)
+    ).filter(
+        models.CustomerPaymentApplied.payment_id == payment_id,
+    ).scalar()
+    surplus = max(Decimal("0"), -already_reduced - already_applied)
+    already_counted = min(amount_to_apply, surplus)
+    new_amount = amount_to_apply - already_counted
+
     _apply_and_update(
-        db, sale, payment_id, amount_to_apply, payment.customer_id
+        db, sale, payment_id, amount_to_apply, payment.customer_id,
+        ledger_amount=new_amount,
     )
     payment.unapplied_amount = unapplied - amount_to_apply
 
-    if payment.customer_id:
+    if payment.customer_id and new_amount > 0:
         customer = db.query(models.Customer).filter(
             models.Customer.customer_id == payment.customer_id,
         ).first()
         if customer:
             customer.outstanding_balance = (
-                (customer.outstanding_balance or Decimal("0")) - amount_to_apply
+                (customer.outstanding_balance or Decimal("0")) - new_amount
             )
 
+    db.commit()
+    return _load_payment(payment_id, db)
+
+
+@router.post("/payments/{payment_id}/reverse", response_model=schemas.CustomerPaymentOut)
+def reverse_payment(
+    payment_id: int,
+    payload: schemas.PaymentReversalRequest,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("reverse_customer_payment")),
+):
+    """Reverse a standalone customer payment (record_customer_payment / create_payment).
+
+    Full reversal only — no partial-amount correction. To fix a wrong amount,
+    reverse the payment in full and record a new, correct one; see
+    docs/payment_correction_proposal.md §7.
+
+    Origin-agnostic by design: rather than re-deriving what the payment did from
+    business rules (record_customer_payment and create_payment update
+    outstanding_balance differently — see proposal §3), this reads the actual
+    ArLedger rows already tagged to this payment_id and negates exactly those.
+    Any linked sale's balance_due/payment_status is restored the same way
+    bounce_pdc_check restores it, and the CustomerPaymentApplied rows are left
+    in place as history — nothing here is hard-deleted.
+    """
+    if not (payload.reversal_reason and payload.reversal_reason.strip()):
+        raise HTTPException(status_code=400, detail="reversal_reason is required")
+
+    payment = _load_payment(payment_id, db)
+
+    if payment.reversed_at is not None:
+        raise HTTPException(status_code=400, detail="Payment has already been reversed")
+    if payment.check_status == "BOUNCED":
+        raise HTTPException(
+            status_code=400,
+            detail="Payment was already reversed via PDC bounce",
+        )
+    if payment.payment_mode.is_credit_memo:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Credit Memo payments cannot be reversed here — the memo "
+                "redemption is tied to the sale, not the payment, and would "
+                "be left permanently redeemed. Contact an administrator."
+            ),
+        )
+
+    old_values = _serialize(payment)
+
+    # ── Reverse whatever this payment's AR ledger rows actually did ────────────
+    ledger_entries = db.query(models.ArLedger).filter(
+        models.ArLedger.reference_type == "customer_payments",
+        models.ArLedger.reference_id == str(payment_id),
+    ).all()
+
+    total_delta = Decimal("0")
+    for entry in ledger_entries:
+        reversal_amount = -entry.amount_change
+        db.add(models.ArLedger(
+            customer_id=payment.customer_id,
+            amount_change=reversal_amount,
+            reason="ADJUSTMENT",
+            reference_type="customer_payments",
+            reference_id=str(payment_id),
+            notes=(
+                f"Reversal of payment #{payment_id} ({entry.reason}): "
+                f"{payload.reversal_reason}"
+            ),
+        ))
+        total_delta += reversal_amount
+
+    if payment.customer_id:
+        customer = db.query(models.Customer).filter(
+            models.Customer.customer_id == payment.customer_id
+        ).first()
+        if customer:
+            customer.outstanding_balance = (
+                (customer.outstanding_balance or Decimal("0")) + total_delta
+            )
+
+    # ── Restore balance_due/payment_status on every sale this payment touched ──
+    # Applications are preserved, not deleted — same as bounce_pdc_check.
+    for apply in payment.applications:
+        sale = db.query(models.Sale).filter(
+            models.Sale.sale_id == apply.sale_id
+        ).first()
+        if not sale:
+            continue
+        new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
+        sale.balance_due = new_balance
+        gt = sale.grand_total or Decimal("0")
+        if new_balance >= gt:
+            sale.payment_status = "Unpaid"
+        elif new_balance > Decimal("0"):
+            sale.payment_status = "Partial"
+        else:
+            sale.payment_status = "Paid"
+
+    payment.reversed_at         = datetime.now(timezone.utc)
+    payment.reversed_reason     = payload.reversal_reason
+    payment.reversed_by_user_id = _actor.user_id
+
+    write_audit(db, "sales.customer_payments", str(payment_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                old_values=old_values,
+                new_values=_serialize(payment))
     db.commit()
     return _load_payment(payment_id, db)
 

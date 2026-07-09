@@ -113,8 +113,11 @@ class Sale(Base):
     __table_args__ = {"schema": "sales"}
 
     sale_id            = Column(Integer, primary_key=True)
-    # NULL until the draft is posted; unique constraint still enforced on non-null values
-    sale_pid           = Column(String(100), unique=True, nullable=True)
+    # NULL until the draft is posted (or set manually beforehand). Uniqueness is enforced
+    # only among active (non-Voided) sales via the partial index sales_sale_pid_active_key
+    # (migration u1v2w3x4y5z6) — not a column-level constraint, so no unique=True here.
+    # A voided sale's sale_pid is intentionally reusable by a later sale.
+    sale_pid           = Column(String(100), nullable=True)
     # User-controlled, backdatable date the transaction actually occurred.
     # Set when the draft is created (defaults to today) and editable until posting.
     # This is the canonical date for AR aging, AR ledger filters, and sales filters.
@@ -240,10 +243,15 @@ class CustomerPayment(Base):
                name="check_status", schema="sales"),
         nullable=True,
     )
+    reversed_at          = Column(DateTime(timezone=True), nullable=True)
+    reversed_reason      = Column(String(500), nullable=True)
+    reversed_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"),
+                                  nullable=True)
 
     customer     = relationship("Customer")
     payment_mode = relationship("PaymentMode")
     applications = relationship("CustomerPaymentApplied", back_populates="payment")
+    reversed_by  = relationship("User", foreign_keys=[reversed_by_user_id])
 
 
 # ==========================================
