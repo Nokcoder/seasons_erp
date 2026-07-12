@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Shipment } from '../../services/api'
@@ -126,7 +127,21 @@ export default function Receiving() {
           <thead>
             <tr className="border-b t-border">
               {['Shipment PID','SKU','Supplier','Document ID','Date Received','PO Reference','Status','Actions'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Document ID' && (
+                    <Tooltip content="The supplier's own delivery or invoice reference — not the system-generated Shipment PID.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Status' && (
+                    <Tooltip
+                      content="Confirmed once costs are entered; Pending Confirmation means stock has arrived but costs haven't been recorded yet."
+                      note="Pending means the shipment was created but no items have been added.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Document ID' && h !== 'Status' && h}
+                </th>
               ))}
             </tr>
           </thead>

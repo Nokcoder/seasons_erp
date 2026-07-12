@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import KeywordSearch from '../../components/KeywordSearch'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { normalize } from '../../lib/normalize'
@@ -52,24 +53,6 @@ function todayLocal() {
   return `${d.getFullYear()}-${mm}-${dd}`
 }
 
-// ── Tooltip ───────────────────────────────────────────────────────────────────
-
-function Tip({ children, tip }: { children: React.ReactNode; tip: string }) {
-  return (
-    <span className="relative group/tip inline-block">
-      {children}
-      <span className={[
-        'pointer-events-none invisible group-hover/tip:visible',
-        'absolute left-0 bottom-full mb-1.5 z-50',
-        't-bg-elevated border t-border-strong rounded-md shadow-xl',
-        'px-2.5 py-2 w-52 text-[10px] t-text-2 leading-relaxed whitespace-normal',
-      ].join(' ')}>
-        {tip}
-      </span>
-    </span>
-  )
-}
-
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
 function SkeletonDashCard() {
@@ -110,33 +93,33 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
         <p className="text-[9px] font-semibold uppercase tracking-widest t-text-3 mb-3">Revenue</p>
         <div className="space-y-1.5 text-xs">
           <div className="flex justify-between items-baseline">
-            <Tip tip="Total value of merchandise sold before discounts.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Merchandise Gross</span>
-            </Tip>
+            <Tooltip content="Total value of merchandise sold before discounts.">
+              <span className="t-text-2">Merchandise Gross</span>
+            </Tooltip>
             <span className="tabular-nums t-text-1 ml-4">{php(summary.merchandise_gross)}</span>
           </div>
           <div className="flex justify-between items-baseline">
-            <Tip tip="Total value of customer returns credited back.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Returns</span>
-            </Tip>
+            <Tooltip content="Total value of customer returns credited back.">
+              <span className="t-text-2">Returns</span>
+            </Tooltip>
             <span className="tabular-nums text-red-400 ml-4">−{php(summary.returns_total)}</span>
           </div>
           <div className="flex justify-between items-baseline">
-            <Tip tip="Total discounts applied at cart level.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Cart Discounts</span>
-            </Tip>
+            <Tooltip content="Total discounts applied at cart level.">
+              <span className="t-text-2">Cart Discounts</span>
+            </Tooltip>
             <span className="tabular-nums text-red-400 ml-4">−{php(summary.cart_discounts)}</span>
           </div>
           <div className="flex justify-between items-baseline">
-            <Tip tip="Revenue from services, delivery charges, and non-stock items.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Non-Merch Revenue</span>
-            </Tip>
+            <Tooltip content="Revenue from services, delivery charges, and non-stock items.">
+              <span className="t-text-2">Non-Merch Revenue</span>
+            </Tooltip>
             <span className="tabular-nums t-text-2 ml-4">+{php(summary.non_merchandise_revenue)}</span>
           </div>
           <div className="flex justify-between items-baseline">
-            <Tip tip="Net difference between receipt totals entered by auditors and system-computed grand totals.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Variances</span>
-            </Tip>
+            <Tooltip content="Net difference between receipt totals entered by auditors and system-computed grand totals.">
+              <span className="t-text-2">Variances</span>
+            </Tooltip>
             <span className={`tabular-nums ml-4 ${varColor}`}>
               {summary.variances >= 0 ? '+' : ''}{php(summary.variances)}
             </span>
@@ -153,15 +136,15 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
         <p className="text-[9px] font-semibold uppercase tracking-widest t-text-3 mb-3">Profitability</p>
         <div className="space-y-1.5 text-xs">
           <div className="flex justify-between items-baseline">
-            <Tip tip="Gross profit (revenue minus cost of goods sold) calculated only for sales where complete cost data is available. Sales with missing cost data are excluded.">
-              <span className="t-text-2 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Gross Profit</span>
-            </Tip>
+            <Tooltip content="Gross profit (revenue minus cost of goods sold) calculated only for sales where complete cost data is available. Sales with missing cost data are excluded.">
+              <span className="t-text-2">Gross Profit</span>
+            </Tooltip>
             <span className={`tabular-nums font-semibold ml-4 ${profitColor}`}>{php(summary.gross_profit)}</span>
           </div>
           <div className="border-t t-border pt-1.5 flex justify-between items-baseline">
-            <Tip tip="Revenue from sales where cost data is incomplete. Profit cannot be calculated for these sales. Confirm shipment costs to include these in gross profit.">
-              <span className="t-text-3 cursor-help underline decoration-dotted t-border-strong underline-offset-2">Uncosted Revenue</span>
-            </Tip>
+            <Tooltip content="Revenue from sales where cost data is incomplete. Profit cannot be calculated for these sales. Confirm shipment costs to include these in gross profit.">
+              <span className="t-text-3">Uncosted Revenue</span>
+            </Tooltip>
             <span className={`tabular-nums ml-4 ${summary.uncosted_revenue > 0 ? 'text-yellow-400' : 't-text-4'}`}>
               {summary.uncosted_revenue > 0 ? php(summary.uncosted_revenue) : '—'}
             </span>
@@ -203,9 +186,9 @@ function Dashboard({ summary, loading }: { summary: SalesSummaryResponse | undef
             </div>
             <div className="flex items-center gap-2">
               <span className="t-text-3 flex-1">
-                <Tip tip="Digital payments collected but not physically in the cash drawer.">
-                  <span className="cursor-help underline decoration-dotted t-border-strong underline-offset-2">Total Virtual</span>
-                </Tip>
+                <Tooltip content="Digital payments collected but not physically in the cash drawer.">
+                  Total Virtual
+                </Tooltip>
               </span>
               <span className="tabular-nums t-text-2 text-right w-24 shrink-0">{php(summary.total_virtual)}</span>
             </div>

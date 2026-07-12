@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { purchaseOrderApi, type POOut, type POItemOut, type POItemUpdate } from '../../services/api'
@@ -159,9 +160,14 @@ export default function PurchaseOrderDetail() {
       <div className="t-bg-surface border t-border rounded-lg p-4 mb-4">
         <div className="flex items-center gap-2 mb-3">
           <h2 className="text-sm font-semibold t-text-1">{po.po_pid}</h2>
-          <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${STATUS_BADGE[po.status] ?? 't-bg-elevated t-text-4'}`}>
-            {po.status.replace('_', ' ')}
-          </span>
+          <Tooltip
+            underline={false}
+            content="Draft → Open → Partially Received → Closed, or Cancelled at any point before Closed."
+            note="Partially Received and Closed happen automatically as goods are received — there's no manual button for them here.">
+            <span className={`text-[10px] font-medium uppercase px-1.5 py-0.5 rounded ${STATUS_BADGE[po.status] ?? 't-bg-elevated t-text-4'}`}>
+              {po.status.replace('_', ' ')}
+            </span>
+          </Tooltip>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div><label className={lCls}>Supplier</label><p className={vCls}>{po.supplier?.supplier_name ?? '—'}</p></div>
@@ -191,7 +197,26 @@ export default function PurchaseOrderDetail() {
           <thead>
             <tr className="border-b t-border">
               {['PID', 'Variant Name', 'Ordered Qty', 'Received Qty', 'Gross Cost', 'Discount %', 'Net Cost', 'Line Total'].map(h => (
-                <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4 whitespace-nowrap">{h}</th>
+                <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4 whitespace-nowrap">
+                  {h === 'Received Qty' && (
+                    <Tooltip
+                      content="Confirmed quantity received so far, tracked separately from what was ordered."
+                      note="Only updates via the Receiving workflow — this screen can't record receiving directly.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Gross Cost' && (
+                    <Tooltip
+                      content="The supplier's catalog price for this line."
+                      note="Editing this recalculates Net Cost, Line Total, and the PO's Total Amount automatically.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Net Cost' && (
+                    <Tooltip content="Gross Cost after the discount — Net Cost × Qty = Line Total.">{h}</Tooltip>
+                  )}
+                  {!['Received Qty', 'Gross Cost', 'Net Cost'].includes(h) && h}
+                </th>
               ))}
             </tr>
           </thead>

@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -233,7 +234,13 @@ export default function ReceivingNew() {
       {/* ── item search panel ── */}
       <aside className="w-72 shrink-0 border-r t-border t-bg-surface flex flex-col overflow-hidden">
         <div className="p-3 border-b t-border">
-          <label className={lCls}>Search Items</label>
+          <label className={lCls}>
+            <Tooltip
+              content="Finds sellable and component variants by brand, name, PID, SKU, or barcode."
+              note="Bundle variants won't appear here — receive their individual components instead; bundles are assembled automatically at the point of sale.">
+              Search Items
+            </Tooltip>
+          </label>
           <KeywordSearch
             tags={searchTags}
             onTagsChange={handleTagsChange}
@@ -280,7 +287,13 @@ export default function ReceivingNew() {
               <input type="date" className={iCls} value={dateRcv} onChange={e => setDateRcv(e.target.value)} />
             </div>
             <div>
-              <label className={lCls}>Destination Location *</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Where this shipment's stock will be posted."
+                  note="One location applies to the whole shipment — use separate shipments for goods arriving at different locations.">
+                  Destination Location *
+                </Tooltip>
+              </label>
               <select className={iCls} value={destLocId} onChange={e => setDestLocId(e.target.value)}>
                 <option value="">— select —</option>
                 {locations.map(l => <option key={l.location_id} value={l.location_id}>{l.location_name}</option>)}
@@ -304,7 +317,49 @@ export default function ReceivingNew() {
               <thead>
                 <tr className="border-b t-border">
                   {['Brand','Variant','PID','SKU','Bundle Count','Qty Declared','Qty Actual','Qty Rejected','QC Status',''].map(h => (
-                    <th key={h} className="text-left px-2 py-2 text-[10px] font-bold uppercase tracking-widest t-text-4 whitespace-nowrap">{h}</th>
+                    <th key={h} className="text-left px-2 py-2 text-[10px] font-bold uppercase tracking-widest t-text-4 whitespace-nowrap">
+                      {h === 'Bundle Count' && (
+                        <Tooltip
+                          content="Enter physical boxes or cases instead of individual units."
+                          note="Qty Declared and Qty Actual convert automatically — only available for variants with a warehouse-bundle conversion set up.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {h === 'Qty Declared' && (
+                        <Tooltip
+                          content="What the supplier's delivery note claims was shipped."
+                          note="Editing this also updates Qty Actual to match — adjust Qty Actual afterward if the physical count differs.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {h === 'Qty Actual' && (
+                        <Tooltip content="What was physically counted on arrival — this is the quantity that enters stock.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {/* TOOLTIP-TODO(bug): quantity_rejected is not currently sent to the backend —
+                          ReceivingNew.tsx's handlePost hardcodes quantity_rejected: '0' regardless of
+                          this field's value, so nothing is actually routed to Quarantine yet. Copy
+                          below describes the intended/documented behavior (requirements.md §9.1). */}
+                      {h === 'Qty Rejected' && (
+                        <Tooltip
+                          content="Units refused for damage or quality failure."
+                          note="Routed to the Quarantine virtual location and excluded from active stock.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {/* TOOLTIP-TODO(bug): qc_status is not currently sent to the backend —
+                          ReceivingNew.tsx's handlePost hardcodes qc_status: 'Passed' regardless of
+                          this field's value. Copy below describes the intended/documented behavior. */}
+                      {h === 'QC Status' && (
+                        <Tooltip
+                          content="Quality-control outcome for this line."
+                          note="Passed units enter active stock as-is; Failed or Partially Passed units affect what's available to sell.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {!['Bundle Count','Qty Declared','Qty Actual','Qty Rejected','QC Status'].includes(h) && h}
+                    </th>
                   ))}
                 </tr>
               </thead>

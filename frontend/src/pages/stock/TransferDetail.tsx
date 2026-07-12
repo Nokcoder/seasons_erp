@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type TransferItem } from '../../services/api'
@@ -95,7 +96,16 @@ export default function TransferDetail() {
           <div><label className={lCls}>From</label><p className={vCls}>{transfer.from_location?.location_name ?? '—'}</p></div>
           <div><label className={lCls}>To</label><p className={vCls}>{transfer.to_location?.location_name ?? '—'}</p></div>
           <div><label className={lCls}>Date</label><p className={vCls}>{fmtDate(transfer.occurred_at)}</p></div>
-          <div><label className={lCls}>Bundle Count</label><p className={vCls}>{transfer.total_bundle_count ?? '—'}</p></div>
+          <div>
+            <label className={lCls}>
+              <Tooltip
+                content="Staff-entered count of physical boxes or cases in this transfer."
+                note="Informational only — it isn't validated against the line-item quantities below.">
+                Bundle Count
+              </Tooltip>
+            </label>
+            <p className={vCls}>{transfer.total_bundle_count ?? '—'}</p>
+          </div>
           <div>
             <label className={lCls}>Released By</label>
             <p className={vCls}>
@@ -172,7 +182,20 @@ export default function TransferDetail() {
           <thead>
             <tr className="border-b t-border">
               {['Brand','Variant','PID','SKU','Qty Requested','Qty Released','Qty Received'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Qty Requested' && <Tooltip content="What was entered on the transfer before posting.">{h}</Tooltip>}
+                  {h === 'Qty Released' && (
+                    <Tooltip content="What actually left the source location." note="Normally matches Qty Requested unless adjusted during processing.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Qty Received' && (
+                    <Tooltip content="What was physically confirmed as arrived at the destination, if reconciled separately from what was released.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Qty Requested' && h !== 'Qty Released' && h !== 'Qty Received' && h}
+                </th>
               ))}
             </tr>
           </thead>

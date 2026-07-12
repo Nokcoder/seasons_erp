@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { catalogueApi, type UOM, type Category, type InvSupplier, type InvVariant } from '../../services/api'
 import ImportDiffModal, { type ImportPreviewResponse } from '../../components/ImportDiffModal'
+import Tooltip from '../../components/Tooltip'
 import * as XLSX from 'xlsx'
 
 // ── types ─────────────────────────────────────────────────────────────────────
@@ -513,7 +514,13 @@ export default function NewProduct() {
               <input className={`${iCls} w-full`} value={productName} onChange={e => setProductName(e.target.value)} placeholder="e.g. Widget Pro" />
             </div>
             <div>
-              <label className={lCls}>Product Type *</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Governs whether stock is tracked."
+                  note="Non-Inventory and Service variants generate no ledger entries — barcodes, UOM conversions, and bundle components can still be added but won't affect stock.">
+                  Product Type *
+                </Tooltip>
+              </label>
               <select className={`${iCls} w-full`} value={productType} onChange={e => setProductType(e.target.value)}>
                 {['Inventory','Non-Inventory','Service'].map(t => <option key={t}>{t}</option>)}
               </select>
@@ -554,7 +561,11 @@ export default function NewProduct() {
             <div key={v.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">
-                  Variant {idx + 1} {v.is_default && <span className="ml-1 text-[9px] bg-blue-950 text-blue-400 rounded px-1">Default</span>}
+                  Variant {idx + 1} {v.is_default && (
+                    <Tooltip underline={false} content="The hero variant — other variants without their own price fall back to this one's.">
+                      <span className="ml-1 text-[9px] bg-blue-950 text-blue-400 rounded px-1">Default</span>
+                    </Tooltip>
+                  )}
                 </p>
                 <div className="flex gap-2">
                   {!v.is_default && <button type="button" onClick={() => setDefault(v.id)} className="text-[10px] text-gray-600 hover:text-gray-400">Set default</button>}
@@ -607,8 +618,17 @@ export default function NewProduct() {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-gray-800">
-                        {['Barcode','UOM','Primary',''].map(h =>
-                          <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">{h}</th>)}
+                        {['Barcode','UOM','Primary',''].map(h => (
+                          <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">
+                            {h === 'Primary' ? (
+                              <Tooltip
+                                content="Marks the scannable code for this variant."
+                                note="Only one barcode can be primary — checking it on more than one row here isn't reconciled until save.">
+                                {h}
+                              </Tooltip>
+                            ) : h}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -655,8 +675,17 @@ export default function NewProduct() {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-gray-800">
-                        {['From','To','Factor','Wh. Bundle',''].map(h =>
-                          <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">{h}</th>)}
+                        {['From','To','Factor','Wh. Bundle',''].map(h => (
+                          <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">
+                            {h === 'Wh. Bundle' ? (
+                              <Tooltip
+                                content="Marks this as the physical counting unit for warehouse staff (e.g. 1 case = 24 pcs)."
+                                note="Should be set on only one conversion per variant — checking it on more than one row here isn't prevented.">
+                                {h}
+                              </Tooltip>
+                            ) : h}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -702,14 +731,24 @@ export default function NewProduct() {
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" className="accent-blue-500" checked={v.is_bundle}
                     onChange={e => updateVariant(v.id, 'is_bundle', e.target.checked)} />
-                  <span className="text-xs text-gray-400">This variant is a bundle</span>
+                  <Tooltip
+                    content="Reveals the Bundle Components section below."
+                    note="This checkbox itself isn't saved — the variant is only treated as a bundle if it ends up with at least one component after creation.">
+                    <span className="text-xs text-gray-400">This variant is a bundle</span>
+                  </Tooltip>
                 </label>
               </div>
 
               {/* bundle components */}
               {v.is_bundle && (
                 <div className="mt-3 space-y-1.5">
-                  <label className={lCls}>Bundle Components</label>
+                  <label className={lCls}>
+                    <Tooltip
+                      content="Searches your existing saved catalogue."
+                      note="You can't add a variant that's still being created in this same form as a component — save it first, then link it from the component's own product page.">
+                      Bundle Components
+                    </Tooltip>
+                  </label>
                   {v.bundle_comps.map(bc => (
                     <div key={bc.component_variant_id} className="flex items-center gap-2 text-xs">
                       <span className="flex-1 text-gray-300">{bc.label}</span>
@@ -739,7 +778,13 @@ export default function NewProduct() {
 
               {/* optional supplier link */}
               <div className="mt-3 border-t border-gray-800 pt-3">
-                <label className={lCls}>Supplier Link (optional)</label>
+                <label className={lCls}>
+                  <Tooltip
+                    content="Optional starting cost source for this variant."
+                    note="Automatically saved as the primary supplier — there's no option to add it as secondary here.">
+                    Supplier Link (optional)
+                  </Tooltip>
+                </label>
                 <div className="flex gap-2 flex-wrap">
                   <select className={`${iCls} w-36`} value={v.supplier_id} onChange={e => updateVariant(v.id, 'supplier_id', e.target.value)}>
                     <option value="">— supplier —</option>
@@ -759,7 +804,7 @@ export default function NewProduct() {
           + Add Variant
         </button>
 
-        <div className="flex gap-3 mb-8">
+        <div className="flex gap-3 mb-8 items-center">
           <button type="button" onClick={handleSubmit} disabled={saving}
             className="px-6 py-2 text-sm rounded text-white font-medium disabled:opacity-40 transition-colors"
             style={{ backgroundColor: 'var(--accent)' }}>
@@ -769,6 +814,15 @@ export default function NewProduct() {
             className="px-4 py-2 text-sm border border-gray-700 rounded text-gray-500 hover:border-gray-600">
             Cancel
           </button>
+          {/* TOOLTIP-TODO(bug): handleSubmit's per-sub-entity POSTs (supplier link, bundle
+              components, barcodes, UOM conversions) are each wrapped in .catch(() => {}) —
+              a failure on any of them is silently swallowed and you're still navigated to the
+              new product page with no indication anything didn't save. Copy below describes
+              the intended/documented behavior (a single atomic creation). */}
+          <Tooltip
+            label="About Create Product"
+            content="Creates the product, its variants, and any barcodes, UOM conversions, bundle components, and supplier links you've added, then opens the new product's page."
+          />
         </div>
 
         {/* ── IMPORT SECTION ── */}

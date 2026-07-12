@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type Transfer } from '../../services/api'
@@ -13,6 +14,17 @@ import { normalize } from '../../lib/normalize'
 function fmtDate(s: string | null | undefined) {
   if (!s) return '—'
   return new Date(s).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+const HEADER_TIPS: Record<string, { content: string; note?: string }> = {
+  'Route': {
+    content: 'Where stock is moving from and to.',
+    note: 'Quarantine and Adjustment are internal system locations, not physical stores — used for damaged-goods holding and stock corrections.',
+  },
+  'Bundle Count': {
+    content: 'Staff-entered count of physical boxes or cases in this transfer.',
+    note: "Informational only — it isn't validated against the line-item quantities.",
+  },
 }
 
 function transferSkus(t: Transfer): string {
@@ -141,7 +153,9 @@ export default function Transfers() {
           <thead>
             <tr className="border-b t-border">
               {['Transfer PID','SKU','Route','Date','Bundle Count','Status','Actions'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {HEADER_TIPS[h] ? <Tooltip content={HEADER_TIPS[h].content} note={HEADER_TIPS[h].note}>{h}</Tooltip> : h}
+                </th>
               ))}
             </tr>
           </thead>

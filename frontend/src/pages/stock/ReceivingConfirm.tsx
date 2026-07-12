@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -200,7 +201,12 @@ export default function ReceivingConfirm() {
           <div><label className={lCls}>Shipment PID</label><p className={`${vCls} font-mono`}>{shipment.shipment_pid ?? '—'}</p></div>
           <div><label className={lCls}>Supplier</label><p className={vCls}>{shipment.supplier?.supplier_name ?? '—'}</p></div>
           <div><label className={lCls}>Date Received</label><p className={vCls}>{fmtDate(shipment.received_at)}</p></div>
-          <div><label className={lCls}>Destination Location</label><p className={vCls}>{destinationLocationName}</p></div>
+          <div>
+            <label className={lCls}>
+              <Tooltip content="Where this shipment's stock was received.">Destination Location</Tooltip>
+            </label>
+            <p className={vCls}>{destinationLocationName}</p>
+          </div>
           {shipment.reference_number && (
             <div><label className={lCls}>Document ID</label><p className={vCls}>{shipment.reference_number}</p></div>
           )}
@@ -220,7 +226,13 @@ export default function ReceivingConfirm() {
             <input type="date" className={`${iCls} w-full`} value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} />
           </div>
           <div>
-            <label className={lCls}>Due Date</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Calculated as Invoice Date plus the supplier's payment terms."
+                note="Editing it directly stops the automatic recalculation for the rest of this session.">
+                Due Date
+              </Tooltip>
+            </label>
             <input
               type="date" className={`${iCls} w-full`}
               value={dueDate}
@@ -250,7 +262,21 @@ export default function ReceivingConfirm() {
           <thead>
             <tr className="border-b t-border">
               {['PID','Variant Name','Brand','Qty Received','Gross Cost','Discount %','Net Unit Cost','Line Total'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Qty Received' && (
+                    <Tooltip content="What was physically received for this line, recorded when the shipment first arrived.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Gross Cost' && (
+                    <Tooltip
+                      content="The supplier's catalog price for this line, before any discount."
+                      note="Pre-filled from the most recent cost layer or the supplier's on-file cost when available — always editable.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Qty Received' && h !== 'Gross Cost' && h}
+                </th>
               ))}
             </tr>
           </thead>
@@ -296,7 +322,12 @@ export default function ReceivingConfirm() {
       {details.length > 0 && (
         <div className="flex justify-end mb-4">
           <div className="text-sm t-text-1 font-medium">
-            Grand Total: <span className="tabular-nums">₱{money(grandTotal)}</span>
+            <Tooltip
+              content="Sum of all line totals shown below."
+              note="Lines with zero quantity or a Failed QC outcome are excluded — they carry no cost and never appear in this table."
+              side="top">
+              Grand Total:
+            </Tooltip> <span className="tabular-nums">₱{money(grandTotal)}</span>
           </div>
         </div>
       )}

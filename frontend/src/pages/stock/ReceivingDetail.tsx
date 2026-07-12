@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { stockApi, type ReceivingDetail } from '../../services/api'
@@ -68,10 +69,23 @@ export default function ReceivingDetail() {
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div><label className={lCls}>Shipment PID</label><p className={`${vCls} font-mono`}>{shipment.shipment_pid ?? '—'}</p></div>
           <div><label className={lCls}>Supplier</label><p className={vCls}>{shipment.supplier?.supplier_name ?? '—'}</p></div>
-          <div><label className={lCls}>Document ID</label><p className={vCls}>{shipment.reference_number ?? '—'}</p></div>
+          <div>
+            <label className={lCls}>
+              <Tooltip content="The supplier's own delivery or invoice reference — not the system-generated Shipment PID.">
+                Document ID
+              </Tooltip>
+            </label>
+            <p className={vCls}>{shipment.reference_number ?? '—'}</p>
+          </div>
           <div><label className={lCls}>Date Received</label><p className={vCls}>{fmtDate(shipment.received_at)}</p></div>
           <div>
-            <label className={lCls}>Cost Confirmation</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Confirmed once unit costs have been entered and the supplier invoice recorded (Stage 2)."
+                note="Pending means stock already arrived and is sellable, but no cost data exists for it yet.">
+                Cost Confirmation
+              </Tooltip>
+            </label>
             <span className={`text-xs font-medium uppercase px-1.5 py-0.5 rounded ${isConfirmed ? 'bg-emerald-950 text-emerald-500' : 'bg-yellow-950 text-yellow-500'}`}>
               {isConfirmed ? 'Confirmed' : 'Pending'}
             </span>
@@ -117,7 +131,15 @@ export default function ReceivingDetail() {
                 'Brand','Variant','PID','Qty Declared','Qty Actual','Qty Rejected','Variance','QC Status',
                 ...(isConfirmed ? ['Gross Cost','Discount %','Net Unit Cost'] : []),
               ].map(h => (
-                <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Variance' ? (
+                    <Tooltip
+                      content="Qty Actual minus Qty Declared — the difference between what was physically counted and what the supplier's delivery note claimed."
+                      note="Not a comparison against the original purchase order quantity.">
+                      {h}
+                    </Tooltip>
+                  ) : h}
+                </th>
               ))}
             </tr>
           </thead>

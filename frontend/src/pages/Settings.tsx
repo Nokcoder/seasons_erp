@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext'
 import { useTheme, type Theme } from '../hooks/useTheme'
 import { useAltRows } from '../hooks/useAltRows'
 import { SkeletonTable, FetchingBar } from '../components/Skeleton'
+import Tooltip from '../components/Tooltip'
 import { qk } from '../lib/queryKeys'
 import { stale } from '../lib/queryClient'
 import {
@@ -79,11 +80,11 @@ function StatusBadge({ active }: { active: boolean }) {
   )
 }
 
-function TableHead({ cols }: { cols: string[] }) {
+function TableHead({ cols }: { cols: ReactNode[] }) {
   return (
     <thead>
       <tr className="border-b t-border">
-        {cols.map(c => <th key={c} className="text-left px-3 py-2 text-[10px] font-medium uppercase tracking-widest t-text-3">{c}</th>)}
+        {cols.map((c, i) => <th key={i} className="text-left px-3 py-2 text-[10px] font-medium uppercase tracking-widest t-text-3">{c}</th>)}
       </tr>
     </thead>
   )
@@ -157,7 +158,13 @@ function LocationsTab() {
         <InlineForm title={editing ? 'Edit Location' : 'New Location'} onCancel={() => setShowForm(false)} onSave={save} loading={loading}>
           <div><label className={labelCls}>Name *</label><input className={inputCls} value={form.location_name} onChange={e => setForm(f => ({ ...f, location_name: e.target.value }))} /></div>
           <div>
-            <label className={labelCls}>Type</label>
+            <label className={labelCls}>
+              <Tooltip
+                content="Warehouse, Store, and Bin are real physical places where stock can be held."
+                note="Virtual is for system-only locations like quarantine or stock-correction staging — it's never counted in active inventory reports.">
+                Type
+              </Tooltip>
+            </label>
             <select className={selectCls} value={form.location_type} onChange={e => setForm(f => ({ ...f, location_type: e.target.value }))}>
               {['Warehouse', 'Store', 'Bin', 'Virtual'].map(t => <option key={t}>{t}</option>)}
             </select>
@@ -166,7 +173,13 @@ function LocationsTab() {
         </InlineForm>
       )}
       <table className="w-full text-sm">
-        <TableHead cols={['Name', 'Type', 'Address', 'Status', 'Actions']} />
+        <TableHead cols={[
+          'Name',
+          'Type',
+          'Address',
+          <Tooltip key="status" underline={false} content="Inactive blocks this location from new transactions but preserves all its historical records.">Status</Tooltip>,
+          'Actions',
+        ]} />
         <tbody>
           {isLoading && <SkeletonTable rows={4} cols={5} />}
           {items.map(loc => (
@@ -183,7 +196,14 @@ function LocationsTab() {
                       ? <Btn variant="danger" onClick={() => setStatus(loc, 'Inactive')}>Deactivate</Btn>
                       : <Btn variant="ghost" onClick={() => setStatus(loc, 'Active')}>Reactivate</Btn>}
                   </div>
-                ) : <span className="text-[10px] t-text-4 italic">system</span>}
+                ) : (
+                  <Tooltip
+                    underline={false}
+                    content="A system-seeded location (Quarantine or Adjustment) — never editable or deletable."
+                    note="Quarantine holds rejected/damaged goods from receiving; Adjustment is the source or destination for stock corrections.">
+                    <span className="text-[10px] t-text-4 italic">system</span>
+                  </Tooltip>
+                )}
               </td>
             </tr>
           ))}
@@ -1097,7 +1117,13 @@ function UOMsTab() {
       {showForm && (
         <InlineForm title={editing ? 'Edit UOM' : 'New UOM'} onCancel={() => setShowForm(false)} onSave={save} loading={loading}>
           <div>
-            <label className={labelCls}>Code * {editing && <span className="t-text-4 normal-case font-normal">(read-only)</span>}</label>
+            <label className={labelCls}>
+              <Tooltip
+                content="Uppercase, unique identifier for this unit, e.g. PC, BOX, KG."
+                note="Automatically uppercased as you type — permanent once created.">
+                Code *
+              </Tooltip> {editing && <span className="t-text-4 normal-case font-normal">(read-only)</span>}
+            </label>
             <input className={inputCls} value={form.uom_code} readOnly={!!editing}
               onChange={e => setForm(f => ({ ...f, uom_code: e.target.value.toUpperCase() }))} placeholder="PC, BOX, KG…" />
           </div>
@@ -1108,7 +1134,10 @@ function UOMsTab() {
         </InlineForm>
       )}
       <table className="w-full text-sm">
-        <TableHead cols={['Code', 'Name', 'Actions']} />
+        <TableHead cols={[
+          <Tooltip key="code" underline={false} content="Deleting a UOM is permanent — blocked if any product, barcode, or UOM conversion still references it.">Code</Tooltip>,
+          'Name', 'Actions',
+        ]} />
         <tbody>
           {isLoading && <SkeletonTable rows={4} cols={3} />}
           {items.map(u => (
@@ -1178,7 +1207,13 @@ function CategoriesTab() {
         <InlineForm title={editing ? 'Edit Category' : 'New Category'} onCancel={() => setShowForm(false)} onSave={save} loading={loading}>
           <div><label className={labelCls}>Name *</label><input className={inputCls} value={form.category_name} onChange={e => setForm(f => ({ ...f, category_name: e.target.value }))} /></div>
           <div>
-            <label className={labelCls}>Parent Category</label>
+            <label className={labelCls}>
+              <Tooltip
+                content="Nests this category under another, for organization."
+                note="UI filtering only — has no effect on stock, costing, or pricing logic anywhere in the app.">
+                Parent Category
+              </Tooltip>
+            </label>
             <select className={selectCls} value={form.parent_category_id} onChange={e => setForm(f => ({ ...f, parent_category_id: e.target.value }))}>
               <option value="">— top level —</option>
               {parentOptions.map(c => <option key={c.category_id} value={c.category_id}>{c.category_name}</option>)}
@@ -1187,7 +1222,11 @@ function CategoriesTab() {
         </InlineForm>
       )}
       <table className="w-full text-sm">
-        <TableHead cols={['Name', 'Parent', 'Actions']} />
+        <TableHead cols={[
+          'Name',
+          <Tooltip key="parent" underline={false} content="The category one level up in the hierarchy." note="Picking one of a category's own descendants as its parent isn't blocked — avoid creating a loop.">Parent</Tooltip>,
+          'Actions',
+        ]} />
         <tbody>
           {isLoading && <SkeletonTable rows={4} cols={3} />}
           {items.map(c => (
@@ -1311,7 +1350,14 @@ function InventoryPolicyTab() {
         <div className="t-bg-elevated border t-border rounded-lg p-4 max-w-lg">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-sm font-semibold t-text-1">Allow Negative Stock</p>
+              <p className="text-sm font-semibold t-text-1">
+                <Tooltip
+                  underline={false}
+                  content="Meant for after-the-fact auditor encoding, where physical stock counts may lag behind what's in the system — not as a general tolerance for day-to-day floor operations."
+                  note="Even when enabled, transfers still block if FIFO cost layers run out — this only skips the stock-quantity check, not the cost-layer check.">
+                  Allow Negative Stock
+                </Tooltip>
+              </p>
               <p className="text-[11px] t-text-3 mt-1 leading-relaxed max-w-sm">
                 When enabled, sales and transfers will post even if stock levels would go below
                 zero. Useful for after-the-fact auditor encoding where stock counts may not be

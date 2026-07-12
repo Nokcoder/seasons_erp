@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../../context/AuthContext'
 import { FetchingBar, SkeletonFields } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -55,7 +56,7 @@ function SectionHead({ title }: { title: string }) {
 function HistoryTable({
   cols, rows, onLoadMore, hasMore, loading,
 }: {
-  cols: string[]
+  cols: ReactNode[]
   rows: (string | number | null | undefined)[][]
   onLoadMore?: () => void
   hasMore?: boolean
@@ -66,7 +67,7 @@ function HistoryTable({
       <table className="w-full text-xs mt-2">
         <thead>
           <tr className="border-b border-gray-800">
-            {cols.map(c => <th key={c} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{c}</th>)}
+            {cols.map((c, i) => <th key={i} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{c}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -729,7 +730,13 @@ export default function Detail() {
               onChange={e => vEdit('variant_name', e.target.value)} readOnly={!canEdit} />
           </div>
           <div>
-            <label className={lCls}>PID</label>
+            <label className={lCls}>
+              <Tooltip
+                content="The unique, user-facing identifier — also used as the barcode if this variant has no explicit primary barcode."
+                note="Changing it may prompt a reprint warning below if no barcode is on file.">
+                PID
+              </Tooltip>
+            </label>
             <input className={iCls} value={variant.PID}
               onChange={e => vEdit('PID', e.target.value as never)} readOnly={!canEdit} />
           </div>
@@ -739,7 +746,13 @@ export default function Detail() {
               onChange={e => vEdit('sku', e.target.value || null as never)} readOnly={!canEdit} />
           </div>
           <div>
-            <label className={lCls}>Default Variant</label>
+            <label className={lCls}>
+              <Tooltip
+                content="The hero variant — other variants inherit price and supplier data from this one when their own is blank."
+                note="Switching this away from the current variant doesn't warn about that ripple effect on siblings.">
+                Default Variant
+              </Tooltip>
+            </label>
             {canEdit
               ? <select className={iCls} value={variant.is_default ? 'yes' : 'no'}
                   onChange={e => vEdit('is_default', e.target.value === 'yes' as never)}>
@@ -750,7 +763,13 @@ export default function Detail() {
           </div>
           {!isBundleType && (
             <div>
-              <label className={lCls}>Include in Ordering</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Uncheck to exclude this variant from purchase order forms."
+                  note="Doesn't affect sales, receiving, or transfers — ordering only.">
+                  Include in Ordering
+                </Tooltip>
+              </label>
               {canEdit ? (
                 <label
                   className="flex items-center gap-2 mt-1 cursor-pointer"
@@ -774,7 +793,13 @@ export default function Detail() {
             </div>
           )}
           <div>
-            <label className={lCls}>Phased Out</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Flags this variant as discontinued — still tracked in stock and reports."
+                note="Separate from deactivating a variant below — a phased-out variant can still be active.">
+                Phased Out
+              </Tooltip>
+            </label>
             {canEdit ? (
               <label
                 className="flex items-center gap-2 mt-1 cursor-pointer"
@@ -804,7 +829,13 @@ export default function Detail() {
           return (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div>
-                <label className={lCls}>Price</label>
+                <label className={lCls}>
+                  <Tooltip
+                    content="This variant's own selling price."
+                    note="If blank, POS uses the default variant's price instead — shown greyed out below when that's happening.">
+                    Price
+                  </Tooltip>
+                </label>
                 {inheriting ? (
                   <div>
                     <input className={`${iCls} opacity-50 cursor-default`}
@@ -830,7 +861,13 @@ export default function Detail() {
                 )}
               </div>
               <div>
-                <label className={lCls}>Promo Price</label>
+                <label className={lCls}>
+                  <Tooltip
+                    content="Temporary markdown price."
+                    note="Takes precedence over Price for what's actually charged when set — inherits from the default variant only if that variant has a promo price too.">
+                    Promo Price
+                  </Tooltip>
+                </label>
                 {inheritingPromo ? (
                   <div>
                     <input className={`${iCls} opacity-50 cursor-default`}
@@ -861,7 +898,13 @@ export default function Detail() {
 
         {/* Attributes */}
         <div className="mt-3">
-          <label className={lCls}>Attributes (key → value)</label>
+          <label className={lCls}>
+            <Tooltip
+              content="Custom key-value data for this variant, e.g. size or color."
+              note="Keys are read-only once created — delete and re-add a row to rename one.">
+              Attributes (key → value)
+            </Tooltip>
+          </label>
           <div className="space-y-1.5">
             {Object.entries(variant.attributes ?? {}).map(([k, v]) => (
               <div key={k} className="flex gap-2 items-center">
@@ -902,8 +945,17 @@ export default function Detail() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-gray-800">
-              {['Barcode','UOM','Primary',''].map(h =>
-                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{h}</th>)}
+              {['Barcode','UOM','Primary',''].map(h => (
+                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">
+                  {h === 'Primary' ? (
+                    <Tooltip
+                      content="Marks the scannable code for this variant."
+                      note="Setting a new primary automatically demotes all others for this variant.">
+                      {h}
+                    </Tooltip>
+                  ) : h}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -962,8 +1014,28 @@ export default function Detail() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-gray-800">
-              {['From','To','Factor','Warehouse Bundle','Price','Promo Price',''].map(h =>
-                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{h}</th>)}
+              {['From','To','Factor','Warehouse Bundle','Price','Promo Price',''].map(h => (
+                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">
+                  {h === 'Warehouse Bundle' && (
+                    <Tooltip
+                      content="The physical counting unit for warehouse staff, e.g. 1 case = 24 pcs."
+                      note="Toggling this on a new row doesn't automatically untoggle others — only one should be set per variant.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Price' && (
+                    <Tooltip content="Per-UOM override price." note="Blank inherits from the variant's base price × this conversion's factor.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Promo Price' && (
+                    <Tooltip content="Per-UOM promo override price." note="Blank means no promo for this UOM — it does not inherit from the base variant's promo price.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Warehouse Bundle' && h !== 'Price' && h !== 'Promo Price' && h}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -1102,8 +1174,13 @@ export default function Detail() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-800">
-                  {['Component','Qty',''].map(h =>
-                    <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{h}</th>)}
+                  {['Component','Qty',''].map(h => (
+                    <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">
+                      {h === 'Qty' ? (
+                        <Tooltip content="How many of this component are needed per unit of this bundle sold.">{h}</Tooltip>
+                      ) : h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -1197,8 +1274,25 @@ export default function Detail() {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-gray-800">
-              {['Supplier','SKU','Gross Cost','Discount %','Primary',''].map(h =>
-                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">{h}</th>)}
+              {['Supplier','SKU','Gross Cost','Discount %','Primary',''].map(h => (
+                <th key={h} className="text-left px-2 py-1.5 text-[10px] uppercase tracking-widest text-gray-600">
+                  {h === 'Gross Cost' && (
+                    <Tooltip
+                      content="The supplier's catalog price."
+                      note="Net cost after discount isn't shown here — see Cost History for the locked historical costs actually used in sales.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Primary' && (
+                    <Tooltip
+                      content="The preferred supplier — its cost feeds sales when no FIFO layer is available."
+                      note="Setting a new primary automatically demotes all others for this variant.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Gross Cost' && h !== 'Primary' && h}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -1310,7 +1404,18 @@ export default function Detail() {
         <SectionHead title="Stock" />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-3">
           <div className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2">
-            <p className="text-[10px] uppercase tracking-widest text-gray-600 mb-1">Total Physical</p>
+            <p className="text-[10px] uppercase tracking-widest text-gray-600 mb-1">
+              {/* TOOLTIP-TODO(bug): bundle_available_stock is fetched by the API but never
+                  rendered anywhere on this page. For a bundle-type variant, "Total Physical"
+                  is always 0 (bundles hold no stock of their own, per requirements §6.5) with
+                  no substitute figure shown. Copy below describes the intended/documented
+                  behavior as if a buildable-quantity figure were shown here. */}
+              <Tooltip
+                content="Physical stock held directly under this variant, summed across non-virtual locations."
+                note="For bundle variants, availability is instead computed from component stock — shown here as a derived buildable quantity, not physical inventory of this variant.">
+                Total Physical
+              </Tooltip>
+            </p>
             <p className="text-lg font-bold text-gray-200 tabular-nums">
               {variant.current_stock.filter(s => s.location.location_type !== 'Virtual').reduce((sum, s) => sum + Number(s.quantity), 0).toFixed(2)}
             </p>
@@ -1348,7 +1453,8 @@ export default function Detail() {
         {/* ── SALES HISTORY ── */}
         <SectionHead title="Sales History" />
         <HistoryTable
-          cols={['Sale PID','Date','Cashier','Qty Sold','Unit Price','Line Total','Status']}
+          cols={['Sale PID','Date','Cashier','Qty Sold','Unit Price','Line Total',
+            <Tooltip key="status" content="Voided sales are included here." note="Check this column before totaling quantities or amounts by hand — a voided sale's units were returned to stock.">Status</Tooltip>]}
           rows={salesHist.map(h => [h.sale_pid, fmtDateOnly(h.transaction_date), h.cashier, h.quantity, fmt(h.unit_price), fmt(h.line_total), h.sale_status])}
           hasMore={salesHasMore}
           onLoadMore={() => loadMore('sales', salesHist.length)}
@@ -1358,7 +1464,9 @@ export default function Detail() {
         {/* ── PURCHASE HISTORY ── */}
         <SectionHead title="Purchase History" />
         <HistoryTable
-          cols={['Document ID','Date','Supplier','Qty Received','Net Unit Cost','QC Status']}
+          cols={['Document ID','Date','Supplier','Qty Received',
+            <Tooltip key="cost" content="Locked in at cost confirmation (Stage 2 of receiving)." note="Blank means costs haven't been confirmed yet for this shipment; 0.00 means a confirmed cost of exactly zero, e.g. a free replacement.">Net Unit Cost</Tooltip>,
+            <Tooltip key="qc" content="Quality-control outcome recorded at the time of receiving.">QC Status</Tooltip>]}
           rows={purchaseHist.map(h => [h.document_id, fmtDate(h.received_at), h.supplier_name, h.quantity_received, fmt(h.net_unit_cost), h.qc_status])}
           hasMore={purchHasMore}
           onLoadMore={() => loadMore('purchase', purchaseHist.length)}
@@ -1418,7 +1526,11 @@ export default function Detail() {
                 <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-400">
                   <input type="checkbox" className="accent-blue-500" checked={addVDraft.is_default}
                     onChange={e => setAddVDraft(p => ({ ...p, is_default: e.target.checked }))} />
-                  Set as default variant
+                  <Tooltip
+                    content="Makes this the hero variant other variants without their own price fall back to."
+                    note="No confirmation — this demotes whichever variant is currently default.">
+                    Set as default variant
+                  </Tooltip>
                 </label>
               </div>
             </div>
@@ -1456,8 +1568,17 @@ export default function Detail() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-gray-800">
-                      {['Barcode','UOM','Primary',''].map(h =>
-                        <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">{h}</th>)}
+                      {['Barcode','UOM','Primary',''].map(h => (
+                        <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">
+                          {h === 'Primary' ? (
+                            <Tooltip
+                              content="Marks the scannable code for this variant."
+                              note="Only one barcode can be primary — checking it on more than one row here isn't reconciled until save.">
+                              {h}
+                            </Tooltip>
+                          ) : h}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -1506,8 +1627,17 @@ export default function Detail() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-gray-800">
-                      {['From','To','Factor','Wh. Bundle',''].map(h =>
-                        <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">{h}</th>)}
+                      {['From','To','Factor','Wh. Bundle',''].map(h => (
+                        <th key={h} className="text-left px-1 py-1 text-[10px] uppercase tracking-widest text-gray-700">
+                          {h === 'Wh. Bundle' ? (
+                            <Tooltip
+                              content="Marks this as the physical counting unit for warehouse staff (e.g. 1 case = 24 pcs)."
+                              note="Should be set on only one conversion per variant — checking it on more than one row here isn't prevented.">
+                              {h}
+                            </Tooltip>
+                          ) : h}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -1554,11 +1684,21 @@ export default function Detail() {
               <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-400 mb-3">
                 <input type="checkbox" className="accent-blue-500" checked={addVDraft.is_bundle}
                   onChange={e => setAddVDraft(p => ({ ...p, is_bundle: e.target.checked }))} />
-                This variant is a bundle
+                <Tooltip
+                  content="Reveals the Bundle Components section below."
+                  note="This checkbox itself isn't saved — the variant is only treated as a bundle if it ends up with at least one component after creation.">
+                  This variant is a bundle
+                </Tooltip>
               </label>
               {addVDraft.is_bundle && (
                 <div className="space-y-1.5">
-                  <label className={lCls}>Bundle Components</label>
+                  <label className={lCls}>
+                    <Tooltip
+                      content="Searches your existing saved catalogue."
+                      note="You can't add another new variant from this same form as a component — create it first, then link it from the component's own product page.">
+                      Bundle Components
+                    </Tooltip>
+                  </label>
                   {addVDraft.bundle_comps.map(bc => (
                     <div key={bc.component_variant_id} className="flex items-center gap-2 text-xs">
                       <span className="flex-1 text-gray-300">{bc.label}</span>
@@ -1597,7 +1737,13 @@ export default function Detail() {
 
             {/* supplier link */}
             <div className="border-t border-gray-800 pt-3">
-              <label className={lCls}>Supplier Link (optional)</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Optional starting cost source for this variant."
+                  note="Automatically saved as the primary supplier — there's no option to add it as secondary here.">
+                  Supplier Link (optional)
+                </Tooltip>
+              </label>
               <div className="flex gap-2 flex-wrap">
                 <select className={`${iCls} flex-1 min-w-[120px]`} value={addVDraft.supplier_id}
                   onChange={e => setAddVDraft(p => ({ ...p, supplier_id: e.target.value }))}>
@@ -1614,7 +1760,7 @@ export default function Detail() {
             </div>
 
             {/* actions */}
-            <div className="flex gap-3 pt-3 border-t border-gray-800">
+            <div className="flex gap-3 pt-3 border-t border-gray-800 items-center">
               <button onClick={handleAddVariantSubmit} disabled={addVSaving}
                 className="px-5 py-2 text-sm rounded text-white font-medium disabled:opacity-40 transition-colors"
                 style={{ backgroundColor: 'var(--accent)' }}>
@@ -1624,6 +1770,16 @@ export default function Detail() {
                 className="px-4 py-2 text-sm border border-gray-700 rounded text-gray-500 hover:border-gray-600">
                 Cancel
               </button>
+              {/* TOOLTIP-TODO(bug): handleAddVariantSubmit's per-sub-entity POSTs (supplier
+                  link, barcodes, UOM conversions, bundle components) are each wrapped in
+                  .catch(() => {}) — a failure on any of them is silently swallowed and you're
+                  still navigated to the new variant's page with no indication anything didn't
+                  save. Copy below describes the intended/documented behavior (a single atomic
+                  creation). */}
+              <Tooltip
+                label="About Create Variant"
+                content="Creates the variant and any barcodes, UOM conversions, bundle components, and a supplier link you've added, then opens the new variant's page."
+              />
             </div>
           </div>
         </div>

@@ -4,6 +4,7 @@ import { useQueries } from '@tanstack/react-query'
 import { useAuth } from '../../context/AuthContext'
 import KeywordSearch from '../../components/KeywordSearch'
 import { SkeletonTable, FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -62,31 +63,25 @@ function UomStockCell({
   }
 
   return (
-    <span className={`relative group/stock inline-block ${className}`}>
-      {/* Primary value — dotted underline signals expandable info */}
-      <span className="cursor-help underline decoration-dotted decoration-gray-600 underline-offset-2">
-        {baseStock.toFixed(0)}
-      </span>
-
-      {/* Tooltip — shows on hover, positioned above the cell */}
-      <span className={[
-        'pointer-events-none invisible group-hover/stock:visible',
-        'absolute right-0 bottom-full mb-1.5 z-30',
-        'bg-gray-900 border border-gray-700 rounded-md shadow-xl',
-        'px-2.5 py-2 min-w-[120px]',
-        'text-[10px] text-left whitespace-nowrap',
-      ].join(' ')}>
-        <p className="text-[9px] font-semibold uppercase tracking-widest text-gray-500 mb-1.5">
-          Sellable packs
-        </p>
-        {breakdown.map(b => (
-          <div key={b.code} className="flex items-center justify-between gap-4 mb-0.5">
-            <span className="text-gray-400">{b.code}</span>
-            <span className="tabular-nums font-semibold text-gray-200">{b.count}</span>
-          </div>
-        ))}
-      </span>
-    </span>
+    <Tooltip
+      className={className}
+      width={160}
+      content={
+        <>
+          <p className="text-[9px] font-semibold uppercase tracking-widest t-text-3 mb-1.5">
+            Sellable packs
+          </p>
+          {breakdown.map(b => (
+            <div key={b.code} className="flex items-center justify-between gap-4 mb-0.5">
+              <span className="t-text-3">{b.code}</span>
+              <span className="tabular-nums font-semibold t-text-1">{b.count}</span>
+            </div>
+          ))}
+        </>
+      }
+    >
+      {baseStock.toFixed(0)}
+    </Tooltip>
   )
 }
 
@@ -101,29 +96,29 @@ function bundleStockAtLoc(v: InvVariant, locId: number): number {
 
 function BundleStockCell({ available }: { available: number }) {
   return (
-    <span className="relative group/bstock inline-block">
+    <Tooltip
+      underline={false}
+      width={180}
+      content={
+        <>
+          <p className="text-[9px] font-semibold uppercase tracking-widest t-text-3 mb-1">
+            Computed stock
+          </p>
+          <p className="t-text-3 leading-relaxed">
+            Available bundles derived from component stock.<br />
+            Not physical inventory of this variant.
+          </p>
+        </>
+      }
+    >
       <span className={[
-        'cursor-help tabular-nums',
+        'tabular-nums',
         'underline decoration-dotted decoration-amber-600/60 underline-offset-2',
         available > 0 ? 'text-amber-400' : 't-text-4',
       ].join(' ')}>
         ~{available}
       </span>
-      <span className={[
-        'pointer-events-none invisible group-hover/bstock:visible',
-        'absolute right-0 bottom-full mb-1.5 z-30',
-        'bg-gray-900 border border-gray-700 rounded-md shadow-xl',
-        'px-2.5 py-2 min-w-[180px] text-[10px] text-left whitespace-normal',
-      ].join(' ')}>
-        <p className="text-[9px] font-semibold uppercase tracking-widest text-gray-500 mb-1">
-          Computed stock
-        </p>
-        <p className="text-gray-400 leading-relaxed">
-          Available bundles derived from component stock.<br />
-          Not physical inventory of this variant.
-        </p>
-      </span>
-    </span>
+    </Tooltip>
   )
 }
 
@@ -426,7 +421,13 @@ export default function Catalogue() {
             placeholder="Brand, name, PID, SKU, barcode…" />
         </div>
         <div>
-          <label className={labelCls}>Category</label>
+          <label className={labelCls}>
+            <Tooltip
+              content="Matches if the product belongs to this category in any capacity."
+              note="The table only shows a product's first/primary category — a row can pass this filter via a different category than the one displayed.">
+              Category
+            </Tooltip>
+          </label>
           <select className={inputCls} value={catFilter}
             onChange={e => setCatFilter(e.target.value ? parseInt(e.target.value) : '')}>
             <option value="">All categories</option>
@@ -457,7 +458,13 @@ export default function Catalogue() {
           </div>
         </div>
         <div>
-          <label className={labelCls}>Negative Stock</label>
+          <label className={labelCls}>
+            <Tooltip
+              content="Only shows variants with negative stock at some location."
+              note="Negative stock is only possible when Allow Negative Stock is enabled in Settings — otherwise this always shows no results.">
+              Negative Stock
+            </Tooltip>
+          </label>
           <label className="flex items-center gap-2 text-xs t-text-2 cursor-pointer mt-1">
             <input type="checkbox" className="accent-[var(--accent)]"
               checked={negativeStock}
@@ -466,7 +473,11 @@ export default function Catalogue() {
           </label>
         </div>
         <div>
-          <label className={labelCls}>Phased Out</label>
+          <label className={labelCls}>
+            <Tooltip content="Hides variants flagged as discontinued but still tracked in stock and reports.">
+              Phased Out
+            </Tooltip>
+          </label>
           <label className="flex items-center gap-2 text-xs t-text-2 cursor-pointer mt-1">
             <input type="checkbox" className="accent-[var(--accent)]"
               checked={hidePhasedOut}
@@ -568,7 +579,11 @@ export default function Catalogue() {
                   ))}
                   {virtLocs.length > 0 && (
                     <>
-                      <p className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mt-3 mb-2">Virtual Locations</p>
+                      <p className="text-[10px] font-semibold uppercase tracking-widest t-text-3 mt-3 mb-2">
+                        <Tooltip content="Quarantine and Adjustment — internal system locations, not physical stores.">
+                          Virtual Locations
+                        </Tooltip>
+                      </p>
                       {virtLocs.map(l => (
                         <label key={l.location_id} className="flex items-center gap-2 text-xs t-text-4 italic mb-1 cursor-pointer">
                           <input type="checkbox" className="accent-[var(--accent)]"
@@ -610,9 +625,34 @@ export default function Catalogue() {
                 {cols.sku        && <SortTh k="sku" label="SKU" />}
                 {cols.type       && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Type</th>}
                 {cols.category   && <SortTh k="category" label="Category" />}
-                {cols.price      && <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Price</th>}
-                {cols.promo      && <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Promo Price</th>}
-                {cols.totalStock && <SortTh k="totalStock" label="Total Stock" right />}
+                {cols.price      && (
+                  <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">
+                    <Tooltip
+                      content="The variant's own price."
+                      note="If blank, POS uses the default variant's price instead — this column doesn't show that inherited value.">
+                      Price
+                    </Tooltip>
+                  </th>
+                )}
+                {cols.promo      && (
+                  <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">
+                    <Tooltip
+                      content="Temporary markdown price."
+                      note="Takes precedence over Price for what's actually charged when set.">
+                      Promo Price
+                    </Tooltip>
+                  </th>
+                )}
+                {cols.totalStock && (
+                  <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap cursor-pointer hover:t-text-1 select-none" onClick={() => handleSort('totalStock')}>
+                    <Tooltip
+                      underline={false}
+                      content="Physical stock across selected locations."
+                      note="Excludes Quarantine and Adjustment — enable them under Columns to see their quantities separately.">
+                      <span>Total Stock{sortIcon('totalStock')}</span>
+                    </Tooltip>
+                  </th>
+                )}
                 {cols.status     && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Status</th>}
                 {cols.phasedOut  && <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest t-text-2 whitespace-nowrap">Phased Out</th>}
                 {selectedLocs.map(l => {
@@ -626,7 +666,9 @@ export default function Catalogue() {
                     </th>
                   )
                 })}
-                <th className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">Actions</th>
+                <th className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest t-text-2">
+                  <Tooltip content="View and Edit both open the same detail page.">Actions</Tooltip>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -737,7 +779,23 @@ export default function Catalogue() {
             ] as [string, boolean, (v: boolean) => void][]).map(([label, val, setter]) => (
               <label key={label} className="flex items-center gap-2 text-xs t-text-2 mb-2 cursor-pointer">
                 <input type="checkbox" className="accent-[var(--accent)]" checked={val} onChange={e => setter(e.target.checked)} />
-                {label}
+                {label.startsWith('Cost data') && (
+                  <Tooltip
+                    underline={false}
+                    content="Adds Net Unit Cost and a FIFO layer count."
+                    note="Uses the oldest cost layer available, trusting it's already correctly ordered.">
+                    {label}
+                  </Tooltip>
+                )}
+                {label.startsWith('Supplier data') && (
+                  <Tooltip
+                    underline={false}
+                    content="Adds the primary supplier's cost details."
+                    note="Falls back to the first linked supplier if none is marked primary — that cost may not be the one actually used.">
+                    {label}
+                  </Tooltip>
+                )}
+                {!label.startsWith('Cost data') && !label.startsWith('Supplier data') && label}
               </label>
             ))}
             <div className="mt-4 flex gap-2">

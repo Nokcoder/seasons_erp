@@ -1,5 +1,6 @@
 import { useState, useRef, useMemo } from 'react'
 import { useAuth } from '../../context/AuthContext'
+import Tooltip from '../../components/Tooltip'
 import {
   importApi,
   type ImportDiffRow, type ImportErrorRow, type ImportPreviewResponse,
@@ -152,7 +153,9 @@ function DiffModal({
               <tr>
                 <th className="px-3 py-2 w-8" />
                 <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3">Anchor</th>
-                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3 w-16">Mode</th>
+                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3 w-16">
+                  <Tooltip content="Create = new record; Update = an existing record matched by the anchor.">Mode</Tooltip>
+                </th>
                 <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3">Field</th>
                 <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3">Current</th>
                 <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest t-text-3">Incoming</th>
@@ -282,7 +285,14 @@ function ImportForm({ entity }: { entity: EntityConfig }) {
     <div className="p-6 max-w-3xl">
       <h2 className="text-sm font-semibold t-text-1 mb-1">{entity.label}</h2>
       <p className="text-xs t-text-3 mb-1">{entity.description}</p>
-      <p className="text-[10px] t-text-4 mb-5">Anchor: <span className="font-mono t-text-2">{entity.anchor}</span></p>
+      <p className="text-[10px] t-text-4 mb-5">
+        <Tooltip
+          underline={false}
+          content="The column(s) used to match this row against an existing record."
+          note="A match updates the existing record; no match creates a new one.">
+          Anchor
+        </Tooltip>: <span className="font-mono t-text-2">{entity.anchor}</span>
+      </p>
 
       {/* actions */}
       <div className="flex items-center gap-3 mb-6">
@@ -326,7 +336,12 @@ function ImportForm({ entity }: { entity: EntityConfig }) {
                 <span className="bg-yellow-950 text-yellow-500 px-1.5 py-0.5 rounded">{preview.summary.updates} update</span>
               )}
               {preview.summary.noops > 0 && (
-                <span className="t-bg-elevated t-text-3 px-1.5 py-0.5 rounded">{preview.summary.noops} no-op</span>
+                <Tooltip
+                  underline={false}
+                  content="These rows already match what's stored — nothing to change."
+                  note="Safe to re-run this preview as many times as you like; it never writes anything.">
+                  <span className="t-bg-elevated t-text-3 px-1.5 py-0.5 rounded">{preview.summary.noops} no-op</span>
+                </Tooltip>
               )}
               {preview.summary.errors > 0 && (
                 <span className="bg-red-950 text-red-400 px-1.5 py-0.5 rounded">{preview.summary.errors} error{preview.summary.errors !== 1 ? 's' : ''}</span>

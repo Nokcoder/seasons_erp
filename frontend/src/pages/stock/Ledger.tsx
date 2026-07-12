@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import KeywordSearch from '../../components/KeywordSearch'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
@@ -158,7 +159,11 @@ export default function Ledger() {
         <h1 className="text-sm font-semibold t-text-1">Inventory Ledger</h1>
         <div>
           <label className="block text-[10px] font-medium uppercase tracking-widest t-text-3 mb-1">
-            Keyword
+            <Tooltip
+              content="Filters the rows already loaded below."
+              note="Doesn't search the full ledger — click Load more first if you don't see a match.">
+              Keyword
+            </Tooltip>
           </label>
           <KeywordSearch
             tags={searchTags}
@@ -168,12 +173,21 @@ export default function Ledger() {
             className="w-56"
           />
         </div>
-        <select className={`${inputCls} w-36`} value={locFilter} onChange={e => setLocFilter(e.target.value)}>
-          <option value="">All locations</option>
-          {allLocs.map(l => (
-            <option key={l.location_id} value={l.location_id}>{l.location_name}</option>
-          ))}
-        </select>
+        <div>
+          <label className="block text-[10px] font-medium uppercase tracking-widest t-text-3 mb-1">
+            <Tooltip
+              content="Filters to movements at one location."
+              note="Includes the virtual Quarantine and Adjustment locations — the only way to see stock corrections and rejected-goods holding here.">
+              Location
+            </Tooltip>
+          </label>
+          <select className={`${inputCls} w-36`} value={locFilter} onChange={e => setLocFilter(e.target.value)}>
+            <option value="">All locations</option>
+            {allLocs.map(l => (
+              <option key={l.location_id} value={l.location_id}>{l.location_name}</option>
+            ))}
+          </select>
+        </div>
         <input type="date" className={`${inputCls} w-36`} value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
         <input type="date" className={`${inputCls} w-36`} value={dateTo}   onChange={e => setDateTo(e.target.value)} />
         {canExport && (
@@ -184,6 +198,13 @@ export default function Ledger() {
       </div>
 
       {/* reason pills */}
+      <label className="block text-[10px] font-medium uppercase tracking-widest t-text-3 mb-1">
+        <Tooltip
+          content="Filters which stock-movement types are shown."
+          note="SALE isn't listed — sales deductions appear only in the Sales Ledger, not here.">
+          Movement Type
+        </Tooltip>
+      </label>
       <div className="flex gap-1.5 mb-3 flex-wrap">
         {REASONS.map(r => (
           <button key={r} onClick={() => toggleReason(r)}
@@ -208,7 +229,19 @@ export default function Ledger() {
           <thead>
             <tr className="border-b t-border">
               {['Date','Brand','Variant Name','PID','SKU','Location','Reason','Qty Change','Document ID'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Qty Change' && (
+                    <Tooltip content="Positive means stock added; negative means stock removed.">{h}</Tooltip>
+                  )}
+                  {h === 'Document ID' && (
+                    <Tooltip
+                      content="Links to the source transfer or shipment when available."
+                      note="Return and Adjust entries show the reference but aren't clickable here — open them from Transfers or Receiving directly.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Qty Change' && h !== 'Document ID' && h}
+                </th>
               ))}
             </tr>
           </thead>

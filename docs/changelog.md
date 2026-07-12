@@ -1,5 +1,239 @@
 # Changelog
 
+## 2026-07-12 — Ops: rebuilt frontend — prior image predated the entire tooltip pass
+
+Investigated a report that no tooltips were visible after "a stack rebuild." Root cause: no
+rebuild had actually produced a new frontend image since **before** this work existed — the
+running `season_erp-frontend` image was built 2026-07-12 01:10, while `Tooltip.tsx` wasn't written
+until 11:51 and the Group 3/4 files not until 16:14 the same day (confirmed via `docker images`
+timestamps vs. file mtimes). Docker's build context for the frontend service is a local-disk
+`COPY . .` (`docker-compose.yml` → `frontend: build: ./frontend`), not git-based, so an actual
+rebuild would have picked up the uncommitted source regardless of commit state — one just hadn't
+run. Confirmed live pre-fix: the running site served the old pre-refactor `Tip` `<span>` markup
+with zero `[role="tooltip"]` elements anywhere.
+
+Ran `docker-compose up -d --build frontend`. Build output confirmed `Tooltip-CvEKy8PG.js` in the
+new bundle; new image created 16:29:38 (after all source edits). Re-verified live against the
+rebuilt stack: tooltip trigger `<button>` present in the DOM, hovering produces a real
+`[role="tooltip"]` element, zero console errors, zero failed network requests, on both Sales
+Ledger and Catalogue.
+
+**Still open:** none of this work (foundation `Tooltip.tsx` + all 4 tooltip-copy groups) is
+committed — `git log -1` is still `07b74cf`, predating all of it. It currently exists only as
+uncommitted changes in this one working directory. Per project convention, commits are handled
+manually by the user, not left to be done here — flagging so it isn't lost (e.g. to a future
+`git checkout`/clean, or if this container is ever rebuilt from a fresh clone rather than this
+same working directory).
+
+## 2026-07-12 — Docs: track the Catalogue `variant_id` export-label inaccuracy
+
+Added a new "Other Pre-Existing Inaccuracies Flagged (Not Tooltip-Copy Mismatches)" section to
+`docs/inventory-tooltip-audit.md`, in the same table format as the "Pending Bug-Dependent
+Tooltips" section, for the `Catalogue.tsx` Export Options "variant_id (for re-import anchoring)"
+checkbox judgment call from the tooltip-copy pass: the label's stated purpose doesn't match actual
+bulk-import behavior (anchors on PID, never `variant_id`), and no tooltip was added there since
+one would either repeat the false claim or directly contradict the label sitting next to it. Kept
+as a distinct tracked list from the bug-dependent one since this is a pre-existing label
+inaccuracy, not new tooltip copy describing intended-vs-actual behavior. No code changes.
+
+## 2026-07-12 — Feature: Inventory tooltip copy, Group 4 (Locations, UOMs, Categories, Import Hub) — pass complete
+
+Final implementation group of the Inventory tooltip-copy pass — the Settings tabs
+(`LocationsTab`/`UOMsTab`/`CategoriesTab` in `Settings.tsx`) and `ImportHub.tsx`'s inventory-relevant
+entities (Suppliers, Opening Stock Balances, Variant Prices, Variant Costs). ~12 tooltip instances.
+Highlights: Locations' "system" row label now explains Quarantine/Adjustment's purpose (previously
+two unexplained permanent fixtures in every install); Categories' "Parent Category" tooltip states
+plainly that the hierarchy is UI filtering only with zero effect on stock/costing/pricing (the
+audit's top finding for that tab), and its "Parent" column header warns that indirect cycles
+(picking a descendant as parent) aren't blocked, without asserting it's a "bug" — it's accurate,
+defensive copy about a real gap, not a behavior mismatch requiring `TOOLTIP-TODO(bug)` treatment;
+Import Hub's "Anchor" label finally defines the term that governs the entire create-vs-update
+mechanics of every import (previously used with no definition anywhere in the UI).
+
+Widened two shared local-header components' `cols` prop from `string[]` to `ReactNode[]`
+(`Settings.tsx`'s `TableHead`, following the same pattern already applied to `Detail.tsx`'s
+`HistoryTable` in Group 3) to carry `<Tooltip>`-wrapped column headers — switched their React
+`key` from the column label to array index accordingly, since a `<Tooltip>` element can't itself
+serve as a key. `TableHead` is shared by every Settings tab, not just the three touched here;
+confirmed via the eslint/tsc baseline diff that no other tab was affected.
+
+This closes out the 4-group Inventory tooltip-copy pass (Stock Transfers/Receiving → Ledger/POs/
+Inventory Policy → Catalogue/NewProduct/Detail/Suppliers → this group), covering all 15 screens
+cataloged in `docs/inventory-tooltip-audit.md`. Six tooltip instances across four underlying bugs
+remain intentionally tied to *intended* rather than *actual* behavior, tracked in the audit doc's
+"Pending Bug-Dependent Tooltips" section pending separate bug fixes — none of those bugs were
+fixed in this pass, per scope.
+
+Verified: `tsc --noEmit` and `eslint` on both files diffed against baseline — zero new
+errors/warnings (fully identical output, not just line-shifted, since these two files' edits
+didn't touch anything before the first inserted line in a way that shifted other pre-existing
+findings). Live verification via headless Chromium: Locations' Status and system-row tooltips
+against real seeded data (confirmed Adjustment and Quarantine are indeed the two system locations
+per requirements §5.2), UOMs' Code header, Categories' Parent header, and Import Hub's Anchor
+tooltip all rendered with correct copy and positioning. Zero console errors.
+
+## 2026-07-12 — Feature: Inventory tooltip copy, Group 3 (Catalogue, New Product, Variant Detail, Suppliers)
+
+Third implementation group of the Inventory tooltip-copy pass — the largest so far (~45 tooltip
+instances across `Catalogue.tsx`, `NewProduct.tsx`, `Detail.tsx`, `Suppliers.tsx`), including the
+two remaining bugs from the original 3-bug list, both of which turned out to need multiple
+tracked tooltip instances:
+
+- **Silent sub-entity save failures in variant creation** — `NewProduct.tsx`'s `handleSubmit` and
+  `Detail.tsx`'s `handleAddVariantSubmit` (Add Variant modal) both wrap every per-sub-entity POST
+  (supplier link, bundle components, barcodes, UOM conversions) in `.catch(() => {})`. Added an
+  icon-only `<Tooltip>` (no visible label text to anchor to, so used the component's default
+  info-icon trigger for the first time) next to each screen's Create button, describing atomic
+  creation as the intended behavior. Tracked as bugs #4 and #5 in the audit doc.
+- **`Detail.tsx`'s missing bundle-availability render** — `bundle_available_stock` is fetched by
+  the API but never displayed; a bundle variant's "Total Physical" stat is always 0 with no
+  substitute figure. Added a tooltip to the "Total Physical" label describing a buildable-quantity
+  display as if it existed. Tracked as bug #6. Live-verified against a real bundle variant
+  (`MLD0027-6S`'s component, PID `MLD0027`) — confirmed "Total Physical: 0.00" with nothing else
+  shown, exactly the gap the audit and tooltip both describe.
+
+Two elements were deliberately left without tooltips rather than risk writing something false —
+logged as judgment calls, not implemented:
+- Catalogue's "variant_id (for re-import anchoring)" export checkbox — its own pre-existing label
+  already claims a re-import-anchoring purpose the bulk-import flow doesn't actually use (it
+  anchors on PID). Added no tooltip that would repeat or contradict that existing claim.
+- `Detail.tsx`'s supplier-link inheritance preview panel ("Inheriting from default variant...") —
+  the audit flagged this as *unverified* whether the backend's costing fallback actually honors
+  it. Skipped rather than assert confident-sounding behavior that might not be real.
+
+Also fixed a self-inflicted type constraint: `Detail.tsx`'s local `HistoryTable` component's
+`cols` prop was typed `string[]`; broadened to `ReactNode[]` (using array index instead of the
+column label as the React `key`) so three history-table columns (Sales History's Status,
+Purchase History's Net Unit Cost and QC Status) could carry a `<Tooltip>` instead of plain text.
+
+Verified: `tsc --noEmit` and `eslint` on all 4 files diffed against baseline — zero new errors.
+One incidental, benign lint change: refactoring Catalogue's Total Stock column header to inline
+JSX (to attach a Tooltip) stopped routing that one column through the `SortTh` helper, which
+removed one of three pre-existing `react-hooks/static-components` ("component created during
+render") warnings for that file (6 → 5) — a side-effect reduction of a pre-existing issue, not a
+regression. Live verification via headless Chromium across Catalogue, New Product, Suppliers, and
+a real Variant Detail page (the bundle variant found in Group 1's verification) — all sampled
+tooltips rendered with correct copy and positioning, zero console errors.
+
+## 2026-07-12 — Feature: Inventory tooltip copy, Group 2 (Ledger, Purchase Orders, Inventory Policy)
+
+Second implementation group of the Inventory tooltip-copy pass: `Ledger.tsx`, `PurchaseOrders.tsx`
+(both the list page and its Create PO modal), `PurchaseOrderDetail.tsx`, and the Inventory Policy
+tab in `Settings.tsx` — roughly 20 tooltip instances. Notable additions: the Ledger's reason-filter
+row and Location filter previously had no label at all (only the Keyword search did) — added
+"Movement Type" and "Location" labels so there was something to anchor the tooltip to, matching
+the Keyword label already on the same toolbar; the Movement Type tooltip calls out that `SALE`
+is deliberately absent from this screen's reason list (sales deductions only show in the Sales
+Ledger), the audit's top finding for this screen. The Inventory Policy toggle's tooltip adds the
+FIFO cost-layer caveat from requirements §9.9 that the existing static description didn't
+mention — enabling "Allow Negative Stock" skips the stock-quantity check but transfers still
+block on insufficient cost layers.
+
+Plus one bug-dependent tooltip requested separately: `TransferNew.tsx`'s Remarks field (from
+Group 1) is now tracked as bug #4 in the "Pending Bug-Dependent Tooltips" section — its value is
+captured in state but never included in the POST payload, so the field's tooltip describes the
+intended "saved with this transfer record" behavior with a `TOOLTIP-TODO(bug)` comment, matching
+the treatment already given to `ReceivingNew.tsx`'s Qty Rejected/QC Status tooltips. No new
+issues of this class surfaced during Group 2's own screens.
+
+Verified: `tsc --noEmit` and `eslint` on all 5 touched files (`Ledger.tsx`, `PurchaseOrders.tsx`,
+`PurchaseOrderDetail.tsx`, `Settings.tsx`, plus `TransferNew.tsx`'s Remarks addition) diffed
+against a pre-change baseline — zero new errors/warnings. Live verification via headless Chromium:
+Ledger's Movement Type/Location/Qty Change/Document ID tooltips against real ledger data, the
+Create PO modal's Destination Location/Add Line Item/Gross Cost/Net Cost tooltips (the PO list was
+empty in this environment — used the modal rather than writing a throwaway PO record into the
+shared dev DB to test the Detail page's identical tooltip pattern), and the Inventory Policy
+toggle's tooltip with the FIFO caveat visible in the note line. Zero browser console errors on any
+of the 5 screens sampled.
+
+## 2026-07-12 — Feature: Inventory tooltip copy, Group 1 (Stock Transfers + Receiving)
+
+First implementation group of the Inventory tooltip-copy pass (`docs/inventory-tooltip-audit.md`),
+using the shared `<Tooltip>` component. Covers all 7 Stock Transfers/Receiving screens:
+`Transfers.tsx`, `TransferNew.tsx`, `TransferDetail.tsx`, `Receiving.tsx`, `ReceivingNew.tsx`,
+`ReceivingDetail.tsx`, `ReceivingConfirm.tsx` — roughly 28 tooltip instances on the High/Medium-risk
+elements the audit flagged (column headers, location pickers, status badges), prioritizing the
+"single most consequential silent behavior" items (e.g. picking the virtual Adjustment location on
+a transfer silently reclassifies it as a stock correction — `TransferNew.tsx`'s From/To Location
+labels now say so).
+
+Two tooltips (`ReceivingNew.tsx`'s Qty Rejected and QC Status column headers) describe the
+*intended* behavior per requirements §9.1 rather than the screen's actual current behavior —
+`handlePost` hardcodes `quantity_rejected: '0'` and `qc_status: 'Passed'` on submit regardless of
+what's entered, a pre-existing bug (not fixed here, out of scope for this pass). Both are marked
+with a `TOOLTIP-TODO(bug)` comment in code and tracked in the new "Pending Bug-Dependent Tooltips"
+section at the top of `docs/inventory-tooltip-audit.md`, to be revisited once that bug is fixed.
+
+Deliberately skipped: `TransferNew.tsx`'s Remarks field — its value is silently discarded on
+submit (never included in the POST payload, a separate pre-existing bug not on the 3-bug list this
+pass was scoped to) — adding tooltip copy describing it as a saved note would be actively
+misleading, so it was left without one rather than expanding scope unilaterally.
+
+Verified: `tsc --noEmit` and `eslint` on all 7 files diffed against a pre-change baseline — zero
+new errors/warnings (only line-number shifts in pre-existing findings from the added import).
+Live verification via headless Chromium against the running stack: all 4 sampled tooltips
+(Transfers' Bundle Count, TransferNew's From Location, Receiving's Status, ReceivingNew's Qty
+Rejected) rendered with correct copy and positioning, including a visible edge-avoidance flip on
+Receiving's Status tooltip (trigger sits near the table's right edge). Zero browser console errors.
+
+## 2026-07-12 — Feature: shared `<Tooltip>` component, foundation for the Inventory tooltip pass
+
+Added `frontend/src/components/Tooltip.tsx` to replace the two ad-hoc hover-tooltip
+implementations flagged in the Inventory tooltip audit (`SalesLedger.tsx`'s local `Tip`,
+`Catalogue.tsx`'s inline `group/stock`/`group/bstock` CSS hover panels). Hover- and
+`group-hover`-only, both originals were keyboard- and touch-inaccessible, and
+`Catalogue.tsx`'s used hardcoded `gray-*` colors instead of the app's `t-*` theme
+variables (silently broken in the light/carbon themes).
+
+The new component: triggers on hover, focus, and tap/click (a single `<button>` element
+covers all three natively); renders the panel into a `document.body` portal positioned
+with `position: fixed` from a measured trigger rect, so it can't be clipped by a
+scrollable/overflow-hidden ancestor the way an absolutely-positioned in-flow panel can;
+flips top↔bottom and clamps left/right against the viewport edge (measure-then-place via
+`useLayoutEffect`, closes on Escape/outside-click/scroll-reposition); accepts a `content`
+node plus an optional dimmer `note` line for the richer two-part copy some audit entries
+need; renders a default info-circle icon trigger when no `children` are given (no icon
+library in this codebase, so it's an inline SVG). Fully theme-aware via `t-*` classes in
+all three themes.
+
+Migrated `SalesLedger.tsx` (7 call sites) and `Catalogue.tsx`'s `UomStockCell`/
+`BundleStockCell` to it verbatim — same trigger text, same tooltip copy, same visual
+language (dark card, dotted-underline trigger). Verified live against the running stack
+(Playwright, headless Chromium): hover/focus/Escape/mouse-away/tap-only-without-hover all
+open and close correctly; an edge-clipping stress test hovering all 7 Sales Ledger KPI
+tooltips at a 480px viewport confirmed no panel ever renders with negative `left` or an
+off-screen right edge; `BundleStockCell`'s tooltip (the one live-exercisable case in the
+current seed data — no variant currently has a priced UOM conversion, so
+`UomStockCell`'s breakdown path couldn't be exercised against real data this session,
+though it shares the identical Tooltip integration) rendered with identical copy and
+positioning to the pre-migration version. Zero new TypeScript or ESLint errors introduced
+(diffed against a pre-change baseline); zero browser console errors during the live
+verification pass.
+
+Inventory screens themselves (Detail.tsx, NewProduct.tsx, Ledger.tsx, etc.) were
+deliberately left untouched — this was foundation work only, per instruction. Tooltip
+copy for those screens is the next step, using `docs/inventory-tooltip-audit.md` as the
+source material.
+
+## 2026-07-12 — Docs: Inventory tooltip audit (discovery pass, no code changes)
+
+Produced `docs/inventory-tooltip-audit.md` ahead of a future tooltip-copy pass: every interactive
+element across the Catalogue, Stock (Ledger/Transfers/Receiving), Procurement (Suppliers/POs),
+and inventory-relevant Settings tabs (Locations/UOMs/Categories/Inventory Policy/Import Hub)
+screens, cataloged against `docs/requirements.md`/`docs/schema.dbml` with business logic,
+non-obvious behavior, domain terminology, and a confusion-risk rating. Confirmed no shared
+`<Tooltip>` component exists — both current implementations (`SalesLedger.tsx`'s local `Tip`,
+`Catalogue.tsx`'s inline `group/stock` hover pattern) are copy-pasted per-file.
+
+Several real bugs and gaps were found incidentally while reading the code and are called out in
+the doc's "Findings Beyond Tooltip Scope" section rather than fixed here (discovery-only pass, per
+instruction) — most notably: `ReceivingNew.tsx` hardcodes `quantity_rejected: '0'` and
+`qc_status: 'Passed'` on submit regardless of user input, so the documented Quarantine-routing
+rule (requirements §9.1) never fires from that screen; `NewProduct.tsx` and `Detail.tsx`'s Add
+Variant modal wrap every sub-entity POST (barcodes, UOM conversions, bundle components, supplier
+links) in `.catch(() => {})`, silently swallowing failures; and `Detail.tsx` fetches
+`bundle_available_stock` from the API but never renders it anywhere on the page.
+
 ## 2026-07-12 — Feature: PDC deposit as the collection event
 
 Implements `docs/pdc_deposit_collection_proposal.md` (§2–§5, decisions finalized in §6) in full,

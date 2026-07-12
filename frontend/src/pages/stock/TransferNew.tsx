@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import {
@@ -211,7 +212,13 @@ export default function TransferNew() {
       {/* ── item search panel ── */}
       <aside className="w-72 shrink-0 border-r t-border t-bg-surface flex flex-col overflow-hidden">
         <div className="p-3 border-b t-border">
-          <label className={lCls}>Search Items</label>
+          <label className={lCls}>
+            <Tooltip
+              content="Finds sellable and component variants by brand, name, PID, SKU, or barcode."
+              note="Bundle variants won't appear here — transfer their individual components instead; bundles are assembled automatically at the point of sale.">
+              Search Items
+            </Tooltip>
+          </label>
           <KeywordSearch
             tags={searchTags}
             onTagsChange={handleTagsChange}
@@ -254,7 +261,13 @@ export default function TransferNew() {
                 value={transferPid} onChange={e => setTransferPid(e.target.value)} />
             </div>
             <div>
-              <label className={lCls}>From Location *</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Where stock is coming from."
+                  note="Selecting Adjustment turns this into a stock correction — it's logged as ADJUST instead of a normal transfer.">
+                  From Location *
+                </Tooltip>
+              </label>
               <select className={iCls} value={fromLocId} onChange={e => setFromLocId(e.target.value)}>
                 <option value="">— select —</option>
                 {physicalLocs.map(l => <option key={l.location_id} value={l.location_id}>{l.location_name}</option>)}
@@ -266,7 +279,13 @@ export default function TransferNew() {
               </select>
             </div>
             <div>
-              <label className={lCls}>To Location *</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Where stock is going to."
+                  note="Selecting Adjustment turns this into a stock correction — it's logged as ADJUST instead of a normal transfer.">
+                  To Location *
+                </Tooltip>
+              </label>
               <select className={iCls} value={toLocId} onChange={e => setToLocId(e.target.value)}>
                 <option value="">— select —</option>
                 {physicalLocs.map(l => <option key={l.location_id} value={l.location_id}>{l.location_name}</option>)}
@@ -296,7 +315,14 @@ export default function TransferNew() {
               </select>
             </div>
             <div className="sm:col-span-3">
-              <label className={lCls}>Remarks</label>
+              {/* TOOLTIP-TODO(bug): remarks is captured in component state but handlePost never
+                  includes it in the POST payload — whatever is typed here is silently discarded
+                  on submit. Copy below describes the intended/documented behavior. */}
+              <label className={lCls}>
+                <Tooltip content="Optional internal note saved with this transfer record.">
+                  Remarks
+                </Tooltip>
+              </label>
               <input className={iCls} value={remarks} onChange={e => setRemarks(e.target.value)} />
             </div>
           </div>
@@ -310,7 +336,23 @@ export default function TransferNew() {
             <thead>
               <tr className="border-b t-border">
                 {['Brand','Variant','PID','SKU','Stock at Source','Bundle Count','Qty',''].map(h => (
-                  <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                  <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                    {h === 'Stock at Source' && (
+                      <Tooltip
+                        content="Current stock at the selected source location, for reference."
+                        note="Not enforced here — the system checks availability when you post the transfer and blocks it if stock is insufficient (unless negative stock is allowed).">
+                        {h}
+                      </Tooltip>
+                    )}
+                    {h === 'Bundle Count' && (
+                      <Tooltip
+                        content="Enter physical boxes or cases instead of individual units — the quantity converts automatically."
+                        note="Only available for variants with a warehouse-bundle conversion set up; others use the Qty field directly.">
+                        {h}
+                      </Tooltip>
+                    )}
+                    {h !== 'Stock at Source' && h !== 'Bundle Count' && h}
+                  </th>
                 ))}
               </tr>
             </thead>

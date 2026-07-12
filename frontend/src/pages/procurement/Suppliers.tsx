@@ -4,6 +4,7 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { catalogueApi, type InvSupplier, type SupplierCreate, type SupplierUpdate } from '../../services/api'
+import Tooltip from '../../components/Tooltip'
 import { normalize } from '../../lib/normalize'
 import { useAuth } from '../../context/AuthContext'
 
@@ -49,7 +50,13 @@ function SupplierModal({ mode, initial, onClose, onSave, saving, error }: ModalP
 
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>
-            <label className={lCls}>Supplier Code *</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Permanent identifier you assign to this supplier."
+                note="Unlike PIDs elsewhere in the app, this is never auto-generated and can't be changed after creation.">
+                Supplier Code *
+              </Tooltip>
+            </label>
             {mode === 'create' ? (
               <input className={iCls} value={code} onChange={e => setCode(e.target.value.toUpperCase())}
                 placeholder="e.g. SUP-001" required />
@@ -66,7 +73,13 @@ function SupplierModal({ mode, initial, onClose, onSave, saving, error }: ModalP
             <input className={iCls} value={bank} onChange={e => setBank(e.target.value)} />
           </div>
           <div>
-            <label className={lCls}>Payment Terms (days)</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Days until payment is due, e.g. 30 = Net 30."
+                note="Feeds the due-date calculation on supplier invoices when confirming a shipment's costs — 0 means Cash on Delivery.">
+                Payment Terms (days)
+              </Tooltip>
+            </label>
             <input type="number" min="0" step="1" className={iCls} value={terms} onChange={e => setTerms(e.target.value)} />
           </div>
 
@@ -215,7 +228,15 @@ export default function Suppliers() {
           <thead>
             <tr className="border-b t-border">
               {['Supplier Code', 'Supplier Name', 'Bank Account Name', 'Payment Terms', 'Status', 'Actions'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Payment Terms' && <Tooltip content="Shown as COD when terms is 0, otherwise Net {n} days.">{h}</Tooltip>}
+                  {h === 'Status' && (
+                    <Tooltip content="Inactive is a soft-delete — historical POs and shipments referencing this supplier are unaffected.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Payment Terms' && h !== 'Status' && h}
+                </th>
               ))}
             </tr>
           </thead>

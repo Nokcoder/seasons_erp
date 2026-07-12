@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
+import Tooltip from '../../components/Tooltip'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { normalize } from '../../lib/normalize'
@@ -183,7 +184,13 @@ function CreatePOModal({ onClose }: CreateModalProps) {
               </select>
             </div>
             <div>
-              <label className={lCls}>Destination Location</label>
+              <label className={lCls}>
+                <Tooltip
+                  content="Where this PO's goods will be received."
+                  note="Only active, physical locations are listed — virtual locations like Quarantine or Adjustment can't be a PO destination.">
+                  Destination Location
+                </Tooltip>
+              </label>
               <select className={iCls} value={locationId} onChange={e => setLocationId(e.target.value)}>
                 <option value="">— none —</option>
                 {locations.map(l => <option key={l.location_id} value={l.location_id}>{l.location_name}</option>)}
@@ -196,7 +203,13 @@ function CreatePOModal({ onClose }: CreateModalProps) {
           </div>
 
           <div>
-            <label className={lCls}>Add Line Item</label>
+            <label className={lCls}>
+              <Tooltip
+                content="Searches active, non-bundle variants by brand, name, PID, or SKU."
+                note="Bundle variants can't be purchased directly — order their individual components instead.">
+                Add Line Item
+              </Tooltip>
+            </label>
             <input className={iCls} placeholder="Search brand, name, PID, SKU…"
               value={search} onChange={e => setSearch(e.target.value)} />
             {search.trim() && (
@@ -219,7 +232,19 @@ function CreatePOModal({ onClose }: CreateModalProps) {
               <thead>
                 <tr className="border-b t-border">
                   {['PID', 'Variant Name', 'Qty', 'Gross Cost', 'Discount %', 'Net Cost', 'Line Total', ''].map(h => (
-                    <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4 whitespace-nowrap">{h}</th>
+                    <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest t-text-4 whitespace-nowrap">
+                      {h === 'Gross Cost' && (
+                        <Tooltip
+                          content="The supplier's catalog price for this line."
+                          note="Auto-filled only when this supplier is the variant's primary source — otherwise enter it manually.">
+                          {h}
+                        </Tooltip>
+                      )}
+                      {h === 'Net Cost' && (
+                        <Tooltip content="Gross Cost after the discount — Net Cost × Qty = Line Total.">{h}</Tooltip>
+                      )}
+                      {h !== 'Gross Cost' && h !== 'Net Cost' && h}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -340,7 +365,21 @@ export default function PurchaseOrders() {
           <thead>
             <tr className="border-b t-border">
               {['PO Number', 'Supplier', 'Destination Location', 'Order Date', 'Expected Arrival', 'Total Amount', 'Status'].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">{h}</th>
+                <th key={h} className="text-left px-3 py-2 text-[10px] uppercase tracking-widest t-text-4">
+                  {h === 'Total Amount' && (
+                    <Tooltip
+                      content="System-calculated: sum of quantity × net cost across all line items."
+                      note="Never entered directly — it updates automatically when line items are edited.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h === 'Status' && (
+                    <Tooltip content="Draft → Open → Partially Received → Closed, or Cancelled at any point before Closed.">
+                      {h}
+                    </Tooltip>
+                  )}
+                  {h !== 'Total Amount' && h !== 'Status' && h}
+                </th>
               ))}
             </tr>
           </thead>
