@@ -6,10 +6,11 @@ import { FetchingBar, SkeletonTable } from '../../components/Skeleton'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
-import { salesApi, type PaymentMode, type SalesReturnOut, type TransactionLedgerRowOut } from '../../services/api'
+import { salesApi, type PaymentMode, type SalesReturnOut, type TransactionLedgerRowOut, type CustomerARLedgerRowOut } from '../../services/api'
 import { stampNumberFormat, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
+function uid() { return Math.random().toString(36).slice(2, 10) }
 
 function fmt(n: number | null | undefined) {
   if (n == null) return '—'
@@ -37,6 +38,27 @@ function termsLabel(days: number) {
 // Page sizes for "Load More" pagination (ui_standards §5 — never unbounded)
 const TX_LEDGER_PAGE = 20
 const RETURNS_PAGE   = 10
+const PICKER_PAGE     = 200  // matches CustomerARLedger.tsx's own page size
+
+const PICKER_STATUS_BADGE: Record<string, string> = {
+  Open:    'bg-blue-950 text-blue-400',
+  Partial: 'bg-amber-950 text-amber-400',
+  Overdue: 'bg-red-950 text-red-400',
+}
+
+// Default allocation: oldest-first greedy fill (rows already sorted oldest→newest
+// by the backend). Only ever called to (re)compute the *default* — once the user
+// edits a row manually, callers stop invoking this (see `touched` state below).
+function greedyAllocate(rows: CustomerARLedgerRowOut[], amount: number): Record<number, string> {
+  let remaining = amount
+  const next: Record<number, string> = {}
+  for (const r of rows) {
+    if (remaining <= 0) break
+    const take = Math.min(Number(r.balance_due), remaining)
+    if (take > 0) { next[r.sale_id] = take.toFixed(2); remaining -= take }
+  }
+  return next
+}
 
 export default function CustomerDetail() {
   const { user } = useAuth()
@@ -207,18 +229,94 @@ export default function CustomerDetail() {
   const [payCheckNum,  setPayCheckNum]  = useState('')
   const [payCheckDate, setPayCheckDate] = useState('')
   const [payBank,      setPayBank]      = useState('')
+  const [payKey,       setPayKey]       = useState<string>(() => uid())
   const [paying,       setPaying]       = useState(false)
   const [payErr,       setPayErr]       = useState('')
+  const [paySummary,   setPaySummary]   = useState('')
   const [clearingBounce, setClearingBounce] = useState(false)
+
+  // ── receipt picker (pool + assign) ────────────────────────────────────────
+  const [pickerRows,    setPickerRows]    = useState<CustomerARLedgerRowOut[]>([])
+  const [pickerLoading, setPickerLoading] = useState(false)
+  const [pickerMore,    setPickerMore]    = useState(false)
+  const [allocations,   setAllocations]   = useState<Record<number, string>>({})
+  const [touched,       setTouched]       = useState(false)
 
   const selectedMode = paymentModes.find((m: PaymentMode) => m.payment_mode_id === parseInt(payMode))
   const showRef = selectedMode && selectedMode.is_physical === false && !selectedMode.is_pdc
+  const amountNum = parseFloat(payAmount) || 0
+  const appliedTotal = Object.values(allocations).reduce((s, v) => s + (parseFloat(v) || 0), 0)
+  const remainingToAllocate = Math.max(0, amountNum - appliedTotal)
 
   function openPaymentModal() {
     setPayDate(todayLocal()); setPayMode(''); setPayAmount(''); setPayRef(''); setPayReceiptNo(''); setPayNotes('')
     setPayCheckNum(''); setPayCheckDate(''); setPayBank('')
     setPayErr('')
+    setPickerRows([]); setPickerMore(false); setAllocations({}); setTouched(false)
+    setPaySummary('')
     setShowPayment(true)
+  }
+
+  // Fetch candidate receipts once the modal is open and an amount has been
+  // entered — a single fetch per modal session, not refetched on every
+  // keystroke (the customer's open-receipt list doesn't change while typing).
+  useEffect(() => {
+    if (!showPayment || !cid || amountNum <= 0) return
+    if (pickerRows.length > 0 || pickerLoading) return
+    setPickerLoading(true)
+    salesApi.customerArLedger.list({ customer_id: cid, status: ['Open', 'Partial', 'Overdue'], limit: PICKER_PAGE })
+      .then(rows => { setPickerRows(rows); setPickerMore(rows.length === PICKER_PAGE) })
+      .finally(() => setPickerLoading(false))
+  }, [showPayment, cid, amountNum, pickerRows.length, pickerLoading])
+
+  // Recompute the oldest-first default allocation whenever the amount or the
+  // loaded receipts change — but only until the user manually edits a row.
+  useEffect(() => {
+    if (touched) return
+    setAllocations(greedyAllocate(pickerRows, amountNum))
+  }, [pickerRows, amountNum, touched])
+
+  async function loadMorePickerRows() {
+    if (!cid) return
+    setPickerLoading(true)
+    try {
+      const next = await salesApi.customerArLedger.list({
+        customer_id: cid, status: ['Open', 'Partial', 'Overdue'], limit: PICKER_PAGE, cursor: pickerRows.length,
+      })
+      setPickerRows(p => [...p, ...next])
+      setPickerMore(next.length === PICKER_PAGE)
+    } finally { setPickerLoading(false) }
+  }
+
+  function setRowAllocation(saleId: number, value: string) {
+    setTouched(true)
+    setAllocations(prev => ({ ...prev, [saleId]: value }))
+  }
+
+  // "Select All / Apply to All Open Receipts" — fetches any remaining pages
+  // first so the shortcut covers the whole filtered list, not just what's
+  // currently loaded, then re-runs the same oldest-first greedy fill.
+  async function handleSelectAllOpen() {
+    let rows = pickerRows
+    if (pickerMore && cid) {
+      setPickerLoading(true)
+      try {
+        let cursor = rows.length
+        let more = true
+        while (more) {
+          const next = await salesApi.customerArLedger.list({
+            customer_id: cid, status: ['Open', 'Partial', 'Overdue'], limit: PICKER_PAGE, cursor,
+          })
+          rows = [...rows, ...next]
+          cursor += next.length
+          more = next.length === PICKER_PAGE
+        }
+        setPickerRows(rows)
+        setPickerMore(false)
+      } finally { setPickerLoading(false) }
+    }
+    setTouched(true)
+    setAllocations(greedyAllocate(rows, amountNum))
   }
 
   async function handleClearBouncedFlag() {
@@ -238,15 +336,25 @@ export default function CustomerDetail() {
         setPayErr('PDC payment requires check number, check date, and bank name.'); return
       }
     }
+    const applications = Object.entries(allocations)
+      .map(([saleId, v]) => ({ sale_id: Number(saleId), amount_applied: parseFloat(v) || 0 }))
+      .filter(a => a.amount_applied > 0)
+    const totalApplied = applications.reduce((s, a) => s + a.amount_applied, 0)
+    if (totalApplied > amountNum + 0.001) {
+      setPayErr('Total applied across receipts exceeds the payment amount.'); return
+    }
     setPaying(true); setPayErr('')
     try {
-      await salesApi.customers.recordPayment(cid, {
+      const result = await salesApi.payments.create({
+        customer_id:     cid,
         payment_mode_id: parseInt(payMode),
         amount:          parseFloat(payAmount),
         payment_date:    payDate ? `${payDate}T00:00:00` : undefined,
         reference_number: payRef || undefined,
         collection_receipt_no: payReceiptNo.trim() || undefined,
         notes:           payNotes.trim() || undefined,
+        idempotency_key: payKey,
+        applications,
         ...(selectedMode?.is_pdc ? {
           check_number: payCheckNum.trim() || undefined,
           check_date:   payCheckDate       || undefined,
@@ -256,7 +364,17 @@ export default function CustomerDetail() {
       await qc.invalidateQueries({ queryKey: qk.customer(cid) })
       await qc.invalidateQueries({ queryKey: qk.customerTransactionLedger(cid) })
       await qc.invalidateQueries({ queryKey: qk.customers() })
+      await qc.invalidateQueries({ queryKey: ['customers', 'ar-ledger-view'] })
+      const appliedCount = result.applications.length
+      const unapplied = Number(result.unapplied_amount)
+      setPaySummary(
+        appliedCount > 0
+          ? `₱${fmt(Number(result.amount))} received — ₱${fmt(Number(result.amount) - unapplied)} applied across ${appliedCount} receipt${appliedCount !== 1 ? 's' : ''}` +
+            (unapplied > 0 ? `, ₱${fmt(unapplied)} left unapplied.` : '.')
+          : `₱${fmt(Number(result.amount))} received — left unapplied.`
+      )
       setShowPayment(false); setPayMode(''); setPayAmount(''); setPayRef(''); setPayReceiptNo(''); setPayNotes('')
+      setPayKey(uid())
     } catch (e: unknown) {
       setPayErr(e instanceof Error ? e.message : 'Payment failed')
     } finally { setPaying(false) }
@@ -284,6 +402,13 @@ export default function CustomerDetail() {
         <span>/</span>
         <span className="t-text-2">{customer.customer_name}</span>
       </div>
+
+      {paySummary && (
+        <div className="mb-5 px-4 py-2.5 rounded-lg border border-emerald-900 bg-emerald-950/40 text-xs text-emerald-400 flex items-center justify-between">
+          <span>{paySummary}</span>
+          <button onClick={() => setPaySummary('')} className="text-emerald-500 hover:text-emerald-300 ml-3">✕</button>
+        </div>
+      )}
 
       {/* header */}
       <div className="t-bg-surface border t-border rounded-lg p-5 mb-6">
@@ -406,6 +531,7 @@ export default function CustomerDetail() {
                       row.status === 'Paid'           ? 'bg-emerald-950 text-emerald-500' :
                       row.status === 'Partially Paid' ? 'bg-yellow-950 text-yellow-500' :
                       row.status === 'Unpaid'         ? 'bg-red-950 text-red-500' :
+                      row.status === 'Return'         ? 'bg-purple-950 text-purple-400' :
                       't-bg-elevated t-text-3'
                     }`}>{row.status}</span>
                   </td>
@@ -467,7 +593,7 @@ export default function CustomerDetail() {
       {showPayment && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
           onClick={() => setShowPayment(false)}>
-          <div className="t-bg-surface border t-border-strong rounded-lg p-5 w-80 shadow-2xl"
+          <div className="t-bg-surface border t-border-strong rounded-lg p-5 w-[30rem] max-w-[92vw] max-h-[88vh] overflow-y-auto shadow-2xl"
             onClick={e => e.stopPropagation()}>
             <p className="text-sm font-semibold t-text-1 mb-1">Record Payment</p>
             <p className="text-xs t-text-3 mb-4">{customer.customer_name}</p>
@@ -529,6 +655,73 @@ export default function CustomerDetail() {
               <p className="text-[10px] t-text-4">
                 Current balance: <span className={customer.outstanding_balance > 0 ? 'text-yellow-400' : 't-text-3'}>₱{fmt(customer.outstanding_balance)}</span>
               </p>
+
+              {amountNum > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className={lCls}>Apply to Receipts (optional)</label>
+                    {pickerRows.length > 0 && (
+                      <button type="button" onClick={handleSelectAllOpen} disabled={pickerLoading}
+                        className="text-[10px] text-blue-400 hover:text-blue-300 font-medium disabled:opacity-40">
+                        Select All / Apply to All Open Receipts
+                      </button>
+                    )}
+                  </div>
+                  {pickerLoading && pickerRows.length === 0 && (
+                    <p className="text-[10px] t-text-4 italic">Loading open receipts…</p>
+                  )}
+                  {!pickerLoading && pickerRows.length === 0 && (
+                    <p className="text-[10px] t-text-4 italic">No open receipts for this customer — payment will be pooled unapplied.</p>
+                  )}
+                  {pickerRows.length > 0 && (
+                    <div className="border t-border rounded max-h-48 overflow-y-auto">
+                      <table className="w-full text-[10px]">
+                        <thead className="sticky top-0 t-bg-elevated">
+                          <tr>
+                            <th className="text-left px-2 py-1">Invoice</th>
+                            <th className="text-left px-2 py-1">Due</th>
+                            <th className="text-left px-2 py-1">Status</th>
+                            <th className="text-right px-2 py-1">Balance</th>
+                            <th className="text-right px-2 py-1">Apply</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pickerRows.map(r => (
+                            <tr key={r.sale_id} className="border-t t-border">
+                              <td className="px-2 py-1 font-mono t-text-1">{r.sale_pid}</td>
+                              <td className="px-2 py-1 t-text-3 whitespace-nowrap">{fmtDateOnly(r.due_date)}</td>
+                              <td className="px-2 py-1">
+                                <span className={`px-1 py-0.5 rounded text-[9px] font-medium uppercase ${PICKER_STATUS_BADGE[r.status] ?? 't-bg-elevated t-text-3'}`}>
+                                  {r.status}
+                                </span>
+                              </td>
+                              <td className="px-2 py-1 text-right tabular-nums t-text-2">₱{fmt(Number(r.balance_due))}</td>
+                              <td className="px-2 py-1 text-right">
+                                <input type="number" min="0" step="0.01" max={Number(r.balance_due)}
+                                  className="w-20 t-bg-input border t-border-strong rounded px-1 py-0.5 text-[10px] text-right focus:outline-none focus:ring-1 ring-[var(--accent)]"
+                                  value={allocations[r.sale_id] ?? ''}
+                                  onChange={e => setRowAllocation(r.sale_id, e.target.value)}
+                                  onFocus={onFocusSelect} placeholder="0.00" />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {pickerMore && (
+                    <button type="button" onClick={loadMorePickerRows} disabled={pickerLoading}
+                      className="mt-1 text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40">
+                      {pickerLoading ? 'Loading…' : 'Load more receipts'}
+                    </button>
+                  )}
+                  {pickerRows.length > 0 && (
+                    <p className="text-[10px] t-text-4 mt-1.5">
+                      Applied: ₱{fmt(appliedTotal)} · Remaining to allocate: ₱{fmt(remainingToAllocate)}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
             <div className="mt-4 flex gap-2">
               <button onClick={handleRecordPayment} disabled={paying}

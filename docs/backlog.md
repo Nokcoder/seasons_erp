@@ -298,10 +298,761 @@ See `/docs/changelog.md` for detail.
   a proper audit trail.
 - Verified live: fully-unapplied case (previously broken, now correct), fully-applied case
   (regression — unchanged), partial-application case (both ledger entries reversed, sale restored).
-- **Discovered, not fixed**: `apply_unapplied_payment` appears to double-count AR impact when
-  applying previously-unapplied credit to a sale (writes a second `ArLedger` entry / balance
-  reduction for money already accounted for at the payment's creation). Flagged for a follow-up
-  audit, not investigated further.
+- **Discovered here, fixed below**: `apply_unapplied_payment` was found to double-count AR impact
+  when applying previously-unapplied credit to a sale (wrote a second `ArLedger` entry / balance
+  reduction for money already accounted for at the payment's creation). See the follow-up entry
+  immediately below — fixed in the same commit but undocumented/unverified until 2026-07-09's
+  follow-up audit.
+
+---
+
+## apply_unapplied_payment double-counting — fixed (2026-07-09, follow-up audit)
+
+See `/docs/changelog.md` for full detail. Landed in the same commit as the two entries above
+(`5a32d05`) but wasn't called out in the commit message or verified live at the time.
+
+- [x] **Fix** — `apply_unapplied_payment` now derives how much of the amount being applied is
+  already reflected in the payment's `ArLedger` rows (origin-agnostic, same technique as
+  `reverse_customer_payment`/`bounce_pdc_check`) instead of unconditionally writing a new ledger
+  entry and reducing `outstanding_balance` every time. Only the genuinely-new portion moves the
+  ledger/balance; the `CustomerPaymentApplied` row and sale balance update always happen regardless.
+- Verified live: record_customer_payment-originated unapplied amount applied across two calls
+  (single creation-time ledger entry, no double-count on either apply); create_payment-originated
+  partial-application regression (creation counts only the applied portion, later apply of the
+  remainder still counts fresh); mixed partial case (already-applied + still-unapplied on the same
+  payment); reasoning-only check against real data (`payment_id=44`, not applied live). Test
+  payments cleaned up via the real reversal endpoint, not raw deletes — customer/sale balances
+  confirmed back to exact pre-test baselines.
+
+---
+
+## RBAC / Access Control — audit findings, not yet remediated (2026-07-09)
+
+Full investigation done via a live-code audit this session (grep/read across every backend
+router and every frontend page — not a design review, an inventory of what actually runs).
+**Nothing has been fixed.** This section exists so a future session doesn't have to re-run the
+whole investigation from scratch — see the full action-by-action table first.
+
+**Full reference**: a complete action inventory (program, backend gate file:line, frontend
+gate file:line, which of the 6 roles hold it, per-action notes) was produced as a Claude
+artifact this session: https://claude.ai/code/artifact/e33b961f-66f0-4365-a0a2-f539d7abbb94
+That artifact is the source of truth for exact file:line citations — this backlog entry is a
+summary/pointer, not a duplicate of it.
+
+*Correction (2026-07-09, filed alongside the severity triage below): the original pass through
+this audit stated "54 actions seeded" / "25/54 enforced" / "29 ungated" throughout this entry
+and the linked artifact. A recount directly against `backend/main.py`'s `ACTIONS` list found
+**57** entries, not 54 — an arithmetic error in the original roll-up, not a defect in the
+per-action analysis itself (the artifact's action-by-action table was independently re-verified
+against the corrected count and found complete/correct; only the summary totals were wrong).
+Corrected below: 57 seeded, 25 enforced, **32** ungated. The artifact has been updated to match.*
+
+- [ ] **Headline gap** — 57 actions are seeded in `auth.actions` (`backend/main.py`
+  `_seed_rbac()`), but only 25 have an actual backend check (`require_permission(...)` as a
+  FastAPI dependency, or an inline `has_action(...)` call — 23 + 2 respectively). The other 32
+  exist purely as grantable catalogue rows with zero backend enforcement anywhere. For any of
+  those 32, an authenticated user of *any* role can call the underlying endpoint directly
+  (e.g. via a raw request with their own valid token) regardless of whether their role holds
+  the action — the frontend may hide the button, but nothing backend-side stops the call.
+
+- [ ] **Two dead components likely explain part of the gap**:
+  - `frontend/src/components/Can.tsx` — a reusable role-gate component (`<Can roles={[...]}>`),
+    fully built and documented, but grepping the entire frontend shows it is never imported
+    anywhere outside its own docstring example. Zero call sites.
+  - `backend/auth/dependencies.py`'s `require_program()` — a program-level enforcement
+    dependency (parallel to `require_permission()`), defined but never attached to any route.
+    All program-level gating today happens frontend-only (nav hiding via `program_keys`); no
+    backend route rejects a request purely for lacking a program.
+
+- [ ] **Specific mismatch patterns found** (file:line evidence in the linked artifact §4):
+  - **STORE_MANAGER sees UI it can't actually use** — `Catalogue.tsx:19` and `Detail.tsx:19`
+    both define `CAN_EDIT = ['ADMIN','STORE_MANAGER','WAREHOUSE_MANAGER']`, a hardcoded
+    role-name array left over from before the action-key system existed. STORE_MANAGER is in
+    that array but does not hold `manage_products` (confirmed against `main.py`'s
+    `STORE_MANAGER` grant list). Concretely: `Catalogue.tsx:592-598`'s "+ New Product" button
+    and all of `Detail.tsx`'s product/variant field-edit surface are visible to STORE_MANAGER
+    and 403 on submit. `manage_products` is the first confirmed instance of this pattern, not
+    necessarily the only one — the artifact's §4b is the full writeup.
+  - **Backend looser than frontend implies, variant sub-entity CRUD** — `add_variant`,
+    `update_variant`, `delete_variant`, and every barcode/UOM-conversion/bundle-component/
+    variant-supplier-link CRUD endpoint under a variant (plus UOM CRUD, Category CRUD,
+    `update_location`) have no `require_permission` at all — only the router-level
+    `get_current_user` (any authenticated user). This is currently invisible in practice
+    because the roles that can reach these controls in the UI already hold broad permissions
+    elsewhere, but it's structurally a real gap, not a UI-only cosmetic issue — see artifact §4a.
+  - **Partial enforcement within one entity** — `manage_locations` gates `POST
+    /transfers/locations` (create) but not `PUT /transfers/locations/{id}` (update) —
+    `transfers_router.py:284`. Same permission concept, same Settings tab, asymmetric
+    enforcement.
+  - **Design doc overstates actual coverage** — `docs/rbac_programs_actions.md` states
+    *"Backend: require_permission() enforces action-level access on every write and sensitive
+    read endpoint."* Actual measured coverage this session: 25/57. The doc should either be
+    updated to reflect reality or treated purely as historical design intent, not current state.
+  - **`cashiering_mode` divergence** — the design doc specs `cashiering_mode` as an action_key
+    under the `sales_workstation` program. It was implemented instead as a role-level boolean
+    flag (`roles.is_cashiering_mode`, set via `PATCH /auth/roles/{id}/cashiering-mode`) and
+    never added to the actual `ACTIONS` seed in `main.py`. Not a bug, just a spec/implementation
+    divergence worth knowing about before trusting the design doc's action list at face value.
+
+- [x] **Triaged by severity** — done below, in "RBAC severity triage — result of the 'not yet
+  triaged' item above (2026-07-09)". Classification only, nothing remediated.
+
+---
+
+## create_payment split-commit — audit gap, not yet remediated (2026-07-09)
+
+Found while writing `docs/customers_sales_process_flows.md` §3.1/"Known gaps" (Payment
+lifecycle documentation pass). Not investigated further or fixed — flagging for a future
+session.
+
+- [x] **Resolved (2026-07-11)** — `create_payment` (`POST /sales/payments`,
+  `backend/sales/router.py:2671-2762`)
+  commits the payment row and its full financial effect (AR ledger entries via
+  `_apply_and_update`, `customer.outstanding_balance`) in one transaction
+  (`db.commit()` at `router.py:2756`), then calls `write_audit(...)` and commits a **second,
+  separate** transaction (`router.py:2758-2761`). Every other mutating endpoint in this file
+  folds its `write_audit()` call into the same single commit as the financial write — this is
+  the only one that splits it into two. A crash or error between the two commits leaves a real,
+  financially-effective payment (ledger already moved, `outstanding_balance` already reduced)
+  with **no corresponding audit_log row** — silently reproducing the exact class of gap the
+  2026-07-08 "Payment audit gap fix" (see `docs/changelog.md`) closed for
+  `record_customer_payment` and `post_draft`'s tender loop, just via a different mechanism
+  (split commit vs. a missing call entirely).
+- [x] **Fixed exactly as recommended** — reordered to match this file's established
+  convention: `write_audit(...)` now runs before the single `db.commit()`, the same way
+  `record_customer_payment` does it (`router.py:1016-1019`), rather than committing twice.
+  Landed as part of the "pool payment, then assign to transactions" feature
+  (`docs/payment_pooling_proposal.md` §5/B.3, see `docs/changelog.md` 2026-07-11), which was
+  already rewriting this endpoint's transaction tail for an unrelated accounting fix — folded
+  this fix in rather than leaving a known atomicity gap in the exact endpoint that work was
+  built around. Confirmed live: `auth.audit_log` shows the `INSERT` row for a new
+  `create_payment`-originated payment, and a forced mid-loop failure left zero trace (no payment
+  row despite the mid-transaction `db.flush()`, no ledger row) — full single-transaction
+  atomicity, not just the audit ordering fix in isolation.
+- Cross-reference: `docs/customers_sales_process_flows.md` §5 ("Audit Trail Coverage") already
+  lists `create_payment` as ✅ audited — that's accurate (the audit row does get written), this
+  entry is specifically about the transaction boundary around it, not about coverage existing
+  or not.
+
+---
+
+## Sales Ledger (`GET /sales/`) cursor pagination is non-functional — not yet remediated (2026-07-09)
+
+Found while filing the backlog entry for "the pagination bug" referenced during the
+Customers/Sales process-flow documentation pass (`docs/customers_sales_process_flows.md`). An
+earlier pass through that same doc flagged `list_payments`' total absence of pagination as the
+closest candidate it could find, with an explicit caveat that it wasn't confirmed to be the
+issue meant. A closer read of `list_sales` turned up a stronger, concretely verifiable bug in
+the same area — filing that as the primary finding here; see the note at the bottom for how the
+two relate.
+
+- [ ] **Gap** — `list_sales` (`GET /sales/`, `backend/sales/router.py:2275-2444`, the main Sales
+  Ledger listing endpoint) declares and documents a cursor-based pagination contract that the
+  implementation never actually honors:
+  - `cursor: Optional[int] = None` is declared as a parameter (`router.py:2289`) and documented
+    in the function's own docstring — *"cursor is a sale_id — returns sales with sale_id <
+    cursor (older)"* (`router.py:2296`) — but the parameter is **never referenced anywhere in
+    the function body**. No filter is ever applied using it, for either the pure-sales case or
+    the sales+returns "mixed list" case.
+  - The main query has no SQL-level `LIMIT` at all — `all_sales = q.all()` (`router.py:2349`)
+    fetches every row matching the current filters, unbounded, on every request.
+  - Pagination is instead simulated by slicing the fully-materialized, already-sorted Python
+    list: `page = combined[:limit]` (`router.py:2441`), immediately after a comment stating
+    *"cursor not supported for mixed list; always return first N"* (`router.py:2440`) — worded
+    as if this were a narrower limitation of the mixed sales+returns case specifically, when in
+    fact `cursor` is unused in every case, mixed or not.
+  - `next_cursor = None` is hardcoded on the response (`router.py:2442`) regardless of whether
+    more rows exist beyond `page`. A client has no way to detect or reach truncated data.
+  - **Visible symptom**: `frontend/src/pages/sales/SalesLedger.tsx` never sends a `cursor` and
+    has no Load More / next-page UI at all (confirmed — no pagination-related state or controls
+    in the file, only unrelated CSS `cursor-pointer`/`cursor-help` classes). Meanwhile the
+    `totals` row in the same response (`router.py:2431-2438`) is computed from `combined` — the
+    **full** filtered result set, before the `[:limit]` slice. So for any filter combination
+    matching more than `limit` (default 100) sales, the Sales Ledger page displays only the
+    first 100 rows while the totals bar above it silently reflects all of them — a visible
+    totals-vs-visible-rows mismatch, with no way for the user to reach or even know about the
+    missing rows.
+- [ ] **Recommended fix shape** (not implemented) — either wire `cursor`/`limit` into an actual
+  SQL-level filter + `LIMIT` (matching the working pattern already used elsewhere in this same
+  file — `get_ar_ledger` at `router.py:1047-1049` and `list_returns` at `router.py:3375-3378`,
+  both of which correctly do `if cursor: q = q.filter(id_col < cursor)` followed by
+  `q.limit(limit).all()`) and set `next_cursor` from the actual last row returned, or
+  — if unbounded "load everything, no paging" is the deliberate intent for this endpoint —
+  remove the `cursor`/`next_cursor` parameters and the misleading docstring/comment entirely so
+  the contract matches reality. Either is a real decision to make, not made here.
+- **Related, smaller gap in the same area**: `list_payments` (`GET /sales/payments`,
+  `router.py:2765-2785`) has no `cursor`/`limit` parameters at all — `return q.all()` — unlike
+  every sibling list endpoint in this file. Less severe than the above (no misleading
+  docstring/contract, no totals-mismatch symptom, just unbounded), but flagged here as the same
+  class of issue in the same file, in case a future pass wants to fix both together.
+
+---
+
+## RBAC severity triage — result of the "not yet triaged" item above (2026-07-09)
+
+This is the triage the RBAC audit entry above flagged as future work — classifying the 32
+backend-ungated actions and the mismatch patterns by what they actually touch (money,
+inventory, customer data) versus genuinely low-stakes read/reference operations, so a future
+remediation pass has a priority order instead of a flat list. **Nothing fixed here** — this is
+risk classification only. Full file:line evidence for every item below is in the RBAC audit
+entry above and the linked artifact (https://claude.ai/code/artifact/e33b961f-66f0-4365-a0a2-f539d7abbb94);
+not repeated here.
+
+**Methodology**: for each ungated action, checked whether it's a *genuine open door* (no
+permission of any kind protects the underlying endpoint — any authenticated user, any role, can
+call it) versus a *mismatch* (the endpoint IS protected, just by a different/broader action key
+than the one that's supposed to represent it — a UI/semantics problem, not a security hole).
+Severity is driven primarily by genuine open doors that touch money or the core sellable-item
+record; mismatches are generally lower risk today because a real permission already sits behind
+them, even if it's the wrong-named one.
+
+### HIGH — genuine open door, touches money or the core sellable-item record
+
+- [ ] **`confirm_costs`** (Stage 2 receiving, `procurement/router.py:636` — the real endpoint
+  behind the phantom `confirm_shipment` action key) — zero permission check. Creates
+  `cost_layers` (locked permanently at receipt per this codebase's own principle — never
+  corrected after the fact) **and** a `supplier_invoices` row plus an `INVOICE` entry in
+  `ap_ledger` — i.e. any authenticated user can currently create real, permanent AP liabilities
+  and lock in COGS-driving cost data.
+- [ ] **`receive_shipment` / `add_receiving_details`** (Stage 1 receiving, `procurement/router.py:504`
+  and `:396` — real endpoints behind the phantom `receive_transfer` action key) — zero
+  permission check. Physically moves stock into the active, sellable system.
+- [x] **`add_variant` / `update_variant` / `delete_variant` — resolved (2026-07-10)**
+  (`inventory/router.py:842,879,949` — part of the "backend looser than frontend implies"
+  mismatch pattern, not one of the 32 action-key entries itself, but the single most consequential
+  open door found this session). All three now require `require_permission("manage_products")`,
+  matching `update_product`/`delete_product` exactly. Verified live with a temporary CASHIER user
+  (no `manage_products`) — all three endpoints return `403`. See the "Variant deactivation
+  hardening" entry below and `docs/changelog.md` (2026-07-10) for the full scope of this pass
+  (also added audit logging and a reactivation path, beyond just the permission gate).
+
+### MEDIUM — real open door with narrower blast radius, or a mismatch with real operational impact
+
+- [ ] **`create_shipment`** (`procurement/router.py:362`) — zero check; precursor record to the
+  HIGH-severity `confirm_costs` step above.
+- [ ] **`manage_uoms`** (`create_uom`/`update_uom`/`delete_uom`, `inventory/router.py:189,202,216`)
+  — zero check; UOM conversion factors indirectly feed quantity math on stock movements.
+- [ ] **`update_location`** (`transfers_router.py:284`, asymmetric — `create_location` IS gated,
+  this isn't) — zero check on editing where stock is tracked as living.
+- [ ] **Variant sub-entity CRUD** (barcodes, UOM conversions, bundle components,
+  variant-supplier links) — zero check; narrower than the variant record itself, but bundle
+  components feed stock-explosion math and variant-supplier links carry cost data.
+- [ ] **STORE_MANAGER / `manage_products` UI mismatch** — not a security hole (STORE_MANAGER
+  gets a clean 403, can't actually complete the action), but a real operational-correctness
+  problem: a legitimate STORE_MANAGER sees an enabled "+ New Product" button and a fully
+  editable product/variant form that predictably fail on submit. MEDIUM for user-facing
+  breakage, not for exposure.
+- [ ] **`manage_payment_modes` mismatch** — dormant today (the real endpoint is protected by
+  `manage_sales_settings`, which every role holding the visible tab also holds), but flagged
+  higher than its sibling mismatches (`manage_shifts`, `manage_registers`) because payment-mode
+  flags (`is_ar_charge`/`is_ar_credit`/`is_credit_memo`) directly drive real AR/credit-memo
+  financial behavior — worth getting right deliberately if this mismatch class is ever
+  remediated, rather than incidentally.
+
+### LOW — read-only, cosmetic, low-stakes, or no backend surface exists to protect
+
+- [ ] All ungated **`view_*`** reads (`view_inventory`, `view_transfers`, `view_receiving`,
+  `view_stock_ledger`, `view_suppliers`, `view_purchase_orders`, `view_invoices`,
+  `view_ap_payments`, `view_ap_ledger`) and the mismatched **`view_ap_aging`** — read-only, and
+  each already sits behind its own **program**-level nav gate for page reachability.
+- [ ] All ungated **`export_*`** actions (`export_sales`, `export_returns`, `export_products`,
+  `export_stock_ledger`, `export_ap_ledger`, `export_ap_aging`, `export_customer_aging`,
+  `export_ar_ledger`) — purely cosmetic; every export is client-side reformatting of data the
+  user already has legitimate read access to via the underlying (program-gated) page.
+- [ ] **`import_products`** — fully phantom; the real import endpoints use different, already-
+  protected keys (`manage_products`/`manage_suppliers`/`manage_customers`).
+- [ ] **`manage_shifts` / `manage_registers` / `manage_pdc` / `view_customer_aging` /
+  `view_credit_memos` mismatches** — all dormant for the same reason as `manage_payment_modes`
+  above (a real permission already protects the actual endpoint); listed LOW rather than MEDIUM
+  because what they gate is lower-stakes than payment-mode configuration specifically.
+- [ ] **`manage_categories`** — zero check, but categories are explicitly "UI filtering only...
+  do not affect stock or costing logic" per `docs/requirements.md` §5.4.
+- [ ] **`manage_import`** (intentionally retired, see the RBAC entry above) and
+  **`manage_appearance`** (no backend surface by design — client-only feature) — no risk, not
+  really "ungated" so much as correctly scoped to nothing.
+
+### Suggested remediation order, if/when this is picked up
+
+1. HIGH tier first — these are the only items where an unauthenticated-by-role user can move
+   real money (AP) or change live customer-facing prices today.
+2. MEDIUM tier next, `manage_payment_modes` prioritized within it given what it touches.
+3. LOW tier — arguably fine to leave as-is long-term for the cosmetic export/view items; the
+   mismatch entries in this tier are more about eventually cleaning up the action-key model's
+   internal consistency than closing an actual exposure.
+
+---
+
+## Payment creation has no duplicate-submission protection — resolved (2026-07-10)
+
+Found during a ground-truth verification pass on payment creation and payment modes ahead of
+future redesign work (verification only, nothing implemented in that pass). Full evidence in
+that pass's findings; summarized here for tracking.
+
+- [x] **Resolved** — `record_customer_payment` and `create_payment` both gained a client-supplied
+  `idempotency_key` (nullable, unique, same shape as `sales.sales.idempotency_key`), an upfront
+  existing-record check, and an `IntegrityError` safety net for the race window (mirroring the
+  `sale_pid` race fix). `post_draft`'s tender loop was investigated and confirmed to already be
+  covered — a duplicate post on the same draft 404s before the loop is reached — no new mechanism
+  needed there. The fourth path, the cash-refund branch inside `_do_return`, is covered
+  transitively by `SalesReturn`'s own new idempotency key (see the entry below) rather than
+  needing a separate key of its own. See `docs/changelog.md` (2026-07-10) for full detail and live
+  verification evidence.
+- [x] **Original gap (now fixed)** — none of the four places in the codebase that create a
+  `CustomerPayment` row had any duplicate-submission protection — no idempotency key, no
+  uniqueness constraint, no in-code "does this already exist" check:
+  - `record_customer_payment` (`POST /sales/customers/{id}/payment`, `backend/sales/router.py:964`)
+  - `create_payment` (`POST /sales/payments`, `router.py:2713`)
+  - `post_draft`'s tender-creation loop (`router.py:2113`)
+  - the cash-refund negative-payment branch inside `_do_return` (`router.py:3196-3230`) — a
+    fourth creation path not previously catalogued this session; found during the same
+    verification pass.
+  - Confirmed absent at every layer: the `CustomerPayment` model (`backend/sales/models.py:223-254`)
+    has no `idempotency_key` column at all; neither `CustomerPaymentCreate`
+    (`backend/sales/schemas.py:419-424`) nor `RecordPaymentIn` (`schemas.py:468-478`) accepts one
+    in the request payload; and a live-DB check of `sales.customer_payments` shows only the
+    primary key as a constraint — no unique index on `reference_number` or any field
+    combination.
+  - **Contrast with the established pattern in this same codebase**: `Sale.idempotency_key`
+    (`models.py:170`, `unique=True`) already solves exactly this problem for sale posting (and
+    was the mechanism this session's `sale_pid` investigation relied on). Payments have no
+    equivalent.
+  - **Concrete failure mode**: a double-click, a network retry, or a resubmitted form on any of
+    the four paths above can create two separate, fully-valid `CustomerPayment` rows for what
+    was meant to be one transaction — each independently writing to `ar_ledger` and reducing
+    `customer.outstanding_balance` a second time. Nothing detects or prevents this today.
+- [x] **Fix shape used** — a client-supplied `idempotency_key` on `CustomerPayment`, mirroring
+  `Sale`'s, applied to `record_customer_payment` and `create_payment` (the two paths that create
+  a genuinely standalone payment row); the fourth path (`_do_return`'s cash-refund branch) is
+  covered transitively via `SalesReturn`'s own new key instead of a fifth, redundant key on that
+  specific `CustomerPayment` row. See `docs/changelog.md` (2026-07-10).
+- Cross-reference: the same verification pass also corrected the payment-creation-path count
+  from three to four, and produced a payment-modes ground-truth table (7 modes, which have
+  special lifecycle handling and which don't) — not duplicated here; see that pass's findings
+  for the full picture if this entry is picked up.
+
+---
+
+## The four-creation-paths finding — documentation correction (2026-07-10)
+
+Found during the same ground-truth verification pass as the idempotency-gap entry above,
+filed separately since it's a distinct, standalone finding (a correction to prior
+documentation) rather than a security/correctness gap in itself.
+
+- [x] **Finding, corrected** — `docs/customers_sales_process_flows.md` §3 ("Payment
+  Lifecycle"), written earlier this session, documented exactly **three** places a
+  `CustomerPayment` row gets created: `record_customer_payment` (`backend/sales/router.py:964`),
+  `create_payment` (`router.py:2713`), and `post_draft`'s tender-creation loop (`router.py:2113`).
+  A direct grep of every `models.CustomerPayment(` instantiation in the backend (done as part of
+  the payment ground-truth verification pass) found a **fourth**: the cash-refund
+  negative-payment branch inside `_do_return` (`router.py:3196-3230`), gated by
+  `disposition == 'cash_refund' and sale_id is not None`. It creates a negative `CustomerPayment`
+  (`amount = -grand_total`) tied to the largest non-AR tender originally applied to the sale,
+  plus a matching negative `CustomerPaymentApplied` row — this is how a cash refund shows up in
+  payment history. It has no dedicated `write_audit` call.
+  - Unlike the other three, this path is never presented to the user as "creating a payment" —
+    it's an implicit side effect of choosing the (default) cash-refund disposition when
+    processing a return in `frontend/src/pages/sales/ReturnNew.tsx`, not a dedicated payment
+    entry screen.
+  - `docs/customers_sales_process_flows.md` §3.2 has been corrected in place to describe all
+    four paths (renamed to "A third and fourth de-facto creation path", with a dated correction
+    note at the top of that section); §5's audit-coverage table also got a clarifying note that
+    `create_return`'s ✅ audit coverage is for the `sales_returns` row only, not this payment
+    side-effect.
+- Cross-reference: this fourth path is also cited as evidence in the "Payment creation has no
+  duplicate-submission protection" entry above — not duplicated there, this entry is the
+  documentation-correction record; that one is the security/correctness gap record.
+
+---
+
+## Cash-refund negative payment may inflate Customer Aging — unverified, not yet checked (2026-07-10)
+
+Found during the payment ground-truth verification pass (`docs/payment_ground_truth.md` §2,
+"Path 4"), specifically while confirming whether the fourth payment-creation path's ledger
+accounting was correct. **This is a static-analysis observation, not a reproduced bug** — it
+was explicitly not tested against live data in that pass. Filing it as a flagged, unverified
+finding rather than a confirmed defect, so it doesn't get lost, but a future pass should
+reproduce it live before treating it as real.
+
+- [ ] **Observation** — the cash-refund branch inside `_do_return`
+  (`backend/sales/router.py:3196-3230`) creates a negative `CustomerPaymentApplied` row
+  (`amount_applied = -grand_total`, `:3226-3230`) against the original sale, as a deliberately
+  ledger-silent historical record (this part is confirmed correct — see
+  `docs/payment_ground_truth.md` §2 for the full reasoning on why it does *not* double-count
+  against `ar_ledger`/`outstanding_balance`).
+  - `get_ar_aging` (`backend/sales/router.py:388-542`, documented in
+    `docs/customers_sales_process_flows.md` §1.5) computes each invoice's outstanding amount as:
+    `ar_ledger SALE amount − Σ customer_payment_applied.amount_applied (WHERE mode.is_ar_charge
+    = False) − Σ sales_returns.grand_total (WHERE disposition = 'credit_to_account' only)`.
+  - The cash-refund's negative application row satisfies `is_ar_charge = False` (its payment
+    mode is deliberately chosen to be non-AR-charge/non-AR-credit, per `:3197-3210`), so it
+    **is** included in the `Σ customer_payment_applied.amount_applied` term. But `cash_refund`
+    disposition is explicitly **excluded** from the `returns_credit` term (which only counts
+    `credit_to_account`).
+  - Net effect, if this holds up under live testing: for a sale with a linked `cash_refund`
+    return, the aging calculation would subtract a *negative* number from itself in the
+    payments-applied term — arithmetically **adding `grand_total` back** to that invoice's
+    computed outstanding amount. A customer's Customer Aging report could show an inflated
+    "amount owed" for an invoice that was actually already resolved via a cash refund.
+  - The same summation pattern (`CustomerPaymentApplied` filtered to `is_ar_charge = False`)
+    appears in `_build_customer_transaction_ledger` (`router.py:778-898`) as well — worth
+    checking both, not just aging, if this is picked up.
+- [ ] **Not yet reproduced against live data.** Recommended next step for a future pass:
+  create a test sale paid via a non-AR-charge tender, process a linked `cash_refund` return
+  against it, and check `GET /sales/customers/aging` for that invoice — confirm whether the
+  outstanding amount shown matches expectations or is inflated by the returned amount.
+- Cross-reference: `docs/payment_ground_truth.md` §2 has the full path-4 writeup this finding
+  came from; `docs/customers_sales_process_flows.md` §1.5 documents `get_ar_aging`'s formula in
+  detail.
+
+---
+
+## Returns processing — four gaps found in ground-truth pass, not yet remediated (2026-07-10)
+
+Found during a full end-to-end verification pass on returns (`docs/returns_ground_truth.md`),
+prompted by the fourth payment-creation path discovered inside `_do_return` the same day
+(`docs/payment_ground_truth.md`). Verification only — nothing implemented at the time. Full
+reasoning and file:line evidence for all four items is in `docs/returns_ground_truth.md`;
+summarized here for tracking. *(Update 2026-07-10: the idempotency item below has since been
+remediated, alongside the payment-idempotency backlog item above; the other three — bundle
+returns, audit trail coverage, unconstrained `disposition` — remain open.)*
+
+- [ ] **Bundle returns credit phantom stock to the bundle variant and never restore component
+  stock/cost layers.** A bundle sale's `SaleItem` is recorded at the bundle-variant level with
+  no `cost_layer_id` (`backend/sales/router.py:1987-1996`, `"revenue at bundle price, no cost
+  data"`); `_do_return` has no bundle-explosion equivalent (`:3033-3232`, zero references to
+  "bundle" anywhere in the function), so returning a bundle line writes `InventoryLedger
+  RETURN_IN` and a `CurrentStock` increment directly against the bundle variant — which per
+  `docs/requirements.md` §6.5 should never hold stock — while the actual component stock
+  deducted at sale time is never restored. Confirmed reachable through the normal Return New
+  page (`get_items_for_return` and `ReturnNew.tsx` both have zero bundle filtering).
+- [x] **`SalesReturn` has no idempotency protection — resolved (2026-07-10)**. `SalesReturn`
+  gained a client-supplied `idempotency_key` (nullable, unique, same shape as
+  `Sale.idempotency_key`). `create_return` and `create_return_and_exchange` both check for an
+  existing return by key before calling `_do_return`, so a duplicate "Process Return" submission
+  now returns the original return (and, for the exchange path, its paired exchange sale) instead
+  of reversing stock, restoring cost layers, writing a second `ArLedger` entry, or creating a
+  duplicate cash-refund payment a second time. An `IntegrityError` safety net (mirroring the
+  `sale_pid` race fix) covers the race window between that check and the insert. Verified live
+  against the actual `cash_refund` disposition path: double-submitted an identical return twice,
+  confirmed exactly one `sales_returns` row, one `RETURN_IN` ledger entry, and one negative
+  cash-refund `CustomerPayment` (not two). See `docs/changelog.md` (2026-07-10).
+- [ ] **Audit trail coverage for returns is nearly nonexistent** — of nine distinct writes
+  triggered by processing a return (return header, line items, inventory ledger, cost-layer
+  restoration, AR ledger entry, balance update, the cash-refund payment pair, and the exchange
+  draft sale), only the return header itself (`sales.sales_returns`) gets a `write_audit` call
+  (`create_return` `:3324`, `create_return_and_exchange` `:3295`). The other eight — including
+  real financial mutations (AR ledger, balance, the refund payment) — have none.
+- [ ] **`disposition` is unconstrained at the API layer** (`backend/sales/schemas.py:518`, plain
+  `Optional[str]`, not an enum/`Literal`) — `_do_return` only recognizes `'cash_refund'` and
+  `'credit_to_account'`; any other value or `None` silently produces a return with zero
+  financial impact (stock reverses, no AR entry, no balance change, no payment, no credit
+  memo). Not reachable via the current UI (which only ever sends one of the two valid values),
+  but reachable via direct API use. Separately: `docs/schema.dbml:483`'s inline comment lists a
+  third value, `credit_memo`, that was never actually implemented anywhere in code — confirmed
+  stale against `docs/changelog.md`'s "2026-06-06" entry, which documents the column as having
+  been added with exactly two values. Worth fixing the doc regardless of whether the validation
+  gap itself is addressed.
+- **Not a gap, confirmed correct**: the fourth payment path's own `ArLedger`/`outstanding_balance`
+  accounting (§3 of `docs/returns_ground_truth.md`) does *not* repeat the
+  `apply_unapplied_payment` double-counting bug — it's deliberately ledger-silent and correctly
+  avoids a second, different failure mode that would have occurred had it reused the shared
+  `_apply_and_update` helper with a negative amount. Noted here so this pass isn't
+  mischaracterized as having found a fifth double-counting bug — it didn't.
+
+---
+
+## Variant deactivation hardening — implemented (2026-07-10)
+
+Closes the `add_variant`/`update_variant`/`delete_variant` permission gap flagged HIGH severity
+in the RBAC audit above, and brings the same trio up to this session's established standard for
+destructive/corrective actions (permission gate, `write_audit` coverage, reversibility).
+
+- [x] **Permission gates** — `add_variant`, `update_variant`, `delete_variant` all now require
+  `require_permission("manage_products")`, matching `update_product`/`delete_product` exactly.
+- [x] **Audit logging** — `update_variant` gained a `write_audit` call (previously had none at all
+  for any field update); `delete_variant` gained one matching `delete_product`/`delete_supplier`'s
+  old/new-value shape.
+- [x] **Reactivation** — `VariantUpdate` gained `is_deleted: Optional[bool]`, folded into the
+  existing PUT endpoint (not a new route), same convention as `SupplierPatch`/`patch_supplier`.
+  `update_variant`'s lookup no longer filters on `is_deleted`, so a soft-deleted variant can be
+  found and reactivated. A guard prevents setting `is_deleted=true` on the default variant through
+  this endpoint, mirroring `delete_variant`'s existing check.
+- [x] **UI gap found and closed**: the Sibling Variants panel on `Detail.tsx` filtered deactivated
+  variants out of the list entirely — a reactivate control would have had nowhere to live. Added
+  a "Show inactive" toggle, an "Inactive" badge, and a row action that swaps between a
+  `confirm()`-gated deactivate `×` (matching the existing barcode/UOM/bundle/supplier-link row
+  convention, now with a confirmation dialog since deactivating a whole variant is more
+  consequential than those) and a "Reactivate" link. Errors (e.g. the default-variant rejection)
+  surface in a dedicated red error box rather than an unhandled failure.
+- All 7 requested checks verified live against the Docker stack, including a real browser
+  (Playwright/Chromium) driving the actual UI — not just direct API calls — for the
+  deactivate → toggle → reactivate round trip and the default-variant rejection's error display.
+  See `docs/changelog.md` (2026-07-10) for full verification detail.
+- Temporary Playwright driver scripts and verification screenshots (session scratchpad only,
+  never part of the repo) were deleted after the report was delivered.
+
+---
+
+## Voids/Charge-payments/PDC verification pass — both gaps resolved (2026-07-11)
+
+Found during a consolidated verification pass across voids, returns, charge payments, and PDC
+payments (`docs/customers_section_verification.md`, 2026-07-10; verification only, nothing
+implemented at the time). Both gaps below were fixed the next day — see
+`docs/changelog.md` "2026-07-11 — Fix: balance_due corruption on reverse/bounce of is_ar_charge
+payments; new PDC deposit→bounce transition" for the fix and full live verification evidence.
+Returns findings from the same original pass are not duplicated here — see the "Returns
+processing" entry above and `docs/returns_ground_truth.md` (now annotated: the idempotency item
+there is fixed, the other three remain open).
+
+- [x] **`reverse_payment` / `bounce_pdc_check` corrupt `sale.balance_due` for `is_ar_charge`
+  tenders (Charge, PDC) — resolved (2026-07-11)**. Both endpoints restored a linked sale's
+  `balance_due` via `sale.balance_due = (sale.balance_due or 0) + apply.amount_applied`,
+  assuming the tender previously *reduced* `balance_due` at post time — true for standard
+  tenders, **false** for `is_ar_charge`/`is_ar_credit` tenders (deliberately excluded from
+  `standard_applied`). Live-reproduced pre-fix on a never-voided `Posted` sale: reversing a
+  fully-Charge-tendered $100 sale's payment left `balance_due=200`. Fixed: both endpoints now
+  compute `mode_reduces_balance = not (payment.payment_mode.is_ar_charge or
+  payment.payment_mode.is_ar_credit)` once per payment and skip the restore loop when false.
+  **Forward-direction guard added proactively**: `_apply_and_update` (shared by `create_payment`/
+  `apply_unapplied_payment`) and `record_customer_payment` previously reduced `balance_due`
+  unconditionally on *application* too — safe only because the frontend filters
+  `is_ar_charge`/`is_ar_credit` out of the relevant dropdowns, not because the backend enforced
+  it. All three now carry the same `mode_reduces_balance` guard, tested live via direct API call
+  (these mode/endpoint combinations have no UI path) alongside a standard-mode regression check.
+  See `docs/changelog.md` (2026-07-11) for the full fix and 7-point live verification.
+- [x] **No `DEPOSITED → BOUNCED` transition exists for PDC checks — resolved (2026-07-11)**.
+  `deposit_pdc_check` and `bounce_pdc_check` both required `check_status == 'IN_VAULT'`, so a
+  deposited check could never be marked bounced — foreclosing the realistic real-world sequence
+  (a check bounces *after* being deposited/submitted to the bank). Fixed: `bounce_pdc_check`'s
+  precondition relaxed to `check_status in ('IN_VAULT', 'DEPOSITED')`, reusing the same
+  (now-corrected) reversal logic — confirmed safe since `deposit_pdc_check` only ever changes
+  `check_status`/`payment_date`, nothing ledger- or balance-related. Live-verified: created a PDC
+  payment, deposited it, bounced it — correct end state for `balance_due` (unchanged, not
+  doubled), `ArLedger` (correctly zero rows), and `outstanding_balance` (unchanged), with full
+  `write_audit` coverage across creation/deposit/bounce.
+- [x] **Void-guard added (new, not originally filed as a separate item)**: `deposit_pdc_check`
+  and `bounce_pdc_check` now reject with `400` if any sale the payment is applied to has
+  `status == "Voided"` — closing the PDC-void interaction gap from
+  `docs/customers_section_verification.md` §1.3. Live-verified: voided a PDC-tendered sale, then
+  confirmed both deposit and bounce attempts on its check are rejected.
+- **Confirmed unaffected / re-verified, not gaps**: void_sale's single- and multi-tender
+  AR/stock reversal (`docs/customers_sales_process_flows.md` §2.3); `deposit_pdc_check`'s
+  ledger math (genuinely nothing to under/over-count, not just "runs without error"); Charge
+  payment creation, Transaction Ledger accounting, and audit coverage; the 2026-07-09
+  `bounce_pdc_check` fix itself (still correct on the ledger-reading side — the new gap above is
+  a distinct bug in the same function's `balance_due` restore step, not a regression).
+- **Doc corrections**: `void_sale`'s audit coverage in `docs/customers_sales_process_flows.md`
+  §5.2 was a bare ✅ — corrected to note it covers the `sales.sales` header row only, same shape
+  as the returns gap. `docs/returns_ground_truth.md` §3 annotated in place: its documented
+  `SalesReturn` idempotency gap was fixed the same day it was written (see "Duplicate-submission
+  protection" entry above) — left unedited as historical record, marked superseded.
+- **Cleanup attempted (2026-07-11)**: `customer.has_bounced_check` (stale from an earlier
+  verification pass, customer 3) cleared via the proper `clear-bounced-flag` endpoint. The
+  `balance_due=200` values already written to sales 75/76/77 by the pre-fix bug, and payment
+  91's `DEPOSITED` status (set before the void-guard existed), could **not** be cleaned up —
+  `reverse_payment`/`bounce_pdc_check` correctly refuse to act twice on an already-reversed/
+  bounced payment, and no endpoint resets a sale's `balance_due` independently of the
+  payment-application lifecycle. These remain as permanent, understood historical evidence of
+  the pre-fix bug — the fix prevents recurrence, it does not retroactively repair these rows.
+
+---
+
+## Pool payment, then assign to transactions — implemented (2026-07-11)
+
+Designed in `docs/payment_pooling_proposal.md` (built on `docs/payment_pooling_verification.md`'s
+confirmed facts about `apply_unapplied_payment`, the AR-ledger picker source, and `create_payment`'s
+zero frontend callers), decisions finalized in that doc's §10, implemented the same day. Full
+details and live verification evidence in `docs/changelog.md` "2026-07-11 — Feature: pool payment,
+then assign to transactions (customer payments)".
+
+- [x] **`get_customer_ar_ledger_view` bridge-table fix — implemented (2026-07-11)**. Was reading
+  `sale.balance_due` directly, stale relative to `credit_to_account` returns (which never touch
+  that column). Now derives the same way `get_ar_aging` does. Live-verified against a fresh test
+  return, and incidentally surfaced/fixed the same staleness already present in existing seed data
+  from an earlier session's return, not just the newly-created test case.
+- [x] **`create_payment` made atomic-and-correct — implemented (2026-07-11)**. Accounting fix (one
+  full-amount `ArLedger` row instead of one per application, `outstanding_balance` reduced by the
+  full amount immediately — matching `record_customer_payment`'s convention), PDC field support
+  added, and the split-commit audit gap fixed (see the "create_payment split-commit" entry above,
+  now marked resolved with a cross-reference to this work). Live-verified: single ledger row,
+  correct balance drop, no double-count on a later `apply_unapplied_payment` call against the same
+  payment's remaining pool, and full rollback (zero trace) on a forced mid-loop failure.
+- [x] **`CustomerDetail.tsx` receipt-picker UI — implemented (2026-07-11)**. New section in the
+  Record Payment modal: oldest-first default allocation, manual per-row override, "Select All /
+  Apply to All Open Receipts" shortcut, running Applied/Remaining total, "Load more receipts" for
+  customers with more than 200 open receipts, single-call submission via the newly-fixed
+  `create_payment`. Playwright-verified end to end (default allocation, manual edit, select-all,
+  submit, success banner) with zero browser console errors.
+- **Decided, not a gap**: `CustomerARLedger.tsx`'s single-sale "Receive Payment" flow and
+  `Workstation.tsx`'s POS tender loop were both explicitly left unchanged per the proposal's
+  recommendation (§7, §E) — Playwright-confirmed both still work exactly as before.
+- **Cleanup**: three test payments reversed via `POST /sales/payments/{id}/reverse`. One test
+  `credit_to_account` return (₱600, clearly labeled in its `reason` field as a verification test)
+  could **not** be cleaned up — no return-void/cancel endpoint exists in this codebase — and
+  remains as a permanent, understood record, same pattern as the `balance_due=200`/payment-91
+  cleanup limitations noted in the entry above. The temporary `test_pooling_verify` account used
+  for API/browser verification was deactivated via `PATCH /auth/users/{id}/active`.
+
+---
+
+## `payments_by_sale_id` bridge-table gap — found and resolved same-day (2026-07-11)
+
+**Not a pre-existing tracked item** — this gap was undiscovered until the return-reversal
+investigation below traced the same query pattern for a different reason and found it right next
+to the bug it was actually looking for. Filing and closing in the same entry since it was found,
+fixed, and verified in a single pass; full detail and live evidence in
+`docs/changelog.md` "2026-07-11 — Feature: sales return reversal mechanism".
+
+- [x] **`get_ar_aging`/`get_customer_ar_ledger_view`'s `payments_by_sale_id` `SUM` never excluded
+  reversed or bounced payments — resolved (2026-07-11)**. Filtered `PaymentMode.is_ar_charge ==
+  False` but had no `CustomerPayment.reversed_at`/`check_status` filter at all, so a payment
+  reversed via the already-live `POST /sales/payments/{id}/reverse`, or bounced via
+  `bounce_pdc_check`, was still counted toward a sale's derived outstanding balance forever. Fixed
+  by adding `CustomerPayment.reversed_at.is_(None)` and a NULL-safe `check_status != 'BOUNCED'`
+  filter (`check_status` is nullable, only ever set for PDC payments — a bare `!=` would have
+  silently excluded every non-PDC payment too under standard SQL `NULL` semantics; verified this
+  precisely against live data — 104 real non-PDC payments would have been wrongly dropped by the
+  naive form). Live-verified: reversing a normal payment flips its sale from `Paid`/`0.00` to
+  `Open`/full balance in both bridge-table views.
+
+---
+
+## Sales return reversal mechanism — implemented (2026-07-11)
+
+Designed in `docs/return_reversal_proposal.md` (built on the already-live `void_sale`/
+`reverse_payment` precedent and a fresh investigation into what a return actually does across
+inventory, cost layers, AR ledger, and the cash-refund payment path), decisions finalized in that
+doc's §10, implemented the same day. Full details and live verification evidence in
+`docs/changelog.md` "2026-07-11 — Feature: sales return reversal mechanism".
+
+- [x] **`POST /sales/returns/{return_id}/reverse` — implemented (2026-07-11)**. Full reversal
+  only, origin-agnostic (negates the actual `InventoryLedger`/`ArLedger` rows tagged to the
+  return, same technique as `void_sale`/`reverse_payment`), single atomic transaction,
+  `write_audit` with both `old_values`/`new_values` before the one commit. Confirmed live: exact
+  restoration of stock/cost-layers/AR-ledger/`outstanding_balance` for a normal
+  `credit_to_account` return; correct handling of the cash-refund `CustomerPayment` (path 4) via
+  direct flag-flipping rather than reusing `reverse_payment` (confirmed reuse would have corrupted
+  `sale.balance_due` — see `docs/return_reversal_proposal.md` §4.1); safe reversal of a return that
+  hit the known bundle phantom-stock bug without needing that bug fixed first (component stock
+  correctly left untouched, phantom bundle-variant stock correctly negated).
+- [x] **Exchange-linked returns excluded from v1, with state-specific error messages —
+  implemented (2026-07-11)**. Reuses `_attach_exchange`'s existing derivation as the reversal
+  precondition — no new tracking. Live-verified both branches (`Draft` → "delete the draft first",
+  `Posted` → "void it first") plus the unblock path (void the exchange, return becomes reversible).
+- [x] **`reverse_return` permission — implemented (2026-07-11)**. New dedicated action, granted to
+  `ADMIN` + `STORE_MANAGER` only, not `CASHIER` — confirmed `CASHIER` already holds
+  `process_returns`, so reusing it for reversal would have been a bigger privilege inversion than
+  the one `reverse_customer_payment` was already introduced to prevent on the payment side.
+  Live-verified: `CASHIER` test account rejected with 403, `STORE_MANAGER` test account passed the
+  permission gate.
+- [x] **Bundled bridge-table fix** — see the `payments_by_sale_id` entry directly above, plus the
+  matching `returns_by_sale_id` `reversed_at` filter (both `get_ar_aging` and
+  `get_customer_ar_ledger_view`), shipped in the same pass per this proposal's §10 decision 2.
+- **DB migration**: `sales.sales_returns` gains `reversed_at`/`reversed_reason`/
+  `reversed_by_user_id`, mirroring `sales.customer_payments`'s existing three columns. No boolean
+  flag, no enum migrations (`ArLedger.reason='ADJUSTMENT'` and `InventoryLedger.reason=
+  'RETURN_OUT'` both already existed).
+- **Cleanup**: all test returns reversed via the new endpoint; test sales voided via `void_sale`;
+  temporary test accounts deactivated via `PATCH /auth/users/{id}/active`. One honest residual,
+  **not** attributable to this work: after the full verification sequence, customer 2's
+  `outstanding_balance` sat ₱200 below its pre-session baseline. **Correction**: originally
+  attributed here to voiding a sale after its payment had already been reversed
+  (`reverse_payment` → `void_sale`) — a dedicated follow-up investigation (see "Void-after-reversal
+  investigation" entry below) proved that ordering nets to *exactly* zero and found the real cause
+  instead: two other sales in the same cleanup pass were voided standalone with no payment ever
+  reversed, each correctly leaving its own documented -₱100 credit (`void_sale`'s intended
+  behavior, not a bug), summing to -₱200. The bundle-variant
+  phantom `current_stocks` row created during check 5 remains at quantity `0` — correctly zeroed,
+  not deleted, matching this schema's "never hard-delete" convention; this is the correct end
+  state, not a cleanup gap.
+
+---
+
+## Void-after-reversal investigation → reverse_payment missing void-guard — found and fixed (2026-07-11)
+
+Prompted by the unverified hypothesis in the return-reversal entry above (now corrected there).
+Investigated precisely rather than assumed; disproved the original hypothesis and found a
+different, real, narrower bug instead. Full trace, live evidence for every ordering tested, and
+the fix are in `docs/changelog.md` "2026-07-11 — Fix: reverse_payment on an already-voided sale
+left it contradictorily stateful".
+
+- [x] **Disproved: `reverse_payment` → `void_sale` does NOT double-restore `balance_due`**.
+  `void_sale` never touches `sale.balance_due` and never loops over `CustomerPaymentApplied` — a
+  flat, unconditional `ArLedger ADJUSTMENT` for `-grand_total`, structurally incapable of the
+  hypothesized per-application double-count. Live-verified for both a standard tender
+  (`reverse_payment` → `void_sale`) and a PDC tender (`bounce_pdc_check` → `void_sale`): both net
+  `outstanding_balance` to *exactly* zero delta.
+- [x] **Confirmed and fixed: `void_sale` → `reverse_payment` (reverse order) left the sale
+  contradictorily stateful — resolved (2026-07-11)**. `reverse_payment` had no check on the linked
+  sale's status, unlike `deposit_pdc_check`/`bounce_pdc_check`, which both already call
+  `_reject_if_linked_to_voided_sale` (`router.py:1252-1269`) for this exact reason. Live-reproduced
+  pre-fix: a Voided sale ended up `balance_due=150.00`/`Unpaid` after its payment was reversed
+  post-void. `outstanding_balance` itself nets correctly regardless of order — this is a
+  `Sale`-record data-integrity bug, not a financial-ledger bug. Fixed by adding the same guard
+  call `reverse_payment` was missing (same root pattern as this session's two earlier
+  `mode_reduces_balance` fixes: check whether the thing being restored was already
+  restored/reversed before restoring it again — a different pair of operations each time).
+  Live-verified: rejects with `400` pre-mutation (sale/payment state completely untouched by the
+  rejected call); normal `Posted`-sale case and the forward reverse-then-void order both unchanged.
+- **Cleanup**: three sales (94, 96, 97) remain permanently in the contradictory state from this
+  investigation and its fix's own pre-fix reproduction — no proper action exists to reset
+  `balance_due` on an already-Voided sale (confirmed by checking every write site in
+  `router.py`; the fix just shipped closes the one path that could have). Left as permanent
+  historical evidence, same treatment as the earlier `balance_due=200` rows from the
+  `mode_reduces_balance` fix. Temporary test accounts deactivated via
+  `PATCH /auth/users/{id}/active`.
+
+---
+
+## PDC deposit as the collection event — implemented (2026-07-12)
+
+Designed in `docs/pdc_deposit_collection_proposal.md` (built on the verification pass that first
+confirmed deposit never marked anything collected), decisions finalized in that doc's §6,
+implemented the same session. Full details and live verification evidence in
+`docs/changelog.md` "2026-07-12 — Feature: PDC deposit as the collection event".
+
+- [x] **`deposit_pdc_check` now writes the collection effect — implemented (2026-07-12)**. One
+  `ArLedger` `PAYMENT` row, `outstanding_balance` reduction, `balance_due`/`payment_status`
+  reduction per linked sale — same shape a standard tender writes at post time, deferred to
+  deposit for PDC. Audit call upgraded to a real `old_values`/`new_values` snapshot. Live-verified
+  end to end, including the Customer Transaction Ledger reflecting the sale as `Paid`.
+- [x] **`bounce_pdc_check`/`reverse_payment` — origin-agnostic restore, both fixed together —
+  implemented (2026-07-12)**. Both replaced a static `mode_reduces_balance` mode-flag with
+  `any(e.reason == "PAYMENT" for e in ledger_entries)`, reusing the already-fetched ledger rows —
+  no mode-based conditional anywhere. Confirmed correct for every mode via live tests: standard
+  tender restores, `AR_CREDIT` correctly does not, PDC-from-`IN_VAULT` correctly no-ops,
+  PDC-from-`DEPOSITED` correctly restores through *either* endpoint (`reverse_payment` had no
+  PDC-specific rejection and was already reachable on a deposited check — bundled per the
+  proposal's decision 3, not shipped as a follow-up).
+- [x] **One-time backfill — implemented (2026-07-12)**. New idempotent `main.py` seeder,
+  `_backfill_pdc_deposit_collection()`, re-deriving the proposal's four-part filter fresh on every
+  startup rather than a hardcoded ID. Live data: of 7 `DEPOSITED` PDC payments, exactly 1 (payment
+  95, ₱50.00) matched and was corrected; the other 6 were correctly left untouched (four already
+  correct from before the PDC payment mode's `is_ar_charge` flag was set, one already `Paid` via
+  that same pre-existing mechanism, one already `Voided` and independently closed out). Confirmed
+  idempotent across a second startup.
+- [x] **`_build_customer_transaction_ledger` fix — found live during verification, fixed same
+  pass (2026-07-12)**. Named in the proposal's own §1 problem statement but not addressed by its
+  §3 design — a third function with the identical static `is_ar_charge` exclusion, so a deposited
+  PDC sale showed collected on the `Sale` row but still `"Unpaid"` in the Transaction Ledger.
+  Confirmed with the user before fixing (outside the originally approved plan). Extended
+  `collection_rows`' filter to also count a `DEPOSITED` PDC payment as a collection; a still-
+  `IN_VAULT` one still correctly does not.
+- **Found, flagged, not fixed — pre-existing, unrelated gap in `reverse_payment`'s `AR_CREDIT`
+  handling.** Surfaced by this work's own regression test (reversing a Store Credit payment):
+  `reverse_payment`'s `ArLedger`-negation loop (untouched by this proposal) adds back the full
+  reversed amount to `outstanding_balance` regardless of `reason`, but `post_draft` deliberately
+  never folds an `AR_CREDIT` row's amount into `outstanding_balance` in the first place (only the
+  `SALE` row's own formula does — "the SALE entry offset against existing credit handles the net
+  balance"). Reversing an `AR_CREDIT` payment therefore adds back money never separately counted.
+  Different code path than anything this proposal changed; likely never exercised before since
+  `reverse_payment` had zero callers prior to this session. Left a ₱40 residual on a real seed
+  customer (test-caused, could not be cleaned up via any proper action — no endpoint adjusts
+  `outstanding_balance` directly) — documented in `docs/changelog.md`, not investigated further.
+- **Cleanup**: test payments reversed/bounced and test sales voided via proper endpoints; temporary
+  test accounts deactivated via `PATCH /auth/users/{id}/active`. Payment 95 stays fixed (a real
+  correction, not test data). The ₱40 `AR_CREDIT` residual above is the one exception, documented
+  rather than force-corrected.
 
 ---
 

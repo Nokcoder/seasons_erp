@@ -462,6 +462,7 @@ Table customer_payments {
   reversed_at datetime [note: 'Null unless reversed via POST /sales/payments/{id}/reverse. Never hard-deleted.']
   reversed_reason varchar [note: 'Required reason captured on reversal']
   reversed_by_user_id int [ref: > users.user_id]
+  idempotency_key varchar [unique, note: 'Prevents double-posting on network retries. Set by client. Same convention as sales.idempotency_key.']
 }
 
 Table customer_payment_applied {
@@ -488,6 +489,10 @@ Table sales_returns {
   created_by_user_id int [ref: > users.user_id]
   shift_id int [ref: > shifts.shift_id, note: 'optional — tags return to a shift for ledger filtering']
   register_id int [ref: > cash_registers.register_id, note: 'optional — tags return to a register for ledger filtering']
+  idempotency_key varchar [unique, note: 'Prevents double-posting on network retries. Set by client. Same convention as sales.idempotency_key.']
+  reversed_at datetime [note: 'Null unless reversed via POST /sales/returns/{id}/reverse. Never hard-deleted.']
+  reversed_reason varchar
+  reversed_by_user_id int [ref: > users.user_id]
 }
 
 Table sales_return_items {

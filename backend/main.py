@@ -138,6 +138,96 @@ def _seed_payment_mode_flags():
 _seed_payment_mode_flags()
 
 
+def _backfill_pdc_deposit_collection():
+    """One-time backfill: correct PDC payments deposited before deposit_pdc_check
+    wrote a collection effect (docs/pdc_deposit_collection_proposal.md §4).
+
+    Idempotent and self-limiting, safe to run on every startup: re-derives the
+    proposal's four-part filter fresh each run rather than targeting a specific
+    payment_id, so it only ever touches a DEPOSITED PDC payment that (a) has no
+    existing PAYMENT-reason ArLedger entry yet (predating this backfill or a
+    since-fixed deposit both correctly skip), applied to (b) a still-Posted sale
+    with (c) balance_due still open. Once a payment is corrected, condition (a)
+    permanently excludes it from matching again.
+    """
+    from decimal import Decimal
+    from core.database import SessionLocal
+    from core.audit import write_audit, _serialize
+    from sales.models import (
+        CustomerPayment, PaymentMode, CustomerPaymentApplied, Sale, Customer, ArLedger,
+    )
+
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(CustomerPayment)
+            .join(PaymentMode, CustomerPayment.payment_mode_id == PaymentMode.payment_mode_id)
+            .filter(
+                PaymentMode.is_pdc == True,
+                CustomerPayment.check_status == "DEPOSITED",
+            )
+            .all()
+        )
+        for payment in candidates:
+            has_payment_entry = db.query(ArLedger).filter(
+                ArLedger.reference_type == "customer_payments",
+                ArLedger.reference_id == str(payment.payment_id),
+                ArLedger.reason == "PAYMENT",
+            ).first()
+            if has_payment_entry:
+                continue
+
+            applications = db.query(CustomerPaymentApplied).filter(
+                CustomerPaymentApplied.payment_id == payment.payment_id,
+            ).all()
+            qualifying = []
+            for apply in applications:
+                sale = db.query(Sale).filter(Sale.sale_id == apply.sale_id).first()
+                if sale and sale.status == "Posted" and (sale.balance_due or Decimal("0")) > 0:
+                    qualifying.append((apply, sale))
+            if not qualifying:
+                continue
+
+            old_values = _serialize(payment)
+
+            if payment.customer_id:
+                db.add(ArLedger(
+                    customer_id=payment.customer_id,
+                    amount_change=-payment.amount,
+                    reason="PAYMENT",
+                    reference_type="customer_payments",
+                    reference_id=str(payment.payment_id),
+                    notes=(
+                        "One-time backfill: PDC deposit-collection fix "
+                        "(docs/pdc_deposit_collection_proposal.md) applied retroactively "
+                        "to a check deposited before the fix shipped."
+                    ),
+                ))
+                customer = db.query(Customer).filter(
+                    Customer.customer_id == payment.customer_id
+                ).first()
+                if customer:
+                    customer.outstanding_balance = (
+                        (customer.outstanding_balance or Decimal("0")) - payment.amount
+                    )
+
+            for apply, sale in qualifying:
+                sale.balance_due = max(
+                    (sale.balance_due or Decimal("0")) - apply.amount_applied, Decimal("0")
+                )
+                sale.payment_status = "Paid" if sale.balance_due <= 0 else "Partial"
+
+            write_audit(db, "sales.customer_payments", str(payment.payment_id), "UPDATE",
+                        actor_user_id=None,
+                        old_values=old_values,
+                        new_values=_serialize(payment))
+        db.commit()
+    finally:
+        db.close()
+
+_backfill_pdc_deposit_collection()
+
+
 def _seed_admin_user():
     """Idempotently create the initial ADMIN user from INIT_ADMIN_* env vars."""
     username = os.getenv("INIT_ADMIN_USERNAME")
@@ -234,6 +324,7 @@ def _seed_rbac():
             ("export_sales",           "Export Sales",             "sales_ledger"),
             ("view_returns",           "View Returns",             "sales_returns"),
             ("export_returns",         "Export Returns",           "sales_returns"),
+            ("reverse_return",         "Reverse Return",           "sales_returns"),
             # Inventory
             ("view_inventory",         "View Inventory",           "inventory_catalogue"),
             ("manage_products",        "Manage Products",          "inventory_catalogue"),
@@ -403,7 +494,7 @@ def _seed_rbac():
             "view_returns", "export_returns",
             "view_inventory",
             "view_stock_ledger",
-            "view_customers", "manage_customers", "reverse_customer_payment",
+            "view_customers", "manage_customers", "reverse_customer_payment", "reverse_return",
             "view_customer_aging", "export_customer_aging",
             "view_ar_ledger", "export_ar_ledger",
             "view_credit_memos", "issue_credit_memo", "cancel_credit_memo",

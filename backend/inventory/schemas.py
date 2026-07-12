@@ -282,6 +282,7 @@ class VariantUpdate(BaseModel):
     attributes: Optional[Dict[str, Any]] = None
     include_in_ordering: Optional[bool] = None
     is_phased_out: Optional[bool] = None
+    is_deleted: Optional[bool] = None  # deactivate/reactivate, same convention as SupplierPatch
 
 class BundleAvailableStock(BaseModel):
     """Computed available bundle count at one physical location."""

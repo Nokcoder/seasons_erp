@@ -13,6 +13,7 @@ import {
 import { normalize } from '../../lib/normalize'
 
 const onFocusSelect = (e: React.FocusEvent<HTMLInputElement>) => e.target.select()
+function uid() { return Math.random().toString(36).slice(2, 10) }
 
 function fmt(n: number | null | undefined) {
   if (n == null) return '—'
@@ -67,6 +68,7 @@ export default function ReturnNew() {
   const [saving,       setSaving]       = useState(false)
   const [error,        setError]        = useState('')
   const [returnDate,   setReturnDate]   = useState(todayManila)
+  const [returnKey,    setReturnKey]    = useState<string>(() => uid())
 
   // ── blind return item search ──────────────────────────────────────────────
   const [catalogSearch, setCatalogSearch] = useState('')
@@ -208,6 +210,7 @@ export default function ReturnNew() {
         disposition,
         reason:      reason.trim() || undefined,
         return_date: returnDate,
+        idempotency_key: returnKey,
         items:       activeLines.map(l => ({
           sale_item_id: l.sale_item_id,
           variant_id:   l.variant_id,
@@ -216,6 +219,7 @@ export default function ReturnNew() {
         })),
       })
       await qc.invalidateQueries({ queryKey: qk.salesReturns() })
+      setReturnKey(uid())
       navigate(`/sales/returns/${ret.return_id}`)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Return failed')

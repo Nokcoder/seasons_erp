@@ -247,6 +247,7 @@ class CustomerPayment(Base):
     reversed_reason      = Column(String(500), nullable=True)
     reversed_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"),
                                   nullable=True)
+    idempotency_key      = Column(String(255), unique=True, nullable=True)
 
     customer     = relationship("Customer")
     payment_mode = relationship("PaymentMode")
@@ -300,11 +301,17 @@ class SalesReturn(Base):
                                 nullable=True)
     register_id        = Column(Integer, ForeignKey("sales.cash_registers.register_id"),
                                 nullable=True)
+    idempotency_key    = Column(String(255), unique=True, nullable=True)
+    reversed_at          = Column(DateTime(timezone=True), nullable=True)
+    reversed_reason      = Column(String(500), nullable=True)
+    reversed_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"),
+                                  nullable=True)
 
     sale       = relationship("Sale")
     location   = relationship("Location")
     customer   = relationship("Customer", foreign_keys=[customer_id])
     created_by = relationship("User", foreign_keys=[created_by_user_id])
+    reversed_by = relationship("User", foreign_keys=[reversed_by_user_id])
     items      = relationship("SalesReturnItem", back_populates="sales_return",
                               cascade="all, delete-orphan")
 

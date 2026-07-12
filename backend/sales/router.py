@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, or_, and_
 
 from core.audit import write_audit, _serialize
 from core.database import get_db
@@ -469,7 +469,10 @@ def get_ar_aging(
 
     active_sale_ids = [r["sale_id"] for r in invoice_rows]
 
-    # 4. Payment offsets — non-AR-charge tenders only
+    # 4. Payment offsets — non-AR-charge tenders only, excluding reversed/bounced payments.
+    #    check_status is nullable (only ever set for PDC) — a bare `!= 'BOUNCED'` would, under
+    #    standard SQL NULL semantics, also exclude every non-PDC payment, so the NULL case is
+    #    handled explicitly (docs/return_reversal_proposal.md §4.2).
     payments_by_sale_id = dict(
         db.query(
             models.CustomerPaymentApplied.sale_id,
@@ -486,17 +489,23 @@ def get_ar_aging(
         .filter(
             models.CustomerPaymentApplied.sale_id.in_(active_sale_ids),
             models.PaymentMode.is_ar_charge == False,
+            models.CustomerPayment.reversed_at.is_(None),
+            or_(
+                models.CustomerPayment.check_status.is_(None),
+                models.CustomerPayment.check_status != "BOUNCED",
+            ),
         )
         .group_by(models.CustomerPaymentApplied.sale_id)
         .all()
     )
 
-    # 5. Return credit offsets — credit_to_account returns only
+    # 5. Return credit offsets — credit_to_account returns only, excluding reversed returns.
     returns_by_sale_id = dict(
         db.query(models.SalesReturn.sale_id, func.sum(models.SalesReturn.grand_total))
         .filter(
             models.SalesReturn.sale_id.in_(active_sale_ids),
             models.SalesReturn.disposition == "credit_to_account",
+            models.SalesReturn.reversed_at.is_(None),
         )
         .group_by(models.SalesReturn.sale_id)
         .all()
@@ -555,7 +564,17 @@ def get_customer_ar_ledger_view(
     db: Session = Depends(get_db),
 ):
     """Invoice-level AR ledger — one row per Posted sale with a linked customer,
-    sorted customer_name ASC then transaction_date ASC."""
+    sorted customer_name ASC then transaction_date ASC.
+
+    Bridge-table calculation (never reads sale.balance_due — same derivation as
+    get_ar_aging, adapted since this query already starts from Sale rows):
+      outstanding = sale.grand_total
+                  - SUM(customer_payment_applied.amount_applied WHERE NOT is_ar_charge)
+                  - SUM(sales_returns.grand_total WHERE disposition='credit_to_account')
+    sale.grand_total is used as "principal" rather than re-querying ArLedger for the
+    SALE row: post_draft writes that row as amount_change=grand_total (router.py:2129)
+    and grand_total is immutable after posting, so the two are always identical.
+    """
     today = datetime.now(timezone.utc).date()
     zero  = Decimal("0")
 
@@ -586,6 +605,50 @@ def get_customer_ar_ledger_view(
 
     raw_rows = q.limit(2000).all()
 
+    active_sale_ids = [sale.sale_id for sale in raw_rows]
+
+    # Payment offsets — non-AR-charge tenders only, excluding reversed/bounced payments
+    # (mirrors get_ar_aging step 4; NULL-safe check_status handling per §4.2 — see that
+    # function's comment for why a bare `!= 'BOUNCED'` would be wrong here).
+    payments_by_sale_id = dict(
+        db.query(
+            models.CustomerPaymentApplied.sale_id,
+            func.sum(models.CustomerPaymentApplied.amount_applied),
+        )
+        .join(
+            models.CustomerPayment,
+            models.CustomerPaymentApplied.payment_id == models.CustomerPayment.payment_id,
+        )
+        .join(
+            models.PaymentMode,
+            models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id,
+        )
+        .filter(
+            models.CustomerPaymentApplied.sale_id.in_(active_sale_ids),
+            models.PaymentMode.is_ar_charge == False,
+            models.CustomerPayment.reversed_at.is_(None),
+            or_(
+                models.CustomerPayment.check_status.is_(None),
+                models.CustomerPayment.check_status != "BOUNCED",
+            ),
+        )
+        .group_by(models.CustomerPaymentApplied.sale_id)
+        .all()
+    ) if active_sale_ids else {}
+
+    # Return credit offsets — credit_to_account returns only, excluding reversed returns
+    # (mirrors get_ar_aging step 5).
+    returns_by_sale_id = dict(
+        db.query(models.SalesReturn.sale_id, func.sum(models.SalesReturn.grand_total))
+        .filter(
+            models.SalesReturn.sale_id.in_(active_sale_ids),
+            models.SalesReturn.disposition == "credit_to_account",
+            models.SalesReturn.reversed_at.is_(None),
+        )
+        .group_by(models.SalesReturn.sale_id)
+        .all()
+    ) if active_sale_ids else {}
+
     norm_search = normalize_search(search) if search else None
     result: list[schemas.CustomerARLedgerRowOut] = []
     for sale in raw_rows:
@@ -596,8 +659,13 @@ def get_customer_ar_ledger_view(
 
         terms = customer.terms_days or 0
         due   = sale.transaction_date + timedelta(days=terms)
-        bal   = sale.balance_due or zero
-        total = sale.grand_total  or zero
+        total = sale.grand_total or zero
+        outstanding = (
+            total
+            - payments_by_sale_id.get(sale.sale_id, zero)
+            - returns_by_sale_id.get(sale.sale_id, zero)
+        )
+        bal = max(zero, outstanding)
 
         if bal <= zero:
             st = "Paid"
@@ -781,10 +849,13 @@ def _build_customer_transaction_ledger(customer_id: int, db: Session) -> list[di
 
     Scope: only Posted sales that were (at least partially) charged to this
     customer's AR balance via an AR Charge payment mode, plus every
-    collection payment subsequently applied against those sales. Cash/
-    non-credit sales are excluded entirely — they never carry an AR Charge
-    tender. Rows are sorted oldest to newest; the running balance starts
-    from zero since there is no earlier unshown balance to carry in.
+    collection payment subsequently applied against those sales, plus every
+    live (non-reversed) credit_to_account return credited against those sales
+    — shown with the return's own return_pid, not the underlying sale's, so
+    it reads as a return rather than another payment. Cash/non-credit sales
+    are excluded entirely — they never carry an AR Charge tender. Rows are
+    sorted oldest to newest; the running balance starts from zero since there
+    is no earlier unshown balance to carry in.
 
     Shared by the paginated `GET .../transaction-ledger` endpoint (which
     slices this by `seq`/`limit`) and the `GET .../transaction-ledger/export`
@@ -824,6 +895,12 @@ def _build_customer_transaction_ledger(customer_id: int, db: Session) -> list[di
 
     # Collection payments applied against those same sales — excludes the
     # AR Charge tender itself, which is the debit above, not a collection.
+    # PDC is also is_ar_charge (deliberately — a postdated check isn't
+    # collected merely by being tendered), but it does have its own real
+    # clearing event: once deposit_pdc_check marks one DEPOSITED it has
+    # written the same PAYMENT-reason ArLedger effect a standard tender
+    # writes at post time (docs/pdc_deposit_collection_proposal.md), so it
+    # counts as a collection here too. A still-IN_VAULT PDC payment does not.
     collection_rows = (
         db.query(models.CustomerPaymentApplied, models.CustomerPayment)
         .join(models.CustomerPayment,
@@ -832,20 +909,48 @@ def _build_customer_transaction_ledger(customer_id: int, db: Session) -> list[di
               models.CustomerPayment.payment_mode_id == models.PaymentMode.payment_mode_id)
         .filter(
             models.CustomerPaymentApplied.sale_id.in_(ar_sale_ids),
-            models.PaymentMode.is_ar_charge == False,
+            or_(
+                models.PaymentMode.is_ar_charge == False,
+                and_(
+                    models.PaymentMode.is_pdc == True,
+                    models.CustomerPayment.check_status == "DEPOSITED",
+                ),
+            ),
         )
         .all()
     )
 
-    # Per-sale total of collections applied — drives the per-sale Status
-    # column. This is intentionally scoped to amounts applied against THIS
-    # sale_id only, not the customer's overall balance: a sale is Paid when
-    # payments specifically applied to it cover its own AR-charged debit,
-    # independent of what's happening on the customer's other sales.
+    # credit_to_account returns against those same sales — a return never
+    # creates a CustomerPayment/CustomerPaymentApplied row (only cash_refund
+    # does, an unrelated path), so it has to be sourced from SalesReturn
+    # directly. Excludes reversed returns, consistent with the
+    # returns_by_sale_id bridge-table fix (get_ar_aging /
+    # get_customer_ar_ledger_view) — a reversed return's credit is no longer
+    # live and shouldn't appear as one here either.
+    return_credit_rows = (
+        db.query(models.SalesReturn)
+        .filter(
+            models.SalesReturn.sale_id.in_(ar_sale_ids),
+            models.SalesReturn.disposition == "credit_to_account",
+            models.SalesReturn.reversed_at.is_(None),
+        )
+        .all()
+    )
+
+    # Per-sale total of collections + return credits applied — drives the
+    # per-sale Status column. This is intentionally scoped to amounts applied
+    # against THIS sale_id only, not the customer's overall balance: a sale is
+    # Paid when payments/credits specifically applied to it cover its own
+    # AR-charged debit, independent of what's happening on the customer's
+    # other sales.
     applied_by_sale: dict[int, Decimal] = {}
     for applied, _payment in collection_rows:
         applied_by_sale[applied.sale_id] = (
             applied_by_sale.get(applied.sale_id, Decimal("0")) + applied.amount_applied
+        )
+    for r in return_credit_rows:
+        applied_by_sale[r.sale_id] = (
+            applied_by_sale.get(r.sale_id, Decimal("0")) + r.grand_total
         )
 
     entries = []
@@ -883,6 +988,18 @@ def _build_customer_transaction_ledger(customer_id: int, db: Session) -> list[di
             "debit": Decimal("0"),
             "credit": applied.amount_applied,
             "status": "Payment",
+        })
+    for r in return_credit_rows:
+        entries.append({
+            "sort_key": (r.return_date, 1, r.return_id),
+            "date": r.return_date,
+            "type": "RETURN",
+            "sale_id": r.sale_id,
+            "payment_id": None,
+            "sales_id": r.return_pid or f"RET-{r.return_id:05d}",
+            "debit": Decimal("0"),
+            "credit": r.grand_total,
+            "status": "Return",
         })
 
     entries.sort(key=lambda e: e["sort_key"])
@@ -948,6 +1065,16 @@ def record_customer_payment(
     """Record a standalone customer payment — reduces outstanding_balance via AR ledger."""
     customer = _load_customer(customer_id, db)
 
+    # Idempotency: return existing payment if the key is already in use
+    if payload.idempotency_key:
+        existing = (
+            db.query(models.CustomerPayment)
+            .filter(models.CustomerPayment.idempotency_key == payload.idempotency_key)
+            .first()
+        )
+        if existing:
+            return _load_payment(existing.payment_id, db)
+
     mode = db.query(models.PaymentMode).filter(
         models.PaymentMode.payment_mode_id == payload.payment_mode_id,
         models.PaymentMode.is_active == True,
@@ -970,6 +1097,7 @@ def record_customer_payment(
         notes=payload.notes,
         payment_date=payload.payment_date or datetime.now(timezone.utc),
         unapplied_amount=Decimal("0") if payload.sale_id else payload.amount,
+        idempotency_key=payload.idempotency_key,
     )
     if mode.is_pdc:
         payment.check_number = payload.check_number
@@ -991,14 +1119,19 @@ def record_customer_payment(
             sale_id=payload.sale_id,
             amount_applied=payload.amount,
         ))
-        new_balance = max(Decimal("0"), (sale.balance_due or Decimal("0")) - payload.amount)
-        sale.balance_due = new_balance
-        if new_balance <= Decimal("0"):
-            sale.payment_status = "Paid"
-        elif new_balance < (sale.grand_total or Decimal("0")):
-            sale.payment_status = "Partial"
-        else:
-            sale.payment_status = "Unpaid"
+        # is_ar_charge/is_ar_credit modes are excluded from standard_applied at
+        # post time, so they must not reduce balance_due here either — same
+        # guard as _apply_and_update, kept API-safe even though this mode
+        # combination is unreachable via the current UI.
+        if not (mode.is_ar_charge or mode.is_ar_credit):
+            new_balance = max(Decimal("0"), (sale.balance_due or Decimal("0")) - payload.amount)
+            sale.balance_due = new_balance
+            if new_balance <= Decimal("0"):
+                sale.payment_status = "Paid"
+            elif new_balance < (sale.grand_total or Decimal("0")):
+                sale.payment_status = "Partial"
+            else:
+                sale.payment_status = "Unpaid"
 
     db.add(models.ArLedger(
         customer_id=customer_id,
@@ -1016,7 +1149,19 @@ def record_customer_payment(
     write_audit(db, "sales.customer_payments", str(payment.payment_id), "INSERT",
                 actor_user_id=_actor.user_id,
                 new_values=_serialize(payment))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "customer_payments_idempotency_key_key" in str(e.orig):
+            existing = (
+                db.query(models.CustomerPayment)
+                .filter(models.CustomerPayment.idempotency_key == payload.idempotency_key)
+                .first()
+            )
+            if existing:
+                return _load_payment(existing.payment_id, db)
+        raise
     return _load_payment(payment.payment_id, db)
 
 
@@ -1153,6 +1298,29 @@ def get_pdc_vault(
     return schemas.PDCMaturityResponse(summary=summary, entries=entries)
 
 
+def _reject_if_linked_to_voided_sale(
+    payment: models.CustomerPayment, db: Session, action: str,
+) -> None:
+    """Block a payment action (PDC deposit/bounce, reversal) if any sale this
+    payment is applied to has been voided — void_sale already reverses
+    everything else about that sale, so there's nothing legitimate left for
+    a payment-side action to do here. Without this, restoring balance_due on
+    an already-Voided sale leaves it contradictorily stateful (Voided, but
+    balance_due/payment_status reading as if still active)."""
+    sale_ids = [a.sale_id for a in payment.applications]
+    if not sale_ids:
+        return
+    has_voided = db.query(models.Sale).filter(
+        models.Sale.sale_id.in_(sale_ids),
+        models.Sale.status == "Voided",
+    ).first()
+    if has_voided:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot {action} this payment — its originating sale has been voided",
+        )
+
+
 @router.patch("/pdc/{payment_id}/deposit", response_model=schemas.CustomerPaymentOut)
 def deposit_pdc_check(
     payment_id: int,
@@ -1160,7 +1328,14 @@ def deposit_pdc_check(
     db: Session = Depends(get_db),
     _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
-    """Mark a PDC cheque as deposited and update its payment date to the actual deposit date."""
+    """Mark a PDC cheque as deposited — the collection event for a postdated check.
+
+    Writes the same ArLedger PAYMENT entry and balance_due/payment_status reduction
+    a standard tender writes at post time (post_draft), just deferred to deposit
+    time for PDC — see docs/pdc_deposit_collection_proposal.md. Before this, deposit
+    only ever changed check_status/payment_date, so a PDC-tendered sale never showed
+    as collected even after the check cleared.
+    """
     payment = (
         db.query(models.CustomerPayment)
         .options(
@@ -1179,6 +1354,36 @@ def deposit_pdc_check(
             status_code=400,
             detail=f"Cannot deposit check with status '{payment.check_status}'",
         )
+    _reject_if_linked_to_voided_sale(payment, db, action="deposit")
+
+    old_values = _serialize(payment)
+
+    if payment.customer_id:
+        db.add(models.ArLedger(
+            customer_id=payment.customer_id,
+            amount_change=-payment.amount,
+            reason="PAYMENT",
+            reference_type="customer_payments",
+            reference_id=str(payment_id),
+        ))
+        customer = db.query(models.Customer).filter(
+            models.Customer.customer_id == payment.customer_id
+        ).first()
+        if customer:
+            customer.outstanding_balance = (
+                (customer.outstanding_balance or Decimal("0")) - payment.amount
+            )
+
+    for apply in payment.applications:
+        sale = db.query(models.Sale).filter(
+            models.Sale.sale_id == apply.sale_id
+        ).first()
+        if not sale:
+            continue
+        sale.balance_due = max(
+            (sale.balance_due or Decimal("0")) - apply.amount_applied, Decimal("0")
+        )
+        sale.payment_status = "Paid" if sale.balance_due <= 0 else "Partial"
 
     payment.check_status = "DEPOSITED"
     payment.payment_date = datetime(
@@ -1190,8 +1395,8 @@ def deposit_pdc_check(
 
     write_audit(db, "sales.customer_payments", str(payment_id), "UPDATE",
                 actor_user_id=_actor.user_id,
-                new_values={"check_status": "DEPOSITED",
-                            "deposited_at": str(payload.deposited_at)})
+                old_values=old_values,
+                new_values=_serialize(payment))
     db.commit()
     return _load_payment(payment_id, db)
 
@@ -1203,7 +1408,13 @@ def bounce_pdc_check(
     db: Session = Depends(get_db),
     _actor: AuthUser = Depends(require_permission("manage_customers")),
 ):
-    """Mark a PDC cheque as bounced and reverse all applied payments against their sales."""
+    """Mark a PDC cheque as bounced and reverse all applied payments against their sales.
+
+    Accepts checks in either IN_VAULT or DEPOSITED status — a check realistically
+    bounces after being deposited (submitted to the bank), not just while sitting
+    in the vault. Deposit itself only ever changes check_status/payment_date, so
+    the reversal logic is identical for either originating status.
+    """
     payment = (
         db.query(models.CustomerPayment)
         .options(
@@ -1217,11 +1428,12 @@ def bounce_pdc_check(
         raise HTTPException(status_code=404, detail="Payment not found")
     if not payment.payment_mode.is_pdc:
         raise HTTPException(status_code=400, detail="Payment is not a PDC payment")
-    if payment.check_status != "IN_VAULT":
+    if payment.check_status not in ("IN_VAULT", "DEPOSITED"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot bounce check with status '{payment.check_status}'",
         )
+    _reject_if_linked_to_voided_sale(payment, db, action="bounce")
 
     customer = None
     if payment.customer_id:
@@ -1270,22 +1482,31 @@ def bounce_pdc_check(
     # ── Restore balance_due/payment_status on every sale this payment touched ──
     # ArLedger rows don't carry sale linkage, so this still has to come from
     # CustomerPaymentApplied — unaffected by the bug above either way.
-    for apply in payment.applications:
-        sale = db.query(models.Sale).filter(
-            models.Sale.sale_id == apply.sale_id
-        ).first()
-        if not sale:
-            continue
+    # Only restore if this payment actually had a PAYMENT-reason ArLedger entry
+    # reversed above — origin-agnostic, not mode-based: correctly covers a
+    # standard tender (always has one), a bounce from IN_VAULT (never had one,
+    # nothing to restore), a bounce from DEPOSITED (deposit_pdc_check now
+    # writes one), and AR Credit (writes reason="AR_CREDIT", not "PAYMENT",
+    # so it correctly stays excluded — see docs/pdc_deposit_collection_proposal.md §2.2
+    # for why a bare "any row exists" check would be wrong here).
+    restore_balance = any(e.reason == "PAYMENT" for e in ledger_entries)
+    if restore_balance:
+        for apply in payment.applications:
+            sale = db.query(models.Sale).filter(
+                models.Sale.sale_id == apply.sale_id
+            ).first()
+            if not sale:
+                continue
 
-        new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
-        sale.balance_due = new_balance
-        gt = sale.grand_total or Decimal("0")
-        if new_balance >= gt:
-            sale.payment_status = "Unpaid"
-        elif new_balance > Decimal("0"):
-            sale.payment_status = "Partial"
-        else:
-            sale.payment_status = "Paid"
+            new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
+            sale.balance_due = new_balance
+            gt = sale.grand_total or Decimal("0")
+            if new_balance >= gt:
+                sale.payment_status = "Unpaid"
+            elif new_balance > Decimal("0"):
+                sale.payment_status = "Partial"
+            else:
+                sale.payment_status = "Paid"
 
     payment.check_status = "BOUNCED"
     if customer:
@@ -2635,6 +2856,7 @@ def _apply_and_update(
     payment_id: int,
     amount_to_apply: Decimal,
     customer_id: Optional[int],
+    mode_reduces_balance: bool,
     ledger_amount: Optional[Decimal] = None,
 ) -> None:
     """Create a CustomerPaymentApplied row, update the sale's balance/status,
@@ -2644,17 +2866,27 @@ def _apply_and_update(
 
     `ledger_amount` can be less than `amount_to_apply` (or 0) when part of
     what's being applied was already reflected in the ledger before this
-    call — see apply_unapplied_payment. The CustomerPaymentApplied row and
-    sale balance/status always reflect the full `amount_to_apply` regardless;
-    only the ledger write is affected.
+    call — see apply_unapplied_payment. The CustomerPaymentApplied row
+    always reflects the full `amount_to_apply` regardless; only the ledger
+    write is affected.
+
+    `mode_reduces_balance` — False for is_ar_charge/is_ar_credit payment
+    modes. post_draft excludes those from standard_applied (balance_due
+    reflects only cash/card actually collected), so applying one here must
+    not reduce balance_due either — otherwise reverse_payment/bounce_pdc_check
+    would later "restore" an amount that was never subtracted, corrupting it.
+    Callers are UI-unreachable for these modes today (the standalone-payment
+    screens filter them out of their dropdowns) but the API itself doesn't
+    block them, so this is enforced here regardless of caller.
     """
     db.add(models.CustomerPaymentApplied(
         payment_id=payment_id,
         sale_id=sale.sale_id,
         amount_applied=amount_to_apply,
     ))
-    sale.balance_due = max(sale.balance_due - amount_to_apply, Decimal("0"))
-    sale.payment_status = "Paid" if sale.balance_due <= 0 else "Partial"
+    if mode_reduces_balance:
+        sale.balance_due = max(sale.balance_due - amount_to_apply, Decimal("0"))
+        sale.payment_status = "Paid" if sale.balance_due <= 0 else "Partial"
 
     ledger_amount = amount_to_apply if ledger_amount is None else ledger_amount
     if customer_id and ledger_amount > 0:
@@ -2678,6 +2910,16 @@ def create_payment(
     `applications` is optional; an unapplied payment is valid and can be
     applied later via POST /sales/payments/{id}/apply.
     """
+    # Idempotency: return existing payment if the key is already in use
+    if payload.idempotency_key:
+        existing = (
+            db.query(models.CustomerPayment)
+            .filter(models.CustomerPayment.idempotency_key == payload.idempotency_key)
+            .first()
+        )
+        if existing:
+            return _load_payment(existing.payment_id, db)
+
     # Validate customer
     customer = None
     if payload.customer_id:
@@ -2689,13 +2931,21 @@ def create_payment(
             raise HTTPException(status_code=404, detail="Customer not found")
 
     # Validate payment mode
-    if not db.query(models.PaymentMode).filter(
+    mode = db.query(models.PaymentMode).filter(
         models.PaymentMode.payment_mode_id == payload.payment_mode_id,
         models.PaymentMode.is_active == True,
-    ).first():
+    ).first()
+    if not mode:
         raise HTTPException(
             status_code=400, detail="Payment mode not found or inactive"
         )
+    if mode.is_pdc:
+        if not (payload.check_number and payload.check_date and payload.bank_name):
+            raise HTTPException(
+                status_code=400,
+                detail="PDC payment requires check_number, check_date, and bank_name.",
+            )
+    mode_reduces_balance = not (mode.is_ar_charge or mode.is_ar_credit)
 
     # Total applications must not exceed the payment amount
     if payload.applications:
@@ -2714,9 +2964,18 @@ def create_payment(
         customer_id=payload.customer_id,
         payment_mode_id=payload.payment_mode_id,
         amount=payload.amount,
+        payment_date=payload.payment_date or datetime.now(timezone.utc),
         reference_number=payload.reference_number,
+        collection_receipt_no=payload.collection_receipt_no,
+        notes=payload.notes,
         unapplied_amount=payload.amount,
+        idempotency_key=payload.idempotency_key,
     )
+    if mode.is_pdc:
+        payment.check_number = payload.check_number
+        payment.check_date   = payload.check_date
+        payment.bank_name    = payload.bank_name
+        payment.check_status = "IN_VAULT"
     db.add(payment)
     db.flush()  # materialise payment_id
 
@@ -2741,25 +3000,53 @@ def create_payment(
                 ),
             )
 
+        # ledger_amount=0: this loop's ArLedger write is suppressed here and
+        # replaced by a single full-amount PAYMENT row below, so a
+        # create_payment-originated payment reconciles with
+        # apply_unapplied_payment's already_reduced/already_applied/surplus
+        # math (router.py:3032) exactly the way a record_customer_payment-
+        # originated one already does — one ledger row for the full amount
+        # collected, regardless of how many sales it's split across.
         _apply_and_update(
-            db, sale, payment.payment_id, app.amount_applied, payload.customer_id
+            db, sale, payment.payment_id, app.amount_applied, payload.customer_id,
+            mode_reduces_balance=mode_reduces_balance,
+            ledger_amount=Decimal("0"),
         )
         total_applied += app.amount_applied
 
     payment.unapplied_amount = payment.amount - total_applied
 
-    if customer and total_applied > 0:
+    if customer:
+        db.add(models.ArLedger(
+            customer_id=customer.customer_id,
+            amount_change=-payload.amount,
+            reason="PAYMENT",
+            reference_type="customer_payments",
+            reference_id=str(payment.payment_id),
+            notes=payload.notes,
+        ))
         customer.outstanding_balance = (
-            (customer.outstanding_balance or Decimal("0")) - total_applied
+            (customer.outstanding_balance or Decimal("0")) - payload.amount
         )
 
-    db.commit()
-    payment_loaded = _load_payment(payment.payment_id, db)
+    try:
+        db.flush()
+    except IntegrityError as e:
+        db.rollback()
+        if "customer_payments_idempotency_key_key" in str(e.orig):
+            existing = (
+                db.query(models.CustomerPayment)
+                .filter(models.CustomerPayment.idempotency_key == payload.idempotency_key)
+                .first()
+            )
+            if existing:
+                return _load_payment(existing.payment_id, db)
+        raise
     write_audit(db, "sales.customer_payments", str(payment.payment_id), "INSERT",
                 actor_user_id=_actor.user_id,
-                new_values=_serialize(payment_loaded))
+                new_values=_serialize(payment))
     db.commit()
-    return payment_loaded
+    return _load_payment(payment.payment_id, db)
 
 
 @router.get("/payments", response_model=List[schemas.CustomerPaymentOut])
@@ -2865,8 +3152,12 @@ def apply_unapplied_payment(
     already_counted = min(amount_to_apply, surplus)
     new_amount = amount_to_apply - already_counted
 
+    mode_reduces_balance = not (
+        payment.payment_mode.is_ar_charge or payment.payment_mode.is_ar_credit
+    )
     _apply_and_update(
         db, sale, payment_id, amount_to_apply, payment.customer_id,
+        mode_reduces_balance=mode_reduces_balance,
         ledger_amount=new_amount,
     )
     payment.unapplied_amount = unapplied - amount_to_apply
@@ -2904,6 +3195,11 @@ def reverse_payment(
     Any linked sale's balance_due/payment_status is restored the same way
     bounce_pdc_check restores it, and the CustomerPaymentApplied rows are left
     in place as history — nothing here is hard-deleted.
+
+    Rejects if any linked sale has already been Voided — same guard
+    deposit_pdc_check/bounce_pdc_check already use (_reject_if_linked_to_voided_sale).
+    Without it, restoring balance_due here would leave the sale contradictorily
+    stateful: Voided, but balance_due/payment_status reading as if still active.
     """
     if not (payload.reversal_reason and payload.reversal_reason.strip()):
         raise HTTPException(status_code=400, detail="reversal_reason is required")
@@ -2926,6 +3222,7 @@ def reverse_payment(
                 "be left permanently redeemed. Contact an administrator."
             ),
         )
+    _reject_if_linked_to_voided_sale(payment, db, action="reverse")
 
     old_values = _serialize(payment)
 
@@ -2962,21 +3259,31 @@ def reverse_payment(
 
     # ── Restore balance_due/payment_status on every sale this payment touched ──
     # Applications are preserved, not deleted — same as bounce_pdc_check.
-    for apply in payment.applications:
-        sale = db.query(models.Sale).filter(
-            models.Sale.sale_id == apply.sale_id
-        ).first()
-        if not sale:
-            continue
-        new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
-        sale.balance_due = new_balance
-        gt = sale.grand_total or Decimal("0")
-        if new_balance >= gt:
-            sale.payment_status = "Unpaid"
-        elif new_balance > Decimal("0"):
-            sale.payment_status = "Partial"
-        else:
-            sale.payment_status = "Paid"
+    # Only restore if this payment actually had a PAYMENT-reason ArLedger entry
+    # reversed above — origin-agnostic, not mode-based (same fix as
+    # bounce_pdc_check, same reasoning — see
+    # docs/pdc_deposit_collection_proposal.md §2.2): correctly covers a standard
+    # tender (always has one), a reversed PDC payment that was never deposited
+    # (nothing to restore) or was deposited (deposit_pdc_check now writes one),
+    # and AR Credit (writes reason="AR_CREDIT", not "PAYMENT", so it correctly
+    # stays excluded).
+    restore_balance = any(e.reason == "PAYMENT" for e in ledger_entries)
+    if restore_balance:
+        for apply in payment.applications:
+            sale = db.query(models.Sale).filter(
+                models.Sale.sale_id == apply.sale_id
+            ).first()
+            if not sale:
+                continue
+            new_balance = (sale.balance_due or Decimal("0")) + apply.amount_applied
+            sale.balance_due = new_balance
+            gt = sale.grand_total or Decimal("0")
+            if new_balance >= gt:
+                sale.payment_status = "Unpaid"
+            elif new_balance > Decimal("0"):
+                sale.payment_status = "Partial"
+            else:
+                sale.payment_status = "Paid"
 
     payment.reversed_at         = datetime.now(timezone.utc)
     payment.reversed_reason     = payload.reversal_reason
@@ -3010,6 +3317,17 @@ def _load_return(return_id: int, db: Session) -> models.SalesReturn:
         raise HTTPException(status_code=404, detail="Return not found")
     _attach_exchange(ret, db)
     return ret
+
+
+def _load_exchange_result(return_id: int, db: Session) -> "schemas.ExchangeResult":
+    """Build the { sales_return, exchange_draft } response for a return that
+    already has a paired exchange Sale (via origin_sale_id)."""
+    ret_loaded = _load_return(return_id, db)
+    exc_loaded = _load_sale(ret_loaded.exchange_sale_id, db)
+    out = schemas.SaleOut.model_validate(exc_loaded)
+    out.items = []
+    out.payments = []
+    return schemas.ExchangeResult(sales_return=ret_loaded, exchange_draft=out)
 
 
 def _attach_exchange(ret: models.SalesReturn, db: Session) -> None:
@@ -3124,6 +3442,7 @@ def _do_return(
         created_by_user_id=current_user.user_id,
         shift_id=payload.shift_id,
         register_id=payload.register_id,
+        idempotency_key=payload.idempotency_key,
     )
     db.add(sales_return)
     db.flush()
@@ -3252,6 +3571,16 @@ def create_return_and_exchange(
     if not payload.sale_id:
         raise HTTPException(status_code=400, detail="sale_id is required for exchange flow")
 
+    # Idempotency: return the existing return + its paired exchange if the key is already in use
+    if payload.idempotency_key:
+        existing_return = (
+            db.query(models.SalesReturn)
+            .filter(models.SalesReturn.idempotency_key == payload.idempotency_key)
+            .first()
+        )
+        if existing_return:
+            return _load_exchange_result(existing_return.return_id, db)
+
     # Guard: only one active exchange per original sale
     existing = (
         db.query(models.Sale.sale_id)
@@ -3289,7 +3618,19 @@ def create_return_and_exchange(
     db.add(exchange)
     db.flush()
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "sales_returns_idempotency_key_key" in str(e.orig):
+            existing_return = (
+                db.query(models.SalesReturn)
+                .filter(models.SalesReturn.idempotency_key == payload.idempotency_key)
+                .first()
+            )
+            if existing_return:
+                return _load_exchange_result(existing_return.return_id, db)
+        raise
 
     ret_loaded = _load_return(sales_return.return_id, db)
     write_audit(db, "sales.sales_returns", str(sales_return.return_id), "INSERT",
@@ -3318,8 +3659,30 @@ def create_return(
     For blind returns (no sale_id): location_id is required and the caller must
     hold the process_blind_returns permission.
     """
+    # Idempotency: return existing return if the key is already in use
+    if payload.idempotency_key:
+        existing_return = (
+            db.query(models.SalesReturn)
+            .filter(models.SalesReturn.idempotency_key == payload.idempotency_key)
+            .first()
+        )
+        if existing_return:
+            return _load_return(existing_return.return_id, db)
+
     sales_return = _do_return(payload, current_user, db)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if "sales_returns_idempotency_key_key" in str(e.orig):
+            existing_return = (
+                db.query(models.SalesReturn)
+                .filter(models.SalesReturn.idempotency_key == payload.idempotency_key)
+                .first()
+            )
+            if existing_return:
+                return _load_return(existing_return.return_id, db)
+        raise
     ret_loaded = _load_return(sales_return.return_id, db)
     write_audit(db, "sales.sales_returns", str(sales_return.return_id), "INSERT",
                 actor_user_id=current_user.user_id, new_values=_serialize(ret_loaded))
@@ -3388,6 +3751,151 @@ def get_return(
     _actor: AuthUser = Depends(require_permission("view_returns")),
 ):
     """Get a single sales return with its line items and exchange_sale_pid."""
+    return _load_return(return_id, db)
+
+
+@router.post("/returns/{return_id}/reverse", response_model=schemas.SalesReturnOut)
+def reverse_return(
+    return_id: int,
+    payload: schemas.ReturnReversalRequest,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("reverse_return")),
+):
+    """Reverse a sales return in full — never partial (docs/return_reversal_proposal.md §7).
+
+    Origin-agnostic by design, same technique as void_sale/reverse_payment: reads the
+    actual InventoryLedger/ArLedger rows this return wrote (reference_type='sales_returns',
+    reference_id=str(return_id)) and negates exactly those, rather than re-deriving what
+    "should" have happened. This is what makes it safe to reverse even a return that hit
+    the known bundle-variant phantom-stock bug (docs/returns_ground_truth.md §1) without
+    needing that bug fixed first — it only ever undoes what was actually written.
+
+    A return never touches the original sale's balance_due/status (confirmed in
+    docs/returns_ground_truth.md §2), so there is nothing sale-status-dependent to restore
+    and no precondition on the linked sale's status here.
+    """
+    if not (payload.reversal_reason and payload.reversal_reason.strip()):
+        raise HTTPException(status_code=400, detail="reversal_reason is required")
+
+    ret = _load_return(return_id, db)
+
+    if ret.reversed_at is not None:
+        raise HTTPException(status_code=400, detail="Return has already been reversed")
+
+    # ── Exchange-linked returns excluded from v1 (proposal §5) ─────────────────
+    # _attach_exchange (already called by _load_return) populates exchange_sale_id from
+    # any Sale with origin_sale_id == ret.sale_id AND status != 'Voided' — Draft counts,
+    # so an abandoned draft still blocks reversal until it's deleted, same as it still
+    # blocks a second exchange attempt (:3470-3480's own guard).
+    if ret.exchange_sale_id is not None:
+        exchange_sale = db.query(models.Sale).filter(
+            models.Sale.sale_id == ret.exchange_sale_id
+        ).first()
+        if exchange_sale and exchange_sale.status == "Draft":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"An active exchange draft ({exchange_sale.sale_pid or 'unposted'}) "
+                    f"exists for this return; delete the draft first."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"An active exchange sale ({exchange_sale.sale_pid if exchange_sale else ret.exchange_sale_pid}) "
+                f"exists for this return; void it first."
+            ),
+        )
+
+    old_values = _serialize(ret)
+    ref_id = str(return_id)
+
+    # ── 1. Reverse inventory: negate exactly what this return's items wrote ────────
+    for item in ret.items:
+        variant_obj = (
+            db.query(inv_models.Variant)
+            .options(selectinload(inv_models.Variant.product))
+            .filter(inv_models.Variant.variant_id == item.variant_id)
+            .first()
+        )
+        if not variant_obj or variant_obj.product.product_type in ("Non-Inventory", "Service"):
+            continue
+        db.add(inv_models.InventoryLedger(
+            variant_id=item.variant_id,
+            location_id=ret.location_id,
+            qty_change=-item.quantity,
+            reason=inv_models.LedgerReason.RETURN_OUT,
+            reference_type="sales_returns",
+            reference_id=ref_id,
+        ))
+        _upsert_stock(db, item.variant_id, ret.location_id, -item.quantity)
+        if item.cost_layer_id is not None:
+            layer = (
+                db.query(inv_models.CostLayer)
+                .filter(inv_models.CostLayer.layer_id == item.cost_layer_id)
+                .with_for_update()
+                .first()
+            )
+            if layer:
+                layer.quantity_remaining = max(
+                    layer.quantity_remaining - item.quantity,
+                    Decimal("0"),
+                )
+
+    # ── 2. Reverse whatever this return's AR ledger rows actually did ──────────────
+    ledger_entries = db.query(models.ArLedger).filter(
+        models.ArLedger.reference_type == "sales_returns",
+        models.ArLedger.reference_id == ref_id,
+    ).all()
+
+    total_delta = Decimal("0")
+    for entry in ledger_entries:
+        reversal_amount = -entry.amount_change
+        db.add(models.ArLedger(
+            customer_id=ret.customer_id,
+            amount_change=reversal_amount,
+            reason="ADJUSTMENT",
+            reference_type="sales_returns",
+            reference_id=ref_id,
+            notes=f"Reversal of return #{return_id} ({entry.reason}): {payload.reversal_reason}",
+        ))
+        total_delta += reversal_amount
+
+    if ret.customer_id:
+        customer = db.query(models.Customer).filter(
+            models.Customer.customer_id == ret.customer_id
+        ).first()
+        if customer:
+            customer.outstanding_balance = (
+                (customer.outstanding_balance or Decimal("0")) + total_delta
+            )
+
+    # ── 3. Cash-refund CustomerPayment (path 4), if one exists ─────────────────────
+    # Not reversed via reverse_payment — its CustomerPaymentApplied row was inserted
+    # directly by _do_return, bypassing _apply_and_update, so sale.balance_due was never
+    # touched at creation and reverse_payment's restoration step would corrupt it if
+    # reused here (docs/return_reversal_proposal.md §4.1). The return's own ArLedger
+    # entries above already fully cover this payment's customer-level effect — all that's
+    # needed is to flag it reversed so it stops being counted live (see the
+    # payments_by_sale_id fix on get_ar_aging/get_customer_ar_ledger_view).
+    refund_payment = db.query(models.CustomerPayment).filter(
+        models.CustomerPayment.notes == f"Cash refund for return #{return_id}",
+    ).first()
+    if refund_payment is not None and refund_payment.reversed_at is None:
+        refund_payment.reversed_at         = datetime.now(timezone.utc)
+        refund_payment.reversed_reason     = f"Reversal of return #{return_id}: {payload.reversal_reason}"
+        refund_payment.reversed_by_user_id = _actor.user_id
+
+    # ── 4. Flag the return itself ───────────────────────────────────────────────────
+    ret.reversed_at         = datetime.now(timezone.utc)
+    ret.reversed_reason     = payload.reversal_reason
+    ret.reversed_by_user_id = _actor.user_id
+
+    write_audit(db, "sales.sales_returns", str(return_id), "UPDATE",
+                actor_user_id=_actor.user_id,
+                old_values=old_values,
+                new_values=_serialize(ret))
+    db.commit()
     return _load_return(return_id, db)
 
 

@@ -1,5 +1,775 @@
 # Changelog
 
+## 2026-07-12 — Feature: PDC deposit as the collection event
+
+Implements `docs/pdc_deposit_collection_proposal.md` (§2–§5, decisions finalized in §6) in full,
+plus one gap discovered live during verification and fixed in the same pass. Before this,
+depositing a postdated check — even one that clears without incident — never marked anything as
+collected anywhere in this codebase: `Sale.balance_due`/`payment_status`, `customer.
+outstanding_balance`, and the Customer Transaction Ledger's own derived status all stayed
+permanently `Unpaid`/uncollected for a PDC-only-tendered sale, forever, unless some unrelated
+later payment or return credit happened to be applied against it.
+
+### `backend/sales/router.py` — `deposit_pdc_check` now writes the collection effect
+
+Mirrors exactly what a standard tender writes at `post_draft` time, deferred to deposit time for
+PDC: one `ArLedger(reason="PAYMENT", amount_change=-payment.amount)` row (if a customer is linked),
+`customer.outstanding_balance -= payment.amount`, and per linked sale,
+`balance_due = max(balance_due - amount_applied, 0)` /
+`payment_status = "Paid" if balance_due <= 0 else "Partial"` — the same two-branch shape
+`_apply_and_update` already uses for every other reducing-direction application (deliberately not
+the three-branch `Paid`/`Partial`/`Unpaid` restore shape used by `bounce_pdc_check`/
+`reverse_payment`, which *restore* balance upward and can legitimately land back at `Unpaid`;
+deposit only ever reduces by a positive amount, so it never can). Single transaction, unchanged
+structurally from the existing `check_status`/`payment_date` write. The existing `write_audit`
+call was upgraded from a hand-built `new_values` dict to the `_serialize()`-based `old_values`/
+`new_values` snapshot pattern already used by `reverse_payment`/`reverse_return`, so the audit
+trail actually captures the new financial effect, not just `check_status`.
+
+### `backend/sales/router.py` — `bounce_pdc_check` and `reverse_payment`, origin-agnostic restore
+
+Both previously gated `balance_due` restoration on a static, mode-only flag
+(`mode_reduces_balance = not (is_ar_charge or is_ar_credit)`) — correct only because deposit never
+had a real effect to restore. Replaced in both with `restore_balance = any(e.reason == "PAYMENT"
+for e in ledger_entries)`, reusing the `ledger_entries` list each function already fetches for its
+`ArLedger`-negation loop — no new query, no mode-based conditional. Traced to confirm this is
+correct for every mode: standard tenders (always have a `PAYMENT` row, unchanged), AR Credit
+(writes `reason="AR_CREDIT"`, correctly still excluded — the specific case a bare "any row exists"
+check would have gotten wrong), PDC bounced from `IN_VAULT` (no row, correctly no-ops), PDC
+bounced from or reversed after `DEPOSITED` (deposit now writes one, correctly restores). Both
+functions were sharing the identical bug — `reverse_payment` has no PDC-specific rejection, so a
+`DEPOSITED` PDC payment was already reachable through it, not just through `bounce_pdc_check`.
+
+### `backend/main.py` — one-time backfill, `_backfill_pdc_deposit_collection()`
+
+New idempotent seeder, same convention as `_seed_payment_mode_flags()`. Re-derives the proposal's
+four-part filter fresh on every startup rather than targeting a hardcoded `payment_id`: a
+`DEPOSITED` PDC payment with no existing `reason='PAYMENT'` `ArLedger` row, applied to a still-
+`Posted` sale with `balance_due` still open. Live data at implementation time: 7 payments showed
+`DEPOSITED`, but only **1** matched this filter (payment 95, ₱50.00) — 4 already had their own
+correct `ArLedger` row and `balance_due=0` (predating whatever earlier reconfigured the PDC
+payment mode's `is_ar_charge` flag), 1 was already `Paid` via that same pre-existing mechanism, and
+1's linked sale was already `Voided` (already independently closed out by `void_sale`, and the
+same payment 91 already flagged elsewhere in this file as permanent historical evidence of an
+unrelated past bug). The seeder correctly touched only payment 95, confirmed idempotent across a
+second startup (re-ran, zero new rows).
+
+### `backend/sales/router.py` — `_build_customer_transaction_ledger`, discovered live during verification
+
+Not in the original proposal — found while verifying check 1 (below): this function computes its
+*own*, independent per-sale `Paid`/`Partial`/`Unpaid` status from a `collection_rows` query
+filtered by `PaymentMode.is_ar_charge == False` — the same static-flag exclusion pattern just fixed
+twice above, in a third function neither the proposal's design (§3) nor the implementation plan
+named. A deposited PDC sale showed `balance_due=0`/`Paid` on the `Sale` row itself but still
+`"Unpaid"` in the Transaction Ledger, because this query never looks at `check_status` at all.
+Confirmed with the user before fixing (out of the originally approved scope) — extended the filter
+to also count a payment when `PaymentMode.is_pdc == True AND CustomerPayment.check_status ==
+'DEPOSITED'`, alongside the existing `is_ar_charge == False` branch. A still-`IN_VAULT` PDC payment
+still correctly does not count.
+
+### Verified live (Docker stack, 2026-07-12)
+
+1. **Deposit collection**: PDC-tendered sale, deposited — confirmed via SQL: one new `ArLedger`
+   `PAYMENT` row, `balance_due` reduced to `0.00`/`Paid`, `outstanding_balance` reduced by the full
+   payment amount, **and** the Transaction Ledger's own per-sale status flipped to `"Paid"` (after
+   the bonus fix above — failed before it, confirmed the gap first, then confirmed the fix).
+2. **Bounce from `IN_VAULT`**: PDC-tendered sale, bounced without ever depositing — confirmed zero
+   new `ArLedger` rows and `balance_due` completely unchanged (nothing was ever collected).
+3. **Bounce from `DEPOSITED`**: deposited, then bounced — confirmed the deposit-time `ArLedger` row
+   correctly negated (two rows, `-X`/`+X`, both `reason="PAYMENT"`, matching `bounce_pdc_check`'s
+   existing reversal-reason convention) and `balance_due`/`payment_status` restored to their exact
+   pre-deposit values.
+4. **`reverse_payment` on a deposited PDC payment** (the newly-reachable case): deposited, then
+   reversed via the generic endpoint instead of `bounce_pdc_check` — confirmed `balance_due`
+   correctly restored (previously would have been a silent no-op, corrupting nothing today only
+   because deposit never had an effect to leave un-restored).
+5. **Regression**: reversed a Cash payment — `balance_due` restored exactly as before. Reversed a
+   Store Credit (`is_ar_credit`, writes `reason="AR_CREDIT"` not `"PAYMENT"`) payment — confirmed
+   `balance_due` correctly *not* restored, the specific landmine the `reason`-based check exists to
+   avoid.
+6. **Void-guard regression**: voided a PDC-tendered sale, confirmed deposit/bounce/`reverse_payment`
+   all still correctly rejected with `400`, sale state completely untouched by any of the three
+   rejected attempts.
+7. **Backfill**: confirmed payment 95 now shows collected; confirmed via SQL diff that payments
+   7/8/9/10/11/91 have zero new `ArLedger` rows and unchanged `balance_due` — untouched.
+8. **Audit coverage**: confirmed the upgraded `deposit_pdc_check` audit row shows a real
+   `old_values`/`new_values` diff (`check_status: IN_VAULT → DEPOSITED`, `payment_date` changed);
+   confirmed the backfill's audit row for payment 95 with `actor_user_id = NULL` (system-initiated,
+   not attributed to a human).
+
+### A pre-existing, unrelated gap surfaced by check 5 — flagged, not fixed
+
+Reversing the Store Credit test payment (check 5's regression case) left customer 1's
+`outstanding_balance` ₱40 higher (less negative / less credit) than its true pre-test baseline.
+Traced: `post_draft` deliberately does **not** fold an `AR_CREDIT`-reason `ArLedger` row's amount
+into `customer.outstanding_balance` at post time (only the `SALE` row's own `+grand_total -
+standard_applied` formula does, and `is_ar_credit` is excluded from `standard_applied` by design —
+"the SALE entry offset against existing credit handles the net balance"). But `reverse_payment`'s
+pre-existing, unchanged-by-this-work `total_delta` mechanism reads *all* `ArLedger` rows for a
+payment_id and adds the full delta back to `outstanding_balance` regardless of reason — so
+reversing an `AR_CREDIT` payment adds back an amount that was never separately counted in
+`outstanding_balance` to begin with. This is a different code path than anything touched in this
+proposal (the `ArLedger`-negation loop itself, not the `balance_due`-restoration gate) and appears
+to be latent, pre-existing, and previously untested — `reverse_payment` had zero callers before
+this session, and reversing an `AR_CREDIT`-mode payment specifically may never have been exercised
+until this check. Not investigated further or fixed here — flagged for a future pass. The ₱40
+residual on customer 1 (a real seed customer, affected only via this test) could not be cleaned up
+via any proper action (no endpoint adjusts `outstanding_balance` directly) and is left as documented
+evidence, same treatment as other uncleanable test residuals this session.
+
+### Cleanup
+
+All test payments reversed/bounced and all test sales voided via proper endpoints (`reverse_payment`,
+`bounce_pdc_check`, `void_sale`). Temporary test accounts deactivated via
+`PATCH /auth/users/{id}/active`. Payment 95 (the backfill) is a real correction, not test data — it
+stays fixed. The ₱40 residual above is the one exception, documented rather than force-corrected.
+
+## 2026-07-11 — Fix: reverse_payment on an already-voided sale left it contradictorily stateful
+
+Investigation prompted by an unverified hypothesis noted in this file's own "sales return
+reversal" cleanup section (below): that `reverse_payment → void_sale` double-restored
+`balance_due`, causing a ₱200 residual. **That hypothesis was wrong** — investigated precisely,
+disproven with live evidence, and a *different*, real bug found instead, in the *reverse* order.
+
+### What was actually true
+
+`void_sale` (`router.py:2597-2745`) never touches `sale.balance_due` and never loops over
+`CustomerPaymentApplied` — it's a flat, unconditional `-grand_total` `ArLedger` `ADJUSTMENT`.
+Structurally incapable of the hypothesized per-application double-restoration. Live-verified:
+`reverse_payment` (Posted sale) → `void_sale` nets `outstanding_balance` to *exactly* zero delta,
+every time (forward order, standard tender; forward order, PDC/`bounce_pdc_check` — both clean).
+The original ₱200 was fully reconciled instead to two ordinary, correctly-functioning
+void-without-reversal sales from that session's cleanup — see the correction in the "Cleanup"
+section of the return-reversal entry below.
+
+### The real bug: reverse order
+
+`void_sale` **first**, then `reverse_payment` on one of its payments: `outstanding_balance` still
+nets correctly to zero — but `reverse_payment` had **no check on the linked sale's status**, unlike
+`deposit_pdc_check`/`bounce_pdc_check`, which both already call `_reject_if_linked_to_voided_sale`
+(`router.py:1252-1269`) for exactly this scenario. Live-reproduced: a Voided sale ended up with
+`balance_due=150.00`/`payment_status='Unpaid'` — contradicting its own `Voided` status. Same root
+pattern as this session's two earlier `mode_reduces_balance` fixes (check whether the thing being
+restored was already restored/reversed before restoring it again), a different pair of operations.
+
+### `backend/sales/router.py`
+
+- **`reverse_payment`**: added `_reject_if_linked_to_voided_sale(payment, db, action="reverse")`
+  as an early precondition, alongside the existing already-reversed/`BOUNCED`/credit-memo checks —
+  before any mutation, matching where `deposit_pdc_check`/`bounce_pdc_check` place the same call.
+- **`_reject_if_linked_to_voided_sale`**: generalized its error message from *"Cannot {action}
+  this check..."* to *"Cannot {action} this payment..."* — the helper now serves a non-PDC caller
+  too (`reverse_payment` handles Cash/GCash/Charge, not just checks), so the PDC-specific wording
+  no longer fit. Docstring updated to describe all three callers rather than just deposit/bounce.
+  Wording-only change to two already-shipped PDC error strings; no behavior change for those two
+  call sites.
+
+No schema, migration, or permission changes.
+
+### Verified live (Docker stack, 2026-07-11)
+
+1. **Reproduced pre-fix, confirmed post-fix**: voided a fresh fully-paid sale, then reversed its
+   payment on the *unfixed* code — confirmed the bug still occurred (200 OK, sale ended up
+   `Voided` + `balance_due=120.00`/`Unpaid`). Rebuilt with the fix, repeated the identical
+   sequence on a fresh sale — got `400 Cannot reverse this payment — its originating sale has been
+   voided`; confirmed via SQL the sale's `status`/`balance_due`/`payment_status` were completely
+   untouched by the rejected call, and the payment's `reversed_at` stayed `NULL` (never reversed).
+2. **Regression — normal case**: `reverse_payment` on a payment linked to an ordinary `Posted`
+   sale still succeeds unchanged — `balance_due` correctly restored, `outstanding_balance`
+   correctly increased by the reversed amount.
+3. **Regression — forward order unaffected**: reversed a payment while its sale was still
+   `Posted`, then voided that same sale — succeeded, `outstanding_balance` netted to exactly zero
+   delta, exactly as already proven in the investigation (the new guard only fires when the sale
+   is *already* Voided at the time `reverse_payment` is called, not after).
+   3b. A pooled payment with zero sale applications also still reverses cleanly — confirms
+   `_reject_if_linked_to_voided_sale`'s early-return on an empty `sale_ids` list is unaffected.
+
+### Cleanup
+
+Three sales from this investigation and its fix's own pre-fix reproduction (94, 96, 97) remain
+permanently in the contradictory state (`Voided`, but `balance_due`/`payment_status` reading as if
+still active) — **no proper action exists to reset `balance_due` on an already-Voided sale**
+(confirmed by searching every `sale.balance_due =` write site in `router.py`; none apply to a
+Voided sale, and the fix just shipped here specifically closes the one path that *could* have —
+`reverse_payment` — for exactly this reason). Left as permanent historical evidence of the
+pre-fix bug, same treatment as the `balance_due=200` rows from the earlier `mode_reduces_balance`
+fix. The temporary `test_voidguard_verify` account (plus a throwaway helper needed to deactivate
+it after a self-deactivation lockout) was deactivated via `PATCH /auth/users/{id}/active`.
+
+## 2026-07-11 — Feature: sales return reversal mechanism
+
+Implements `docs/return_reversal_proposal.md` (§2–§9, decisions finalized in §10) in full: a new
+`POST /sales/returns/{return_id}/reverse` endpoint mirroring `void_sale`/`reverse_payment`'s
+established "negate the actual ledger rows this record wrote" pattern, plus two bridge-table
+fixes bundled into the same pass (decision 2) — one required by this feature, one a pre-existing,
+previously-undiscovered bug surfaced while building it.
+
+### `backend/sales/router.py` — `POST /sales/returns/{return_id}/reverse`
+
+New endpoint, permission `reverse_return` (new action, see below). Preconditions: return exists
+(404), not already reversed, `reversal_reason` non-empty, and — the scope boundary this proposal
+deliberately drew (§5) — no active exchange sale linked to the return (reused `_attach_exchange`'s
+existing derivation as the precondition; rejects with a state-specific message: *"delete the draft
+first"* if the paired exchange is still `Draft`, *"void it first"* if `Posted`).
+
+Single transaction, `write_audit()` before the one `db.commit()` (old_values + new_values, matching
+`reverse_payment`'s pattern):
+- **Inventory**: negates exactly what the return's `SalesReturnItem` rows wrote — `InventoryLedger
+  RETURN_OUT` (reusing the existing enum value, previously only used by supplier returns, disjoint
+  `reference_type`), `_upsert_stock` decrement, and — where `cost_layer_id` is set —
+  `quantity_remaining -= quantity` (lower-capped at zero, the exact inverse of the return's
+  upper-capped restore).
+- **AR ledger**: negates whatever `ArLedger` rows this return actually wrote
+  (`reference_type='sales_returns'`), same origin-agnostic technique `reverse_payment` uses —
+  correct regardless of disposition, and (confirmed, not assumed — see the proposal §3) correct
+  even for a return that hit the known bundle-variant phantom-stock bug, since it only ever undoes
+  what was actually written, never re-derives what should have happened.
+- **Cash-refund `CustomerPayment` (path 4)**: investigated (proposal §4.1) and confirmed
+  `reverse_payment` **cannot** be reused here — that payment's `CustomerPaymentApplied` row was
+  inserted directly by `_do_return`, bypassing `_apply_and_update`, so `sale.balance_due` was never
+  touched at creation; calling `reverse_payment`'s restoration loop on it would have *decreased*
+  `balance_due` for a value that was never increased, a new corruption in the same family as this
+  session's earlier `is_ar_charge`/`balance_due` fix. Instead: locate the payment by its
+  system-generated, never-edited `notes` string (`"Cash refund for return #{id}"` — no FK exists,
+  tracked as future debt, not a v1 blocker per decision 1) and flip its
+  `reversed_at`/`reversed_reason`/`reversed_by_user_id` directly — no `ArLedger` write, no
+  `balance_due` touch, since the return's own `ArLedger` reversal above already fully covers this
+  payment's customer-level effect.
+
+### `backend/sales/router.py` — bridge-table fixes, both bundled per decision 2
+
+`get_ar_aging` and `get_customer_ar_ledger_view`'s `returns_by_sale_id` `SUM` gained
+`SalesReturn.reversed_at.is_(None)` — without it, a reversed `credit_to_account` return would have
+kept subtracting from displayed balances forever, even though its actual `ArLedger`/
+`outstanding_balance` effect was correctly undone (same "hard prerequisite" relationship the
+AR-ledger staleness fix had to the payment-pooling picker earlier tonight).
+
+Found while tracing that: the `payments_by_sale_id` `SUM` right next to it had the **identical,
+pre-existing, previously-undiscovered gap** — no `CustomerPayment.reversed_at`/`check_status`
+filter at all, so a payment reversed via the already-live `reverse_payment`, or bounced via
+`bounce_pdc_check`, was *also* still counted. Fixed in the same pass (decision 2): added
+`CustomerPayment.reversed_at.is_(None)` and, specifically to avoid the NULL-semantics landmine the
+proposal flagged (`check_status` is nullable, only ever set for PDC payments — a bare `!=
+'BOUNCED'` would, under standard SQL `NULL` semantics, silently exclude every non-PDC payment too),
+`or_(CustomerPayment.check_status.is_(None), CustomerPayment.check_status != 'BOUNCED')`.
+
+### `backend/sales/schemas.py` / `models.py`
+
+`SalesReturn` gains `reversed_at`/`reversed_reason`/`reversed_by_user_id` (mirrors
+`CustomerPayment`'s existing three columns, no boolean flag — same convention as everywhere else in
+this schema). `SalesReturnOut` exposes the same three fields. New `ReturnReversalRequest` schema
+(one required `reversal_reason: str`, mirrors `PaymentReversalRequest`).
+
+### `backend/main.py` — permission
+
+New action `reverse_return` (program `sales_returns`), granted to `ADMIN` + `STORE_MANAGER` only —
+**not** `CASHIER`. Confirmed precisely why reuse of `process_returns` would be unsafe:
+`CASHIER` already holds `process_returns` (creating returns), so reusing it for reversal would hand
+every cashier a materially bigger privilege than creating one — the exact inversion
+`reverse_customer_payment` was already introduced to prevent on the payment side.
+
+### DB migration
+
+`backend/alembic/versions/w3x4y5z6a7b8_add_reversal_fields_to_sales_returns.py` — same shape as
+`t0u1v2w3x4y5_add_reversal_fields_to_customer_payments.py`. `docs/schema.dbml`'s `sales_returns`
+table block updated to match.
+
+### Verified live (Docker stack, 2026-07-11)
+
+1. **Normal `credit_to_account` reversal**: created a Posted AR sale, returned part of it
+   (`credit_to_account`), reversed the return — confirmed exact restoration via direct SQL: cost
+   layer `quantity_remaining` back to its pre-return value, `current_stocks` back to its pre-return
+   value, exactly two `ArLedger` rows (original + exact negation), `outstanding_balance` back to
+   its exact pre-return value.
+2. **`cash_refund` reversal (path 4)**: created a `cash_refund` return tied to a Cash-paid sale,
+   confirmed the negative `CustomerPayment` existed, reversed the return — confirmed via SQL: that
+   payment's three reversal columns set correctly, **zero** new `ArLedger` rows tagged to it
+   (proving `reverse_payment` was not internally invoked), and `sale.balance_due` unchanged by that
+   specific step (already fully covered by the return's own `ArLedger` reversal).
+3. **Bridge-table return fix**: `get_ar_aging`/`get_customer_ar_ledger_view` for the reversed
+   `credit_to_account` return's sale now show the full, un-reduced balance — the reversed return no
+   longer counted.
+4. **Bridge-table payment fix**: reversed a normal, previously-live payment via the existing
+   `reverse_payment` endpoint and confirmed the linked sale's bridge-table balance flipped from
+   `Paid`/`0.00` to `Open`/full amount (now correctly excluded). Separately confirmed the
+   NULL-semantics landmine and its fix directly against the live database — a bare `!= 'BOUNCED'`
+   filter would have wrongly excluded 104 real non-PDC payments (all `check_status IS NULL`); the
+   `or_`-based filter correctly retains all of them. (No payment mode in current seed data combines
+   `is_pdc=True` with `is_ar_charge=False`, so the `check_status='BOUNCED'` branch specifically has
+   no live end-to-end path to exercise through the API today — verified at the SQL level instead,
+   noted honestly rather than overclaimed.)
+5. **Bundle-return case**: reproduced the known bundle phantom-stock bug (returned a bundle-line
+   `SaleItem`) — confirmed the phantom bundle-variant `current_stocks` row appeared at `+1`.
+   Reversed the return — confirmed the phantom stock was correctly negated back to `0`, and the
+   real component stock (already short from the original, still-open bug) was untouched by the
+   reversal in either direction, exactly as the proposal's §3 reasoning predicted.
+6. **Exchange exclusion**: attempted reversal against a return with an active exchange — got 400
+   *"delete the draft first"* while the exchange was `Draft`, and 400 *"void it first"* after
+   posting it. Voided the exchange sale, confirmed the same return became reversible immediately
+   afterward (`exchange_sale_id` went `null`).
+7. **Permission**: a `CASHIER` test account got `403 Missing permission: reverse_return`; a
+   `STORE_MANAGER` test account passed the permission gate cleanly (confirmed by reaching the
+   business-rule 400 on an already-reversed return, not a 403).
+8. **Audit coverage**: `auth.audit_log` shows an `UPDATE` row for every reversed return, with both
+   `old_values` and `new_values` populated (spot-checked one: `old.reversed_at` empty,
+   `new.reversed_at` the actual timestamp).
+9. **Regression**: `create_return` (including a blind return, no `sale_id`) and
+   `create_return_and_exchange` both exercised repeatedly during this pass with no change in
+   behavior from before this work.
+
+### Cleanup
+
+All test returns reversed via the new endpoint; test sales voided via `void_sale`; the payment
+reversed during check 4 was settled by voiding its sale. Three temporary test accounts (two
+`STORE_MANAGER`/`CASHIER` accounts used for verification, one throwaway helper needed to
+deactivate the second after the first self-deactivated) were deactivated via
+`PATCH /auth/users/{id}/active`. One honest residual, not a defect in this work: after the
+verification sequence, customer 2's `outstanding_balance` sat ₱200 below its pre-session baseline.
+**Correction (2026-07-11, later the same day):** the note originally here attributed this to
+voiding a sale after its payment had already been reversed (`reverse_payment` → `void_sale`). That
+attribution was wrong — a dedicated investigation (see "Void-after-reversal investigation" below)
+proved that specific ordering nets to *exactly* zero. The real, now fully-reconciled cause: two
+*other* sales from this same cleanup pass (91, and the paired exchange sale 92 from check 6) were
+each voided standalone, with no payment ever reversed on either — `void_sale` correctly and
+intentionally left each its own documented -₱100 "unretrieved refund" credit
+(`-total_applied` per its own docstring), summing to exactly -₱200. Not a defect; `void_sale`
+working exactly as designed, applied twice during ordinary cleanup. See the entry below for the
+investigation and the real bug it did find (a different one, in the *reverse* order).
+The bundle-variant phantom `current_stocks` row (variant 1005) remains in the
+database at quantity `0` (correctly zeroed, not deleted — matches this schema's "never
+hard-delete" convention; this is the correct end state, not a cleanup gap).
+
+## 2026-07-11 — Feature: pool payment, then assign to transactions (customer payments)
+
+Implements `docs/payment_pooling_proposal.md` (§2–§9, decisions finalized in §10) in full: a new
+receipt-picker flow on `CustomerDetail.tsx`'s "Record Payment" so one payment can be split across
+several of a customer's open receipts in a single atomic submission, plus the two fixes the
+proposal identified as hard prerequisites for that picker to be trustworthy.
+
+### `backend/sales/router.py` — `get_customer_ar_ledger_view` (`GET /sales/customers/ar-ledger`)
+
+Replaced the direct `sale.balance_due` read (stale relative to `credit_to_account` returns, which
+adjust `customer.outstanding_balance` but never touch `sale.balance_due`) with the same
+bridge-table derivation `get_ar_aging` already uses: `outstanding = sale.grand_total -
+SUM(customer_payment_applied WHERE NOT is_ar_charge) - SUM(sales_returns.grand_total WHERE
+disposition='credit_to_account')`. Reuses `sale.grand_total` directly as "principal" (proven
+identical to the ArLedger SALE row's `amount_change`, written that way at post time and immutable
+after) rather than re-querying `ArLedger`, since this endpoint already starts from `Sale` rows.
+Same response shape, same route — fixes today's `CustomerARLedger.tsx` table too, not just the new
+picker.
+
+### `backend/sales/schemas.py` / `router.py` — `create_payment` (`POST /sales/payments`)
+
+This endpoint already had the exact shape the new flow needed (one `CustomerPayment` + a
+`List[{sale_id, amount_applied}]` applied in a loop, one transaction) and, per
+`docs/payment_pooling_verification.md`, had zero frontend callers — so fixing it in place carried
+no regression risk:
+
+- **`CustomerPaymentCreate`** gained field parity with `RecordPaymentIn`: `payment_date`,
+  `collection_receipt_no`, `notes`, `check_number`, `check_date`, `bank_name`.
+- **Accounting fix**: previously wrote one `ArLedger` `PAYMENT` row *per application* and reduced
+  `customer.outstanding_balance` by `total_applied` only — meaning a partially-applied payment's
+  unapplied remainder wasn't reflected as collected anywhere until a later `apply_unapplied_payment`
+  call. Now suppresses the per-application ledger write (`ledger_amount=Decimal("0")` passed to
+  `_apply_and_update`) and writes **one** `ArLedger` row for the full `payload.amount`, reducing
+  `outstanding_balance` by the full amount — matching `record_customer_payment`'s already-correct
+  convention, and verified live not to double-count on a later `apply_unapplied_payment` call
+  against the same payment's remaining pool (see verification §3 below).
+- **PDC support added**: same `check_number`/`check_date`/`bank_name` requirement and
+  `check_status='IN_VAULT'` handling `record_customer_payment` already has — previously absent.
+- **Single-commit atomicity fix** (found while making the above change, not called out in the
+  proposal but necessary for its explicit "full atomicity" decision): the endpoint previously did
+  two separate `db.commit()` calls — one for the payment, a second after `write_audit()` for the
+  audit row — so a crash between the two would leave a payment with no audit trail. Replaced with
+  `db.flush()` (still surfaces the idempotency-key `IntegrityError` pre-commit) →
+  `write_audit()` → one `db.commit()`, mirroring `record_customer_payment`'s pattern.
+
+### `frontend/src/services/api.ts`
+
+Added `CustomerPaymentCreate`/`PaymentApplicationIn` types and `salesApi.payments.create()`
+(`POST /sales/payments`) — no existing `salesApi.payments` key previously.
+
+### `frontend/src/pages/customers/CustomerDetail.tsx`
+
+New "Apply to Receipts (optional)" section in the Record Payment modal, shown once mode + amount
+are entered: fetches the customer's `Open`/`Partial`/`Overdue` receipts (oldest-first, server-
+sorted), defaults to a greedy oldest-first allocation up to the entered amount, allows manual
+per-row override (clamped to that row's balance), a "Select All / Apply to All Open Receipts"
+shortcut (fetches remaining pages first so it covers the whole filtered list), a running "Applied
+/ Remaining to allocate" total, and a "Load more receipts" button for customers with more than 200
+open receipts. Submits as a single `salesApi.payments.create()` call (zero receipts selected stays
+valid — pure pool, no schema change needed). Success shows a dismissible banner summarizing the
+result. `CustomerARLedger.tsx` and `Workstation.tsx` are unchanged — the proposal's explicit
+recommendation was to leave the single-sale flow and the POS tender loop alone.
+
+### Verified live (Docker stack, 2026-07-11)
+
+1. **AR ledger fix**: created a `credit_to_account` return against a Posted sale, confirmed
+   `GET /sales/customers/ar-ledger` and `GET /sales/customers/aging` agree on the reduced balance
+   while the raw `sale.balance_due` column stayed stale at its pre-return value — proving the fix
+   reads the bridge-table derivation, not the column. Also surfaced a second, pre-existing
+   instance of the same staleness in seed data (a return from an earlier session against a
+   different sale), now also displaying correctly.
+2. **`create_payment` accounting**: created a payment, applied it across two sales. Confirmed via
+   direct SQL exactly **one** `ArLedger` row (`amount_change` = full payment amount, not one row
+   per application), `outstanding_balance` dropped by the full amount immediately, and both sales'
+   `balance_due`/`payment_status` updated correctly per-sale.
+3. **Reconciliation**: called `POST /sales/payments/{id}/apply` against that payment's remaining
+   unapplied pool for a third sale — confirmed via SQL no second `ArLedger` row was written (the
+   application landed entirely within the already-ledgered surplus) and `outstanding_balance` was
+   unchanged by that call, matching the `already_reduced`/`already_applied`/`surplus` math.
+4. **Full UI flow** (Playwright, headless Chromium): customer with multiple open/overdue receipts
+   — default oldest-first allocation, manual row override, "Select All" shortcut, and single
+   submission all confirmed visually and via DOM state; zero browser console errors across the
+   whole flow.
+5. **Atomicity**: submitted a payment with a valid first application and an invalid second
+   (amount exceeding a sale's balance) — confirmed via SQL that nothing persisted: no new payment
+   row (despite the mid-transaction `db.flush()` that materializes one), no ledger row, no balance
+   changes.
+6. **Regression — `CustomerARLedger.tsx`**: Playwright-confirmed its "Receive Payment" modal still
+   shows exactly one invoice (no picker table), submits and closes correctly.
+7. **Regression — `Workstation.tsx`**: Playwright-confirmed the POS page renders its full tender
+   UI with zero console errors — no code path shared with this change.
+8. **Audit coverage**: confirmed via `auth.audit_log` an `INSERT` row for `sales.customer_payments`
+   exists for the new `create_payment`-originated payment, written in the same transaction as the
+   payment itself.
+
+### Cleanup
+
+Three test payments were reversed via the existing `POST /sales/payments/{id}/reverse` endpoint.
+One test `credit_to_account` return (₱600 against a seed sale, used for check #1) could **not** be
+cleaned up via any proper action — no return-void/cancel endpoint exists in this codebase — and
+remains as a permanent, clearly-labeled (`reason` field states it was a verification test) record;
+consistent with this session's "never hard-delete, no raw SQL cleanup" standard. The temporary
+`test_pooling_verify` user account (registered via `POST /auth/register` to obtain a session for
+API/browser-driven verification) was deactivated via `PATCH /auth/users/{id}/active`, matching the
+existing convention for other `test_*` accounts in this database.
+
+## 2026-07-11 — Fix: balance_due corruption on reverse/bounce of is_ar_charge payments; new PDC deposit→bounce transition
+
+Closes both gaps found in `docs/customers_section_verification.md` (2026-07-10): the
+`balance_due` corruption on reversing/bouncing Charge or PDC payments, and the missing
+`DEPOSITED → BOUNCED` transition for PDC checks. Also proactively hardens the same root cause
+at the point of application (`create_payment`, `apply_unapplied_payment`,
+`record_customer_payment`), which had no backend guard against the same corruption — only ever
+safe because the frontend filters `is_ar_charge`/`is_ar_credit` modes out of the relevant
+dropdowns.
+
+### Root cause, traced precisely
+
+`balance_due` is reduced by an applied payment in three places, and only one of them already
+excludes `is_ar_charge`/`is_ar_credit` tenders:
+
+- `post_draft`'s tender loop (`router.py`) — correctly excludes both flags via
+  `standard_applied`.
+- `_apply_and_update` (shared by `create_payment`/`apply_unapplied_payment`) — previously
+  reduced `balance_due` unconditionally, regardless of mode.
+- `record_customer_payment` — same, unconditional.
+
+`reverse_payment` and `bounce_pdc_check` both restore `balance_due` by adding back
+`apply.amount_applied`, assuming every application had reduced it — true only for the modes
+that actually did. For `is_ar_charge`/`is_ar_credit` applications, nothing was ever subtracted,
+so restoring corrupted the value (confirmed live pre-fix: reversing a $100 Charge payment left
+`balance_due=200`).
+
+### `backend/sales/router.py`
+
+- **`reverse_payment`** and **`bounce_pdc_check`**: both now compute
+  `mode_reduces_balance = not (payment.payment_mode.is_ar_charge or
+  payment.payment_mode.is_ar_credit)` once per payment (a payment has one mode, so one check
+  covers all its applications) and only run the `balance_due`/`payment_status` restore loop
+  when true. The `ArLedger`-reversal logic in both functions is unconditional and unchanged —
+  it was already correct.
+- **Void-guard**: new shared helper `_reject_if_linked_to_voided_sale()` — both
+  `deposit_pdc_check` and `bounce_pdc_check` now reject with `400` if any sale the payment is
+  applied to has `status == "Voided"`, matching the existing rejection style
+  (already-bounced, credit-memo-mode). `void_sale` already reverses everything else about that
+  sale; nothing legitimate was left for a PDC action to do against it.
+- **`bounce_pdc_check`**: precondition relaxed from `check_status == 'IN_VAULT'` to
+  `check_status in ('IN_VAULT', 'DEPOSITED')`. Confirmed safe to reuse the identical reversal
+  logic for either originating status — `deposit_pdc_check` only ever changes
+  `check_status`/`payment_date`, never `ArLedger`/`balance_due`/`outstanding_balance`, so there
+  is nothing additional a prior deposit could have done that also needs reversing.
+- **`_apply_and_update`**: gained a required `mode_reduces_balance: bool` parameter — skips the
+  `balance_due`/`payment_status` mutation when false, leaves the `CustomerPaymentApplied` row
+  and ledger write untouched (unchanged scope, per instruction — only `balance_due` is gated,
+  not the `ArLedger` reason/amount logic for these modes, which is a separate, broader
+  inconsistency not addressed here).
+- **`create_payment`**: captures the validated `PaymentMode` row (previously discarded after
+  the existence check) and passes `mode_reduces_balance` through to `_apply_and_update`.
+- **`apply_unapplied_payment`**: computes the same flag from `payment.payment_mode` and passes
+  it through.
+- **`record_customer_payment`**: the sale-side `balance_due`/`payment_status` block is now
+  guarded by the same `not (mode.is_ar_charge or mode.is_ar_credit)` condition.
+
+### Verified live (Docker stack, 2026-07-11)
+
+1. **Original Charge-reversal repro**: $100 sale, single Charge tender, reversed —
+   `balance_due` stayed `100.00` (previously became `200.00`).
+2. **Void-then-PDC-action**: voided a PDC-tendered sale, then attempted deposit and bounce on
+   its PDC payment — both rejected with `400 Cannot {deposit,bounce} this check — its
+   originating sale has been voided`.
+3. **Regression — standard-tender reversal**: $100 sale, Cash tender, reversed — `balance_due`
+   correctly restored `0.00 → 100.00`.
+4. **Regression — `void_sale`**: re-ran the single- and multi-tender void tests from the prior
+   verification pass — outstanding_balance deltas and stock/ledger reversal unchanged and
+   correct (`void_sale` itself was not touched by this fix).
+5. **New capability — deposit then bounce**: created a PDC payment, deposited it
+   (`check_status=DEPOSITED`), then bounced it — `200 OK`, `check_status=BOUNCED`,
+   `balance_due` stayed at its correct pre-bounce value (`100.00`, not doubled),
+   `outstanding_balance` unchanged, zero `ArLedger` rows written (correctly — PDC wrote none at
+   creation, so there was nothing to reverse).
+6. **`write_audit` coverage**: confirmed via `auth.audit_log` — the deposit-then-bounce payment
+   shows all three rows (`INSERT`, `UPDATE` deposit, `UPDATE` bounce); both reversal tests show
+   their `INSERT`/`UPDATE` pairs. No gap introduced.
+7. **Forward-direction guard, tested via direct API** (UI-unreachable for these modes,
+   confirmed both ways): applying a Charge-mode payment via `record_customer_payment`,
+   `create_payment`, and `apply_unapplied_payment` no longer reduces `balance_due` in any of the
+   three; a standard-mode (Cash/GCash) application via the same three endpoints still reduces
+   `balance_due` correctly (regression-free).
+
+### Cleanup
+
+`customer.has_bounced_check` (customer 3, stale from an earlier verification pass) cleared via
+the proper `PATCH /sales/customers/{id}/clear-bounced-flag` endpoint. The `balance_due=200`
+corruption already written to sales 75, 76, and 77 by the pre-fix bug, and payment 91's
+`DEPOSITED` status (from depositing a since-voided sale's check before the void-guard existed),
+could **not** be cleaned up via any proper action — `reverse_payment`/`bounce_pdc_check` both
+refuse to act twice on an already-reversed/bounced payment (by design), and no endpoint exists
+to reset a sale's `balance_due` independently of the payment-application lifecycle. These three
+sales remain as permanent, correctly-understood historical evidence of the pre-fix bug; the fix
+prevents new occurrences, it does not retroactively repair these specific rows.
+
+## 2026-07-10 — Variant deactivation hardening (permissions, audit, reactivation)
+
+`add_variant`, `update_variant`, and `delete_variant` were the only mutating endpoints on
+`Variant` with no action-level permission check at all (router-level auth only), and
+`update_variant`/`delete_variant` had no `write_audit` coverage. Brought both up to the same
+standard as `update_product`/`delete_product` and this session's other destructive/corrective
+fixes (`reverse_customer_payment`, `void_sale`, etc.), and closed a UI gap where a deactivated
+variant had no way to be found again for reactivation.
+
+### `backend/inventory/router.py` / `schemas.py`
+
+- `add_variant`, `update_variant`, `delete_variant` now require `require_permission
+  ("manage_products")`, matching `update_product`/`delete_product` exactly.
+- `VariantUpdate` gained `is_deleted: Optional[bool]`, folded into the existing PUT endpoint
+  rather than a new route — same convention as `SupplierPatch`/`patch_supplier`. `update_variant`'s
+  lookup query no longer filters on `is_deleted`, so it can find and reactivate a soft-deleted
+  variant (previously it could only ever find active ones).
+- Added a guard: setting `is_deleted=true` on the default variant through `update_variant` is
+  rejected with the same message as `delete_variant`'s existing default-variant check, so the
+  invariant can't be bypassed now that `is_deleted` is a generic field on this endpoint.
+- `update_variant` gained a `write_audit(..., "UPDATE", ...)` call (previously had none at all,
+  for any field); `delete_variant` gained a `write_audit(..., "DELETE", ...)` call matching
+  `delete_product`/`delete_supplier`'s exact old/new-value shape. Reactivation is covered for
+  free since it goes through the same `update_variant` audit write.
+
+### Frontend (`Detail.tsx`)
+
+**Investigation finding**: the Sibling Variants panel (`product.variants.filter(sv =>
+!sv.is_deleted)`) filtered deactivated variants out of the list entirely, even though the backend
+already returns them (`Product.variants` has no `is_deleted` filter). A reactivate control would
+have had nowhere to live — same trap as an earlier orphaned-list finding this session.
+
+- Added a "Show inactive" checkbox next to the panel header; off by default (unchanged existing
+  behavior), on reveals deactivated siblings tagged with an amber "Inactive" badge (same style as
+  the existing "Default"/"Viewing" badges).
+- Row action column: active row keeps the existing `×` convention used by
+  barcodes/UOM-conversions/bundle-components/supplier-links in the same pane, now gated behind
+  `window.confirm(...)` (more consequential than those other row deletes, which don't confirm);
+  inactive row shows a "Reactivate" link calling `catalogueApi.variants.update(id, { is_deleted:
+  false })` instead.
+- Failures (notably `delete_variant`'s default-variant rejection) surface in a dedicated red error
+  box, matching the existing `addVError` convention on this same page, instead of an unhandled
+  rejection.
+
+### Verified live (Docker stack + real browser via Playwright, 2026-07-10)
+
+- **Permissions**: created a temporary CASHIER user (no `manage_products`) — `add_variant`,
+  `update_variant`, `delete_variant` all returned `403 Missing permission: manage_products`.
+  Cleaned up via `PATCH /auth/users/{id}/active` (proper deactivation, not a raw delete).
+- **Deactivate via UI**: real browser test (Playwright/Chromium) against product 1004
+  ("Rose Water Goblet 11oz" / "...11oz 6s") — clicked the sibling row's `×`, confirmed the
+  `window.confirm` dialog fired with the expected message, row disappeared from the default view.
+- **POS catalog reflection**: isolated API-level cycle — variant present in `GET
+  /products/pos-catalog` before, absent immediately after deactivation, present again after
+  reactivation.
+- **`audit_log`**: `auth.audit_log` rows confirmed for both events on variant 1005 — one `DELETE`
+  (`old.is_deleted=false → new.is_deleted=true`) and one `UPDATE` (`old.is_deleted=true →
+  new.is_deleted=false`), both with correct `actor_user_id` and `occurred_at`.
+- **Default-variant rejection**: clicking `×` on the default sibling (MLD0027) showed the red
+  error box "Cannot delete the default variant — promote another variant first"; row confirmed
+  still present afterward (screenshotted).
+- **No cascade**: DB-checked variant 1004 (`is_default=true`, `is_deleted=false`, `price=88.00`)
+  and product 1004 (`is_deleted=false`) were completely unchanged by variant 1005's
+  deactivate/reactivate cycle.
+- **Full round trip through the UI**: deactivate → toggle "Show inactive" on → row reappears with
+  the "Inactive" badge → click "Reactivate" → toggle off again → row visible normally with no
+  toggle needed, confirming `is_deleted` actually flipped back rather than the row just being
+  visible because the toggle was still on.
+- Variant 1005 ended the session in its original state (`is_deleted=false`, unchanged `PID`/price)
+  — no lingering test artifacts.
+- The temporary Playwright driver scripts and verification screenshots used for the above (session
+  scratchpad only, never part of the repo) were deleted after the report was delivered.
+
+## 2026-07-10 — Duplicate-submission protection for CustomerPayment and SalesReturn
+
+Extends the duplicate-submission protection already proven for `sales.sales.idempotency_key`
+(nullable, unique, client-supplied — see `create_draft`/`post_draft`) to the two remaining
+unguarded creation surfaces flagged in the 2026-07-10 ground-truth passes: customer payments and
+sales returns (`docs/backlog.md` — "Payment creation has no duplicate-submission protection" and
+"SalesReturn has no idempotency protection").
+
+**Investigation finding, not a fix in itself:** `post_draft`'s tender-creation loop does not need
+a new mechanism. A duplicate `POST /drafts/{id}/post` call on the same draft is already rejected —
+`_load_draft` filters `status == 'Draft'`, so once the first call flips status to `Posted`, a
+second call 404s ("Draft not found") before the tender loop is ever reached. Confirmed live: a
+genuine double-post on the same draft returned `200` then `404`, with only one `customer_payments`
+row created. (This is a rejection, not a graceful idempotent return — a different shape than the
+other paths below — but it fully prevents the duplicate tender.)
+
+### `backend/sales/models.py` / `schemas.py`
+
+- `CustomerPayment.idempotency_key` and `SalesReturn.idempotency_key` — `String(255), unique=True,
+  nullable=True`, same shape as `Sale.idempotency_key`.
+- Added to `RecordPaymentIn`, `CustomerPaymentCreate`, `CustomerPaymentOut`, `SalesReturnCreate`,
+  `SalesReturnOut`.
+
+### `backend/alembic/versions/v2w3x4y5z6a7_...`
+
+Adds the column plus an explicitly-named unique constraint on each table
+(`customer_payments_idempotency_key_key` / `sales_returns_idempotency_key_key`) so the
+application-level race-safety net below can match on a known constraint name. `docs/schema.dbml`
+updated to match.
+
+### `backend/sales/router.py`
+
+Four creation paths, each given the same two-layer protection as `Sale`: an upfront check that
+returns the existing record immediately if the key is already in use (matching `Sale`'s "return
+existing, don't reprocess" convention — not a reject), plus an `IntegrityError` safety net around
+the commit for the race window between that check and the insert (mirroring the `sale_pid` race
+fix in migration `u1v2w3x4y5z6`) that translates a losing-race unique-constraint collision into
+the same graceful re-fetch-and-return, instead of a raw 500.
+
+- `record_customer_payment` (`POST /sales/customers/{id}/payment`) and `create_payment`
+  (`POST /sales/payments`) — both gain the check/safety-net pair. `create_payment` has no frontend
+  caller today (confirmed — zero references to `/sales/payments` in `frontend/src`), but gets the
+  mechanism anyway for API-safety, per instruction. `create_payment`'s existing split-commit
+  pattern (financial write, then a separate audit commit — a known gap tracked separately in
+  `docs/backlog.md`) was left untouched; only the first (financial) commit is wrapped.
+- `create_return` and `create_return_and_exchange` — both check for an existing `SalesReturn` by
+  key *before* calling the shared `_do_return` helper (mirroring how `create_draft`/`post_draft`
+  each carry their own inline check rather than a shared one), so a duplicate never re-enters
+  stock/ledger/cost-layer/cash-refund-payment processing at all. `_do_return` itself only gained
+  `idempotency_key=payload.idempotency_key` on the `SalesReturn(...)` constructor — no behavior
+  change to its internals. The cash-refund negative `CustomerPayment` created inside `_do_return`
+  is protected transitively (it can't run a second time for a duplicate return), so it does not
+  need its own separate key. New shared helper `_load_exchange_result()` builds the
+  `{ sales_return, exchange_draft }` response from a `return_id` for both the pre-check hit and
+  the exception-handler hit in `create_return_and_exchange`.
+
+### Frontend
+
+- New local `uid()` helper (same one-liner already duplicated in `Workstation.tsx`/`NewProduct.tsx`)
+  plus a `useState(() => uid())`-held key, sent as `idempotency_key`, rotated only after a
+  confirmed successful submit — same lifecycle as `Workstation.tsx`'s `txnKey`.
+- `CustomerDetail.tsx` ("Record Payment"), `CustomerARLedger.tsx` ("Receive Payment"),
+  `ReturnNew.tsx` (return submission). `salesApi.customers.recordPayment` and
+  `salesApi.returns.create` param types extended; `CustomerPaymentOut`/`SalesReturnOut` TS
+  interfaces extended with `idempotency_key`. `salesApi.returns.exchange` has no frontend caller
+  (confirmed) so it was left unwired on the frontend, matching `create_payment`'s treatment.
+
+### Verified live (Docker stack, 2026-07-10)
+
+- `record_customer_payment`: submitted twice with the same key against customer 3 (O'Hotel) —
+  identical `payment_id` both times; DB confirmed exactly one `customer_payments` row and one
+  `ar_ledger` row.
+- `create_payment`: same double-submit test, unapplied payment — identical `payment_id` both
+  times, one row in the DB.
+- `create_return` (`cash_refund` disposition): built a controlled test sale (walk-in, Cash
+  tender), returned it twice with the same key — identical `return_id` both times; DB confirmed
+  exactly one `sales_returns` row, one `RETURN_IN` inventory-ledger entry, and one negative
+  cash-refund `customer_payments` row (not two).
+- `create_return_and_exchange`: same double-submit test — identical `return_id` and
+  `exchange_sale_id` both times; DB confirmed only one exchange draft `Sale` row
+  (`origin_sale_id` link).
+- `post_draft` double-post: created and posted a draft, then called `POST .../post` again on the
+  same `sale_id` — first call `200 Posted`, second call `404 Draft not found`, confirming the
+  existing-coverage claim above with a real test rather than reasoning only.
+- Regression: every "first call" above is itself a normal, non-duplicate submission and succeeded
+  normally, confirming unaffected behavior.
+- Cleanup: the two balance-affecting test payments (customer 3) were reversed via the real
+  `POST /sales/payments/{id}/reverse` endpoint (no raw deletes) — `outstanding_balance` confirmed
+  back to its exact pre-test baseline (`0.00`). The test sales/returns/exchange draft were all
+  walk-in (no customer), so they carry no financial exposure and were left in place as ordinary
+  historical test records.
+
+## 2026-07-09 — Fix: apply_unapplied_payment double-counted AR impact
+
+Follow-up to the item flagged as "discovered, not fixed" in the `bounce_pdc_check` entry below.
+The fix itself landed in the same commit (`5a32d05`) as that entry, but was neither called out in
+the commit message nor verified live at the time — this entry closes that gap.
+
+**Root cause:** `record_customer_payment` writes one `ArLedger` `PAYMENT` entry for the *full*
+payment amount at creation, regardless of how much (if any) is applied to a sale at that time.
+`apply_unapplied_payment` then unconditionally wrote a second `ArLedger` entry and reduced
+`customer.outstanding_balance` a second time whenever previously-unapplied credit was later applied
+to a sale — double-counting money that was already reflected in the ledger at the payment's creation.
+`create_payment`/`post_draft`-originated payments were unaffected: those origins only ever write
+ledger entries for the applied portion, so their unapplied remainder was never pre-counted.
+
+### `backend/sales/router.py`
+
+Origin-agnostic by design (same technique as `reverse_customer_payment` / `bounce_pdc_check`):
+rather than branching on which endpoint created the payment, `apply_unapplied_payment` now asks the
+ledger what's actually true before writing anything.
+
+- `_apply_and_update` extended with an optional `ledger_amount` parameter (defaults to
+  `amount_to_apply`) — the `CustomerPaymentApplied` row and sale `balance_due`/`payment_status`
+  always reflect the full amount being applied; only the `ArLedger` write (and whether it happens
+  at all) is controlled separately.
+- `apply_unapplied_payment` computes `already_reduced` (sum of negative `ArLedger` entries already
+  tagged to this payment) and `already_applied` (sum of existing `CustomerPaymentApplied.amount_applied`
+  for this payment), derives `surplus = max(0, -already_reduced - already_applied)` — the amount
+  already counted against this payment's balance impact but not yet formally applied — and caps how
+  much of the current application is "genuinely new" accordingly. Only the genuinely-new portion
+  gets a new `ArLedger` entry and reduces `outstanding_balance`; the already-counted portion still
+  gets its `CustomerPaymentApplied` row and sale balance update, just no second ledger write.
+- Everything stays inside the existing single `db.commit()`. No `write_audit()` call existed in this
+  endpoint before or after — unchanged.
+
+### Verified live (Docker stack, 2026-07-09 follow-up audit)
+
+Using customer 1 (Suntech) and sale 42 as scratch, cleaned up afterward via the real
+`POST /sales/payments/{id}/reverse` endpoint (no raw deletes) — `outstanding_balance` and sale 42's
+`balance_due`/`payment_status` confirmed back to their exact pre-test baselines afterward.
+
+- **record_customer_payment-originated, unapplied amount applied** ($30 unapplied → applied $10,
+  then the remaining $20 in a later call): `outstanding_balance` dropped by $30 once, at creation —
+  neither apply call moved it again. Only one `ArLedger` row ever existed for the payment (the
+  original creation entry); no second row was written despite two `apply` calls. Sale `balance_due`
+  and the `CustomerPaymentApplied` rows updated correctly on both calls regardless.
+- **create_payment-originated regression** ($50 payment, $20 applied at creation leaving $30
+  unapplied, then $15 of the remainder applied later): creation wrote a ledger entry for only the
+  applied $20 (not $50) and reduced `outstanding_balance` by $20 only, matching pre-fix behavior
+  exactly. The later $15 apply call *did* write a new $15 ledger entry and reduce
+  `outstanding_balance` by $15 more — confirming genuinely-new amounts are still counted, not
+  skipped.
+- **Mixed partial case** (a payment with some already applied and some still unapplied — reused the
+  record_customer_payment payment above after its first $10 apply): applying the remaining $20
+  correctly identified it as fully already-counted (surplus tracks unapplied exactly for this
+  origin) — zero additional ledger/balance impact, confirming the surplus/applied comparison holds
+  across multiple sequential apply calls on the same payment.
+- **Live reasoning check, payment_id 44** (customer_id 2, $600, real data predating this session,
+  fully unapplied — not applied live, by design, since it's real customer data): confirmed via its
+  actual current rows that `already_reduced = -600.00` (one ArLedger entry, at creation) and
+  `already_applied = 0` (zero `CustomerPaymentApplied` rows). If any amount up to $600 were applied
+  today, `surplus` would resolve to $600 and the entire applied amount would be classified as
+  already-counted — `ledger_amount` would be 0, so no new `ArLedger` entry and no further
+  `outstanding_balance` reduction, correctly avoiding a double-count of the $600 already reflected
+  in the ledger since 2026-07-05.
+
 ## 2026-07-09 — Fix: voiding a sale permanently retired its sale_pid
 
 Reported bug: a cashier voided a sale, then tried to reuse its `sale_pid` (the "Receipt No."
@@ -103,13 +873,14 @@ Split the single per-application loop into two passes, both still inside the exi
   normal audited path. `outstanding_balance` corrected by the missing +75.00; new offsetting
   `ArLedger` row and `audit_log` entry both written.
 
-### Discovered, not fixed (separate, pre-existing issue)
+### Discovered here, fixed below
 
 While constructing the partial-application test case, `apply_unapplied_payment`
 (`POST /sales/payments/{id}/apply`) was observed writing a *second* `ArLedger` entry and reducing
 `outstanding_balance` a second time for money already accounted for by the payment's creation-time
 entry — i.e. applying previously-unapplied credit to a sale appears to double-count that credit's
-AR impact. Not investigated further or fixed here; flagged for a follow-up audit.
+AR impact. Fixed in the same commit as this entry — see "Fix: apply_unapplied_payment double-counted
+AR impact" below — but the fix went undocumented and unverified until the follow-up audit.
 
 ## 2026-07-09 — Feature: standalone customer payment reversal (correction mechanism)
 

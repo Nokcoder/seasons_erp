@@ -182,19 +182,20 @@ class ARLedgerPaymentRowOut(BaseModel):
 
 
 class TransactionLedgerRowOut(BaseModel):
-    """One row of a customer's AR-Charge transaction ledger — either the
-    original credit sale (debit) or a subsequent collection payment against
-    it (credit). Sorted oldest to newest with a running balance."""
+    """One row of a customer's AR-Charge transaction ledger — the original
+    credit sale (debit), a subsequent collection payment against it, or a
+    credit_to_account return credited against it (both credits). Sorted
+    oldest to newest with a running balance."""
     seq:             int  # ordinal position in the full chronological ledger; used as the Load More cursor
     date:            date
-    type:            str  # 'SALE' | 'PAYMENT'
+    type:            str  # 'SALE' | 'PAYMENT' | 'RETURN'
     sale_id:         Optional[int] = None
     payment_id:      Optional[int] = None
-    sales_id:        str  # receipt_no for a sale row, collection_receipt_no for a payment row
+    sales_id:        str  # receipt_no for a sale row, collection_receipt_no for a payment row, return_pid for a return row
     debit:           Decimal
     credit:          Decimal
     running_balance: Decimal
-    status:          str  # 'Paid' | 'Partially Paid' | 'Unpaid' (SALE rows) | 'Payment' (PAYMENT rows)
+    status:          str  # 'Paid' | 'Partially Paid' | 'Unpaid' (SALE rows) | 'Payment' (PAYMENT rows) | 'Return' (RETURN rows)
 
 
 # ==========================================
@@ -420,8 +421,16 @@ class CustomerPaymentCreate(BaseModel):
     customer_id: Optional[int] = None
     payment_mode_id: int
     amount: Decimal
+    payment_date: Optional[datetime] = None
     reference_number: Optional[str] = None
+    collection_receipt_no: Optional[str] = None
+    notes: Optional[str] = None
+    idempotency_key: Optional[str] = None
     applications: List[PaymentApplicationIn] = []
+    # PDC fields — required when the chosen payment mode has is_pdc=True
+    check_number: Optional[str] = None
+    check_date: Optional[date] = None
+    bank_name: Optional[str] = None
 
 
 class CustomerPaymentAppliedOut(BaseModel):
@@ -456,6 +465,7 @@ class CustomerPaymentOut(BaseModel):
     reversed_at:          Optional[datetime] = None
     reversed_reason:      Optional[str]      = None
     reversed_by_user_id:  Optional[int]      = None
+    idempotency_key:      Optional[str]      = None
     class Config: from_attributes = True
 
 
@@ -474,6 +484,7 @@ class RecordPaymentIn(BaseModel):
     collection_receipt_no: Optional[str] = None
     notes: Optional[str] = None
     sale_id: Optional[int] = None  # when provided, applies payment to this specific sale
+    idempotency_key: Optional[str] = None
     # PDC fields — required when payment mode has is_pdc=True
     check_number: Optional[str] = None
     check_date: Optional[date] = None
@@ -520,6 +531,7 @@ class SalesReturnCreate(BaseModel):
     return_date: Optional[date] = None
     shift_id: Optional[int] = None
     register_id: Optional[int] = None
+    idempotency_key: Optional[str] = None
     items: List[SalesReturnItemIn]
 
 
@@ -548,9 +560,14 @@ class SalesReturnOut(BaseModel):
     created_by_user_id: Optional[int] = None
     shift_id: Optional[int] = None
     register_id: Optional[int] = None
+    idempotency_key: Optional[str] = None
     items: List[SalesReturnItemOut] = []
     exchange_sale_pid: Optional[str] = None  # set if an exchange was created
     exchange_sale_id:  Optional[int] = None  # set if an exchange was created
+    # Reversal — non-null only after POST /sales/returns/{id}/reverse
+    reversed_at:          Optional[datetime] = None
+    reversed_reason:      Optional[str]      = None
+    reversed_by_user_id:  Optional[int]      = None
     class Config: from_attributes = True
 
 
@@ -713,4 +730,9 @@ class PDCBounceIn(BaseModel):
 
 class PaymentReversalRequest(BaseModel):
     """Payload for POST /sales/payments/{id}/reverse."""
+    reversal_reason: str
+
+
+class ReturnReversalRequest(BaseModel):
+    """Payload for POST /sales/returns/{id}/reverse."""
     reversal_reason: str

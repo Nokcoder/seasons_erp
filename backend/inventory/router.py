@@ -843,6 +843,7 @@ def add_variant(
     product_id: int,
     payload: schemas.VariantCreate,
     db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("manage_products")),
 ):
     product = _load_product(product_id, db)
 
@@ -880,16 +881,21 @@ def update_variant(
     variant_id: int,
     payload: schemas.VariantUpdate,
     db: Session = Depends(get_db),
-    _actor: User = Depends(get_current_user),
+    _actor: User = Depends(require_permission("manage_products")),
 ):
+    """Update a variant. Also handles reactivation (is_deleted=false) — the
+    lookup intentionally does not filter on is_deleted so a soft-deleted
+    variant can still be found and reactivated, same convention as
+    patch_supplier."""
     variant = (
         db.query(models.Variant)
-        .filter(models.Variant.variant_id == variant_id, models.Variant.is_deleted == False)
+        .filter(models.Variant.variant_id == variant_id)
         .first()
     )
     if not variant:
         raise HTTPException(status_code=404, detail="Variant not found")
 
+    old = _serialize(variant)
     updates = payload.model_dump(exclude_unset=True)
 
     if "PID" in updates:
@@ -917,6 +923,12 @@ def update_variant(
             detail="Cannot unset the only default variant — promote another variant first",
         )
 
+    if updates.get("is_deleted") is True and variant.is_default:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the default variant — promote another variant first",
+        )
+
     # Record price history when price or promo_price actually changes
     new_price       = updates.get("price",       variant.price)
     new_promo_price = updates.get("promo_price",  variant.promo_price)
@@ -937,16 +949,24 @@ def update_variant(
 
     try:
         db.commit()
-        db.refresh(variant)
-        variant.resolved_barcode = _resolve_barcode(variant)
-        return variant
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Database error")
 
+    db.refresh(variant)
+    variant.resolved_barcode = _resolve_barcode(variant)
+    write_audit(db, "inventory.variants", str(variant_id), "UPDATE",
+                actor_user_id=_actor.user_id, old_values=old, new_values=_serialize(variant))
+    db.commit()
+    return variant
+
 
 @router.delete("/variants/{variant_id}", status_code=204)
-def delete_variant(variant_id: int, db: Session = Depends(get_db)):
+def delete_variant(
+    variant_id: int,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("manage_products")),
+):
     variant = (
         db.query(models.Variant)
         .filter(models.Variant.variant_id == variant_id, models.Variant.is_deleted == False)
@@ -959,7 +979,12 @@ def delete_variant(variant_id: int, db: Session = Depends(get_db)):
             status_code=400,
             detail="Cannot delete the default variant — promote another variant first",
         )
+    old = _serialize(variant)
     variant.is_deleted = True
+    db.commit()
+    write_audit(db, "inventory.variants", str(variant_id), "DELETE",
+                actor_user_id=_actor.user_id, old_values=old,
+                new_values={**old, "is_deleted": True})
     db.commit()
 
 

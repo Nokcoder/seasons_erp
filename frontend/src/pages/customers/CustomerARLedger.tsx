@@ -15,6 +15,8 @@ import {
 import * as XLSX from 'xlsx'
 import { jsonToFormattedSheet, MONEY_FORMAT } from '../../lib/xlsxMoney'
 
+function uid() { return Math.random().toString(36).slice(2, 10) }
+
 const PAGE_SIZE = 200
 const STATUSES = ['Open', 'Partial', 'Overdue', 'Paid'] as const
 
@@ -117,6 +119,7 @@ export default function CustomerARLedger() {
   const [payCheckNum,   setPayCheckNum]   = useState('')
   const [payCheckDate,  setPayCheckDate]  = useState('')
   const [payBank,       setPayBank]       = useState('')
+  const [payKey,        setPayKey]        = useState<string>(() => uid())
   const [paySubmitting, setPaySubmitting] = useState(false)
   const [payError,      setPayError]      = useState('')
 
@@ -259,6 +262,7 @@ export default function CustomerARLedger() {
         collection_receipt_no: payReceiptNo.trim() || undefined,
         notes:            payNotes.trim() || undefined,
         sale_id:          recvSale.sale_id,
+        idempotency_key:  payKey,
         ...(selectedMode?.is_pdc ? {
           check_number: payCheckNum.trim() || undefined,
           check_date:   payCheckDate       || undefined,
@@ -267,6 +271,7 @@ export default function CustomerARLedger() {
       })
       await qc.invalidateQueries({ queryKey: ['customers', 'ar-ledger-view'] })
       await qc.invalidateQueries({ queryKey: qk.arLedgerPayments(recvSale.sale_id) })
+      setPayKey(uid())
       closeReceivePayment()
     } catch (e: unknown) {
       setPayError(e instanceof Error ? e.message : 'Payment failed.')

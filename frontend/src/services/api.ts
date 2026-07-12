@@ -350,6 +350,27 @@ export interface CustomerPaymentOut {
   check_date: string | null
   bank_name: string | null
   check_status: string | null
+  idempotency_key: string | null
+}
+
+export interface PaymentApplicationIn {
+  sale_id: number
+  amount_applied: number
+}
+
+export interface CustomerPaymentCreate {
+  customer_id?: number
+  payment_mode_id: number
+  amount: number
+  payment_date?: string
+  reference_number?: string
+  collection_receipt_no?: string
+  notes?: string
+  idempotency_key?: string
+  applications?: PaymentApplicationIn[]
+  check_number?: string
+  check_date?: string
+  bank_name?: string
 }
 
 export interface ArLedgerOut {
@@ -387,14 +408,14 @@ export interface ARLedgerPaymentRowOut {
 export interface TransactionLedgerRowOut {
   seq:             number
   date:            string  // "YYYY-MM-DD"
-  type:            'SALE' | 'PAYMENT'
+  type:            'SALE' | 'PAYMENT' | 'RETURN'
   sale_id:         number | null
   payment_id:      number | null
   sales_id:        string
   debit:           number
   credit:          number
   running_balance: number
-  status:          'Paid' | 'Partially Paid' | 'Unpaid' | 'Payment'
+  status:          'Paid' | 'Partially Paid' | 'Unpaid' | 'Payment' | 'Return'
 }
 
 export interface CustomerAgingOut {
@@ -665,7 +686,7 @@ export const salesApi = {
     },
     transactionLedgerExport: (id: number) =>
       get<TransactionLedgerRowOut[]>(`/sales/customers/${id}/transaction-ledger/export`),
-    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; collection_receipt_no?: string; notes?: string; sale_id?: number; check_number?: string; check_date?: string; bank_name?: string }) =>
+    recordPayment: (id: number, p: { payment_mode_id: number; amount: number; payment_date?: string; reference_number?: string; collection_receipt_no?: string; notes?: string; sale_id?: number; idempotency_key?: string; check_number?: string; check_date?: string; bank_name?: string }) =>
                      post<CustomerPaymentOut>(`/sales/customers/${id}/payment`, p),
     clearBouncedFlag: (id: number) =>
                      patch<CustomerOut>(`/sales/customers/${id}/clear-bounced-flag`, {}),
@@ -673,6 +694,9 @@ export const salesApi = {
       const qs = params?.search ? `?search=${encodeURIComponent(params.search)}` : ''
       return get<CustomerAgingOut[]>(`/sales/customers/aging${qs}`)
     },
+  },
+  payments: {
+    create: (p: CustomerPaymentCreate) => post<CustomerPaymentOut>('/sales/payments', p),
   },
   returns: {
     list: (params?: {
@@ -699,6 +723,7 @@ export const salesApi = {
       customer_id?: number | null; disposition?: string
       reason?: string; return_date?: string
       shift_id?: number | null; register_id?: number | null
+      idempotency_key?: string
       items: { sale_item_id?: number | null; variant_id: number; quantity: number; unit_price: number }[]
     }) => post<SalesReturnOut>('/sales/returns', p),
     exchange: (
@@ -1033,6 +1058,7 @@ export interface SalesReturnOut {
   created_by_user_id:  number | null
   shift_id:            number | null
   register_id:         number | null
+  idempotency_key:     string | null
   items:               SalesReturnItemOut[]
   exchange_sale_pid:   string | null
   exchange_sale_id:    number | null

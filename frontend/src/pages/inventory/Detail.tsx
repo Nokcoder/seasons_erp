@@ -187,6 +187,8 @@ export default function Detail() {
   const [productEdits,  setProductEdits]  = useState<Record<string, unknown>>({})
   const [saving,        setSaving]        = useState(false)
   const [saveMsg,       setSaveMsg]       = useState('')
+  const [showInactiveVariants, setShowInactiveVariants] = useState(false)
+  const [siblingError,  setSiblingError]  = useState('')
 
   // ── inline CRUD state ─────────────────────────────────────────────────────
   const [addBarcode,   setAddBarcode]   = useState({ barcode: '', uom_id: '', is_primary: false })
@@ -289,6 +291,28 @@ export default function Detail() {
   }
 
   const isDirty = Object.keys(variantEdits).length > 0 || Object.keys(productEdits).length > 0
+
+  // ── sibling variant deactivate / reactivate ──────────────────────────────
+  async function handleDeactivateSibling(sv: InvVariant) {
+    if (!window.confirm(`Deactivate variant "${sv.variant_name}" (${sv.PID})? It will stop appearing at the POS and can be reactivated later.`)) return
+    setSiblingError('')
+    try {
+      await catalogueApi.variants.delete(sv.variant_id)
+      await reload()
+    } catch (e: unknown) {
+      setSiblingError(e instanceof Error ? e.message : 'Failed to deactivate variant')
+    }
+  }
+
+  async function handleReactivateSibling(sv: InvVariant) {
+    setSiblingError('')
+    try {
+      await catalogueApi.variants.update(sv.variant_id, { is_deleted: false })
+      await reload()
+    } catch (e: unknown) {
+      setSiblingError(e instanceof Error ? e.message : 'Failed to reactivate variant')
+    }
+  }
 
   // ── barcode handlers ──────────────────────────────────────────────────────
   async function handleAddBarcode() {
@@ -633,7 +657,20 @@ export default function Detail() {
         </div>
 
         {/* ── SIBLING VARIANTS PANEL ── */}
-        <SectionHead title="All Variants" />
+        <div className="flex items-center justify-between mt-6 mb-3">
+          <div className="flex items-center gap-3 flex-1">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">All Variants</p>
+            <div className="flex-1 border-b border-gray-800" />
+          </div>
+          <label className="ml-3 flex items-center gap-1.5 text-[10px] text-gray-500 cursor-pointer select-none">
+            <input type="checkbox" checked={showInactiveVariants}
+              onChange={e => setShowInactiveVariants(e.target.checked)} />
+            Show inactive
+          </label>
+        </div>
+        {siblingError && (
+          <div className="text-xs text-red-400 bg-red-950 border border-red-900 rounded px-3 py-2 mb-2">{siblingError}</div>
+        )}
         <table className="w-full text-xs mb-1">
           <thead>
             <tr className="border-b border-gray-800">
@@ -643,25 +680,33 @@ export default function Detail() {
             </tr>
           </thead>
           <tbody>
-            {product.variants.filter(sv => !sv.is_deleted).map(sv => {
+            {product.variants.filter(sv => showInactiveVariants || !sv.is_deleted).map(sv => {
               const isCurrent = sv.variant_id === vid
               const svStock = sv.current_stock
                 .filter(s => s.location.location_type !== 'Virtual')
                 .reduce((sum, s) => sum + Number(s.quantity), 0)
               return (
                 <tr key={sv.variant_id}
-                  className={`border-b border-gray-800 transition-colors ${isCurrent ? 'bg-gray-900' : 'hover:bg-gray-900 cursor-pointer'}`}
+                  className={`border-b border-gray-800 transition-colors ${isCurrent ? 'bg-gray-900' : 'hover:bg-gray-900 cursor-pointer'} ${sv.is_deleted ? 'opacity-60' : ''}`}
                   onClick={() => !isCurrent && navigate(`/inventory/${sv.variant_id}`)}>
                   <td className={`px-2 py-1.5 ${isCurrent ? 'text-gray-100 font-semibold' : 'text-gray-400'}`}>
                     {sv.variant_name}
                     {sv.is_default && <span className="ml-1.5 text-[9px] bg-blue-950 text-blue-400 border border-blue-900 rounded px-1 py-0.5 font-bold">Default</span>}
                     {isCurrent    && <span className="ml-1.5 text-[9px] bg-gray-700 text-gray-300 rounded px-1 py-0.5">Viewing</span>}
+                    {sv.is_deleted && <span className="ml-1.5 text-[9px] bg-amber-950 text-amber-400 border border-amber-900 rounded px-1 py-0.5 font-bold">Inactive</span>}
                   </td>
                   <td className={`px-2 py-1.5 font-mono ${isCurrent ? 'text-gray-300' : 'text-gray-500'}`}>{sv.PID}</td>
                   <td className={`px-2 py-1.5 font-mono ${isCurrent ? 'text-gray-400' : 'text-gray-600'}`}>{sv.sku ?? '—'}</td>
                   <td className={`px-2 py-1.5 tabular-nums ${isCurrent ? 'text-gray-300' : 'text-gray-500'}`}>{svStock.toFixed(0)}</td>
-                  <td className="px-2 py-1.5">
-                    {!isCurrent && <span className="text-[10px] text-blue-500 hover:text-blue-400">View →</span>}
+                  <td className="px-2 py-1.5" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center gap-2 justify-end">
+                      {!isCurrent && <span className="text-[10px] text-blue-500 hover:text-blue-400 cursor-pointer" onClick={() => navigate(`/inventory/${sv.variant_id}`)}>View →</span>}
+                      {canEdit && (
+                        sv.is_deleted
+                          ? <button onClick={() => handleReactivateSibling(sv)} className="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium">Reactivate</button>
+                          : <button onClick={() => handleDeactivateSibling(sv)} className="text-gray-700 hover:text-red-500">×</button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               )
