@@ -1,12 +1,19 @@
 # inventory/models.py
 import enum
 from sqlalchemy import (Column, Integer, BigInteger, String, Boolean, Numeric,
-                         ForeignKey, Text, DateTime, Table,
+                         ForeignKey, Text, DateTime, Table, Index,
                          UniqueConstraint, Enum as SAEnum)
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 from core.database import Base
+
+# NOTE: the tenant_id columns below use
+#   server_default=text("current_setting('app.tenant_id', true)::integer")
+# so an INSERT that omits tenant_id auto-fills it from the per-request GUC (set
+# by get_db's after_begin listener, Phase 2 step 2). Admin/seed paths that set
+# tenant_id explicitly override this; contextless inserts get NULL → rejected by
+# the NOT NULL constraint (fail closed).
 from auth.models import User, Employee
 
 
@@ -28,11 +35,16 @@ class LedgerReason(enum.Enum):
 # ==========================================
 class UOM(Base):
     __tablename__ = "uoms"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "uom_code", name="uq_uoms_tenant_code"),
+        {"schema": "inventory"},
+    )
 
-    uom_id   = Column(Integer, primary_key=True)
-    uom_code = Column(String(50), unique=True, nullable=False)
-    uom_name = Column(String(255))
+    uom_id    = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
+    uom_code  = Column(String(50), nullable=False)
+    uom_name  = Column(String(255))
     is_deleted = Column(Boolean, default=False)
 
 
@@ -41,10 +53,15 @@ class UOM(Base):
 # ==========================================
 class ProductCategory(Base):
     __tablename__ = "product_categories"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "category_name", name="uq_categories_tenant_name"),
+        {"schema": "inventory"},
+    )
 
     category_id       = Column(Integer, primary_key=True)
-    category_name     = Column(String(255), unique=True, nullable=False)
+    tenant_id         = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
+    category_name     = Column(String(255), nullable=False)
     parent_category_id = Column(Integer, ForeignKey("inventory.product_categories.category_id"))
     is_deleted        = Column(Boolean, default=False)
 
@@ -53,6 +70,8 @@ class ProductCategory(Base):
 product_category_links = Table(
     "product_category_links",
     Base.metadata,
+    Column("tenant_id", Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+           server_default=text("current_setting('app.tenant_id', true)::integer")),
     Column("product_id",  Integer, ForeignKey("inventory.products.product_id",
            ondelete="CASCADE"), primary_key=True),
     Column("category_id", Integer, ForeignKey("inventory.product_categories.category_id",
@@ -66,10 +85,15 @@ product_category_links = Table(
 # ==========================================
 class Location(Base):
     __tablename__ = "locations"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "location_name", name="uq_locations_tenant_name"),
+        {"schema": "inventory"},
+    )
 
     location_id        = Column(Integer, primary_key=True)
-    location_name      = Column(String(255), unique=True, nullable=False)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
+    location_name      = Column(String(255), nullable=False)
     location_type      = Column(
         SAEnum("Warehouse", "Store", "Bin", "Virtual",
                name="location_type", schema="inventory"),
@@ -93,6 +117,8 @@ class Product(Base):
     __table_args__ = {"schema": "inventory"}
 
     product_id   = Column(Integer, primary_key=True, index=True)
+    tenant_id    = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     brand        = Column(String(255), nullable=False)
     product_type = Column(
         SAEnum("Inventory", "Non-Inventory", "Service",
@@ -120,12 +146,17 @@ class Product(Base):
 # ==========================================
 class Variant(Base):
     __tablename__ = "variants"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "PID", name="uq_variants_tenant_pid"),
+        {"schema": "inventory"},
+    )
 
     variant_id  = Column(Integer, primary_key=True, index=True)
+    tenant_id   = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     product_id  = Column(Integer, ForeignKey("inventory.products.product_id",
                           ondelete="CASCADE"), nullable=False)
-    PID         = Column(String(50), unique=True, nullable=False)
+    PID         = Column(String(50), nullable=False)
     variant_name = Column(String(100), nullable=False, default="Default")
     sku         = Column(String(100), index=True, nullable=True)
     is_default  = Column(Boolean, default=False, nullable=False)
@@ -155,12 +186,17 @@ class Variant(Base):
 # ==========================================
 class VariantBarcode(Base):
     __tablename__ = "variant_barcodes"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "barcode", name="uq_barcodes_tenant_barcode"),
+        {"schema": "inventory"},
+    )
 
     barcode_id = Column(BigInteger, primary_key=True)
+    tenant_id  = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id = Column(Integer, ForeignKey("inventory.variants.variant_id",
                          ondelete="CASCADE"), nullable=False)
-    barcode    = Column(String(100), unique=True, nullable=False)
+    barcode    = Column(String(100), nullable=False)
     uom_id     = Column(Integer, ForeignKey("inventory.uoms.uom_id"))
     is_primary = Column(Boolean, default=False)
 
@@ -175,6 +211,8 @@ class VariantUomConversion(Base):
     __tablename__ = "variant_uom_conversions"
     __table_args__ = {"schema": "inventory"}
 
+    tenant_id            = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                   server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id           = Column(Integer, ForeignKey("inventory.variants.variant_id",
                                    ondelete="CASCADE"), primary_key=True)
     from_uom_id          = Column(Integer, ForeignKey("inventory.uoms.uom_id"), primary_key=True)
@@ -196,6 +234,8 @@ class BundleComponent(Base):
     __tablename__ = "bundle_components"
     __table_args__ = {"schema": "inventory"}
 
+    tenant_id            = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                   server_default=text("current_setting('app.tenant_id', true)::integer"))
     bundle_variant_id    = Column(Integer, ForeignKey("inventory.variants.variant_id",
                                    ondelete="CASCADE"), primary_key=True)
     component_variant_id = Column(Integer, ForeignKey("inventory.variants.variant_id"),
@@ -212,10 +252,15 @@ class BundleComponent(Base):
 # ==========================================
 class Supplier(Base):
     __tablename__ = "suppliers"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "supplier_code", name="uq_suppliers_tenant_code"),
+        {"schema": "inventory"},
+    )
 
     supplier_id       = Column(Integer, primary_key=True)
-    supplier_code     = Column(String(100), unique=True, nullable=False)
+    tenant_id         = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
+    supplier_code     = Column(String(100), nullable=False)
     supplier_name     = Column(String(255), nullable=False)
     bank_account_name = Column(String(255))
     terms             = Column(Integer, default=0)   # payment terms in days
@@ -241,6 +286,8 @@ class VariantSupplier(Base):
     )
 
     id                = Column(Integer, primary_key=True)
+    tenant_id         = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id        = Column(Integer, ForeignKey("inventory.variants.variant_id",
                                 ondelete="CASCADE"), nullable=False)
     supplier_id       = Column(Integer, ForeignKey("inventory.suppliers.supplier_id",
@@ -259,10 +306,15 @@ class VariantSupplier(Base):
 # ==========================================
 class InventoryTransfer(Base):
     __tablename__ = "inventory_transfers"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "transfer_pid", name="uq_transfers_tenant_pid"),
+        {"schema": "inventory"},
+    )
 
     transfer_id                = Column(Integer, primary_key=True)
-    transfer_pid               = Column(String(100), unique=True)
+    tenant_id                  = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                        server_default=text("current_setting('app.tenant_id', true)::integer"))
+    transfer_pid               = Column(String(100))
     from_location_id           = Column(Integer, ForeignKey("inventory.locations.location_id"))
     to_location_id             = Column(Integer, ForeignKey("inventory.locations.location_id"))
     released_by_user_id        = Column(Integer, ForeignKey("auth.users.user_id"))
@@ -295,6 +347,8 @@ class InventoryTransferItem(Base):
     __table_args__ = {"schema": "inventory"}
 
     transfer_item_id   = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                 server_default=text("current_setting('app.tenant_id', true)::integer"))
     transfer_id        = Column(Integer, ForeignKey("inventory.inventory_transfers.transfer_id",
                                  ondelete="CASCADE"))
     variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"),
@@ -312,9 +366,15 @@ class InventoryTransferItem(Base):
 # ==========================================
 class InventoryLedger(Base):
     __tablename__ = "inventory_ledger"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        Index("ix_ledger_tenant_variant",  "tenant_id", "variant_id"),
+        Index("ix_ledger_tenant_occurred", "tenant_id", "occurred_at"),
+        {"schema": "inventory"},
+    )
 
     ledger_id      = Column(BigInteger, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                             server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id     = Column(Integer, ForeignKey("inventory.variants.variant_id"),
                              nullable=False)
     location_id    = Column(Integer, ForeignKey("inventory.locations.location_id"),
@@ -342,6 +402,8 @@ class CurrentStock(Base):
     )
 
     stock_id     = Column(BigInteger, primary_key=True)
+    tenant_id    = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                          server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id   = Column(Integer, ForeignKey("inventory.variants.variant_id"),
                           nullable=False)
     location_id  = Column(Integer, ForeignKey("inventory.locations.location_id"),
@@ -359,9 +421,14 @@ class CurrentStock(Base):
 # ==========================================
 class CostLayer(Base):
     __tablename__ = "cost_layers"
-    __table_args__ = {"schema": "inventory"}
+    __table_args__ = (
+        Index("ix_cost_layers_tenant_variant", "tenant_id", "variant_id"),
+        {"schema": "inventory"},
+    )
 
     layer_id          = Column(BigInteger, primary_key=True)
+    tenant_id         = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id        = Column(Integer, ForeignKey("inventory.variants.variant_id",
                                 ondelete="CASCADE"), nullable=False)
     # FK to procurement schema — resolved at runtime after all models are imported
@@ -392,6 +459,8 @@ class VariantPriceHistory(Base):
     __table_args__ = {"schema": "inventory"}
 
     history_id         = Column(BigInteger, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"),
                                 nullable=False)
     old_price          = Column(Numeric(15, 2), nullable=True)
@@ -414,6 +483,8 @@ class VariantCostHistory(Base):
     __table_args__ = {"schema": "inventory"}
 
     history_id             = Column(BigInteger, primary_key=True)
+    tenant_id              = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                    server_default=text("current_setting('app.tenant_id', true)::integer"))
     variant_id             = Column(Integer, ForeignKey("inventory.variants.variant_id"),
                                     nullable=False)
     supplier_id            = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"),

@@ -1,9 +1,12 @@
 # procurement/models.py
 from sqlalchemy import (Column, Integer, String, Text, Numeric, DateTime, Date,
-                         Boolean, ForeignKey, Enum as SAEnum)
+                         Boolean, ForeignKey, UniqueConstraint, Enum as SAEnum)
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 from core.database import Base
+
+# tenant_id columns below use server_default=current_setting('app.tenant_id')::int
+# so INSERTs that omit tenant_id auto-fill from the per-request GUC (Phase 2).
 
 
 # ==========================================
@@ -11,10 +14,15 @@ from core.database import Base
 # ==========================================
 class PurchaseOrder(Base):
     __tablename__ = "purchase_orders"
-    __table_args__ = {"schema": "procurement"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "po_pid", name="uq_purchase_orders_tenant_pid"),
+        {"schema": "procurement"},
+    )
 
     po_id                = Column(Integer, primary_key=True)
-    po_pid               = Column(String(100), unique=True, nullable=False)
+    tenant_id            = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                  server_default=text("current_setting('app.tenant_id', true)::integer"))
+    po_pid               = Column(String(100), nullable=False)
     supplier_id          = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
     location_id          = Column(Integer, ForeignKey("inventory.locations.location_id"))
     order_date           = Column(DateTime(timezone=True), server_default=func.now())
@@ -45,6 +53,8 @@ class PurchaseOrderItem(Base):
     __table_args__ = {"schema": "procurement"}
 
     po_item_id         = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                 server_default=text("current_setting('app.tenant_id', true)::integer"))
     po_id              = Column(Integer, ForeignKey("procurement.purchase_orders.po_id",
                                  ondelete="CASCADE"))
     variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"))
@@ -63,10 +73,15 @@ class PurchaseOrderItem(Base):
 # ==========================================
 class InventoryShipment(Base):
     __tablename__ = "inventory_shipments"
-    __table_args__ = {"schema": "procurement"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "shipment_pid", name="uq_shipments_tenant_pid"),
+        {"schema": "procurement"},
+    )
 
     shipment_id              = Column(Integer, primary_key=True)
-    shipment_pid             = Column(String(100), unique=True)
+    tenant_id                = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                      server_default=text("current_setting('app.tenant_id', true)::integer"))
+    shipment_pid             = Column(String(100))
     supplier_id              = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
     po_id                    = Column(Integer, ForeignKey("procurement.purchase_orders.po_id"),
                                       nullable=True)
@@ -102,6 +117,8 @@ class ReceivingDetail(Base):
     __table_args__ = {"schema": "procurement"}
 
     detail_id          = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                 server_default=text("current_setting('app.tenant_id', true)::integer"))
     shipment_id        = Column(Integer, ForeignKey("procurement.inventory_shipments.shipment_id",
                                  ondelete="CASCADE"))
     variant_id         = Column(Integer, ForeignKey("inventory.variants.variant_id"))

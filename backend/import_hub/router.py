@@ -78,7 +78,7 @@ def _write_template(wb: xlsxwriter.Workbook, sheet_name: str,
 # CUSTOMERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/customers/template")
+@router.get("/customers/template", dependencies=[Depends(require_permission("manage_import"))])
 def customer_template():
     def build(wb):
         _write_template(wb, "Customers",
@@ -209,7 +209,7 @@ def customer_confirm(
 # SUPPLIERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/suppliers/template")
+@router.get("/suppliers/template", dependencies=[Depends(require_permission("manage_import"))])
 def supplier_template():
     def build(wb):
         _write_template(wb, "Suppliers",
@@ -358,7 +358,7 @@ def supplier_confirm(
 # OPENING STOCK BALANCES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/stock-balances/template")
+@router.get("/stock-balances/template", dependencies=[Depends(require_permission("manage_import"))])
 def stock_template():
     def build(wb):
         _write_template(wb, "Stock Balances",
@@ -535,7 +535,7 @@ def stock_confirm(
 # VARIANT PRICES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/variant-prices/template")
+@router.get("/variant-prices/template", dependencies=[Depends(require_permission("manage_import"))])
 def price_template():
     def build(wb):
         _write_template(wb, "Variant Prices",
@@ -675,7 +675,7 @@ def price_confirm(
 # VARIANT COSTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/variant-costs/template")
+@router.get("/variant-costs/template", dependencies=[Depends(require_permission("manage_import"))])
 def cost_template():
     def build(wb):
         _write_template(wb, "Variant Costs",

@@ -2,7 +2,7 @@
 import enum as _py_enum
 
 from sqlalchemy import (Column, Integer, BigInteger, String, Boolean, Numeric,
-                         Date, DateTime, ForeignKey, UniqueConstraint,
+                         Date, DateTime, ForeignKey, UniqueConstraint, Index,
                          Enum as SAEnum)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func, text
@@ -23,6 +23,8 @@ class PaymentMode(Base):
     __table_args__ = {"schema": "sales"}
 
     payment_mode_id = Column(Integer, primary_key=True)
+    tenant_id       = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     name            = Column(String(100), nullable=False)
     is_physical     = Column(Boolean, default=True, nullable=False)
     is_active       = Column(Boolean, default=True, nullable=False)
@@ -44,6 +46,8 @@ class CashRegister(Base):
     __table_args__ = {"schema": "sales"}
 
     register_id = Column(Integer, primary_key=True)
+    tenant_id   = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     name        = Column(String(100), nullable=False)
     location_id = Column(Integer, ForeignKey("inventory.locations.location_id"),
                          nullable=False)
@@ -60,6 +64,8 @@ class Customer(Base):
     __table_args__ = {"schema": "sales"}
 
     customer_id         = Column(Integer, primary_key=True)
+    tenant_id           = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     customer_name       = Column(String(255), nullable=False)
     credit_limit        = Column(Numeric(15, 2), nullable=True)
     terms_days          = Column(Integer, default=0, nullable=False)
@@ -74,9 +80,15 @@ class Customer(Base):
 # ==========================================
 class ArLedger(Base):
     __tablename__ = "ar_ledger"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        Index("ix_ar_ledger_tenant_customer", "tenant_id", "customer_id"),
+        Index("ix_ar_ledger_tenant_occurred", "tenant_id", "occurred_at"),
+        {"schema": "sales"},
+    )
 
     ar_ledger_id   = Column(BigInteger, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     customer_id    = Column(Integer, ForeignKey("sales.customers.customer_id"),
                             nullable=True)
     amount_change  = Column(Numeric(15, 2), nullable=False)
@@ -101,6 +113,8 @@ class Shift(Base):
     __table_args__ = {"schema": "sales"}
 
     shift_id   = Column(Integer, primary_key=True)
+    tenant_id  = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     shift_name = Column(String(100), nullable=False)
     is_active  = Column(Boolean, default=True, nullable=False)
 
@@ -110,9 +124,20 @@ class Shift(Base):
 # ==========================================
 class Sale(Base):
     __tablename__ = "sales"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_sales_tenant_idem"),
+        Index("ix_sales_tenant_txndate",  "tenant_id", "transaction_date"),
+        Index("ix_sales_tenant_customer", "tenant_id", "customer_id"),
+        {"schema": "sales"},
+    )
+    # NOTE: the per-tenant partial unique index on (tenant_id, sale_pid)
+    # WHERE status <> 'Voided' is created in the migration only (SQLAlchemy
+    # cannot cleanly express the enum-typed partial predicate), matching how
+    # the original sales_sale_pid_active_key was always migration-only.
 
     sale_id            = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     # NULL until the draft is posted (or set manually beforehand). Uniqueness is enforced
     # only among active (non-Voided) sales via the partial index sales_sale_pid_active_key
     # (migration u1v2w3x4y5z6) — not a column-level constraint, so no unique=True here.
@@ -167,7 +192,7 @@ class Sale(Base):
     )
     voided_at       = Column(DateTime(timezone=True), nullable=True)
     void_reason     = Column(String(500), nullable=True)
-    idempotency_key = Column(String(255), unique=True, nullable=True)
+    idempotency_key = Column(String(255), nullable=True)
     receipt_no      = Column(String(100), nullable=True)
 
     location   = relationship("Location")
@@ -189,10 +214,13 @@ class SaleItem(Base):
     __table_args__ = (
         UniqueConstraint("sale_id", "variant_id", "cost_layer_id",
                          name="uq_sale_items_sale_variant_layer"),
+        Index("ix_sale_items_tenant_variant", "tenant_id", "variant_id"),
         {"schema": "sales"},
     )
 
     sale_item_id      = Column(Integer, primary_key=True)
+    tenant_id         = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     sale_id           = Column(Integer, ForeignKey("sales.sales.sale_id",
                                 ondelete="CASCADE"), nullable=False)
     variant_id        = Column(Integer, ForeignKey("inventory.variants.variant_id"),
@@ -222,9 +250,14 @@ class SaleItem(Base):
 # ==========================================
 class CustomerPayment(Base):
     __tablename__ = "customer_payments"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_cust_payments_tenant_idem"),
+        {"schema": "sales"},
+    )
 
     payment_id       = Column(Integer, primary_key=True)
+    tenant_id        = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                              server_default=text("current_setting('app.tenant_id', true)::integer"))
     customer_id      = Column(Integer, ForeignKey("sales.customers.customer_id"),
                               nullable=True)
     payment_mode_id  = Column(Integer, ForeignKey("sales.payment_modes.payment_mode_id"),
@@ -247,7 +280,7 @@ class CustomerPayment(Base):
     reversed_reason      = Column(String(500), nullable=True)
     reversed_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"),
                                   nullable=True)
-    idempotency_key      = Column(String(255), unique=True, nullable=True)
+    idempotency_key      = Column(String(255), nullable=True)
 
     customer     = relationship("Customer")
     payment_mode = relationship("PaymentMode")
@@ -263,6 +296,8 @@ class CustomerPaymentApplied(Base):
     __table_args__ = {"schema": "sales"}
 
     apply_id       = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     payment_id     = Column(Integer, ForeignKey("sales.customer_payments.payment_id"),
                             nullable=False)
     sale_id        = Column(Integer, ForeignKey("sales.sales.sale_id"),
@@ -279,12 +314,18 @@ class CustomerPaymentApplied(Base):
 # ==========================================
 class SalesReturn(Base):
     __tablename__ = "sales_returns"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "return_pid", name="uq_sales_returns_tenant_pid"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_sales_returns_tenant_idem"),
+        {"schema": "sales"},
+    )
 
     return_id          = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                server_default=text("current_setting('app.tenant_id', true)::integer"))
     # Generated at creation time; nullable at model level to avoid constraint
     # violations during construction before the PID is computed
-    return_pid         = Column(String(100), unique=True, nullable=True)
+    return_pid         = Column(String(100), nullable=True)
     sale_id            = Column(Integer, ForeignKey("sales.sales.sale_id"),
                                 nullable=True)
     location_id        = Column(Integer, ForeignKey("inventory.locations.location_id"),
@@ -301,7 +342,7 @@ class SalesReturn(Base):
                                 nullable=True)
     register_id        = Column(Integer, ForeignKey("sales.cash_registers.register_id"),
                                 nullable=True)
-    idempotency_key    = Column(String(255), unique=True, nullable=True)
+    idempotency_key    = Column(String(255), nullable=True)
     reversed_at          = Column(DateTime(timezone=True), nullable=True)
     reversed_reason      = Column(String(500), nullable=True)
     reversed_by_user_id  = Column(Integer, ForeignKey("auth.users.user_id"),
@@ -324,6 +365,8 @@ class SalesReturnItem(Base):
     __table_args__ = {"schema": "sales"}
 
     return_item_id = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                             server_default=text("current_setting('app.tenant_id', true)::integer"))
     return_id      = Column(Integer, ForeignKey("sales.sales_returns.return_id",
                              ondelete="CASCADE"), nullable=False)
     # Nullable for blind returns (no original sale_item to reference)
@@ -347,10 +390,15 @@ class SalesReturnItem(Base):
 # ==========================================
 class SupplierReturn(Base):
     __tablename__ = "supplier_returns"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "return_pid", name="uq_supplier_returns_tenant_pid"),
+        {"schema": "sales"},
+    )
 
     return_id           = Column(Integer, primary_key=True)
-    return_pid          = Column(String(100), unique=True, nullable=True)
+    tenant_id           = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                 server_default=text("current_setting('app.tenant_id', true)::integer"))
+    return_pid          = Column(String(100), nullable=True)
     supplier_id         = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"),
                                  nullable=False)
     # Source location — typically the virtual Quarantine location
@@ -381,6 +429,8 @@ class SupplierReturnItem(Base):
     __table_args__ = {"schema": "sales"}
 
     return_item_id       = Column(Integer, primary_key=True)
+    tenant_id            = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                   server_default=text("current_setting('app.tenant_id', true)::integer"))
     return_id            = Column(Integer, ForeignKey("sales.supplier_returns.return_id",
                                    ondelete="CASCADE"), nullable=False)
     variant_id           = Column(Integer, ForeignKey("inventory.variants.variant_id"),
@@ -400,10 +450,15 @@ class SupplierReturnItem(Base):
 # ==========================================
 class CreditMemo(Base):
     __tablename__ = "credit_memos"
-    __table_args__ = {"schema": "sales"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="uq_credit_memos_tenant_code"),
+        {"schema": "sales"},
+    )
 
     memo_id              = Column(Integer, primary_key=True)
-    code                 = Column(String(20), unique=True, nullable=False)
+    tenant_id            = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                  server_default=text("current_setting('app.tenant_id', true)::integer"))
+    code                 = Column(String(20), nullable=False)
     amount               = Column(Numeric(15, 2), nullable=False)
     status               = Column(String(20), nullable=False, default='ACTIVE',
                                   server_default='ACTIVE')
@@ -433,6 +488,8 @@ class CreditMemoRedemption(Base):
     __table_args__ = {"schema": "sales"}
 
     redemption_id       = Column(Integer, primary_key=True)
+    tenant_id           = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                                 server_default=text("current_setting('app.tenant_id', true)::integer"))
     memo_id             = Column(Integer, ForeignKey("sales.credit_memos.memo_id"),
                                  nullable=False)
     sale_id             = Column(Integer, ForeignKey("sales.sales.sale_id"),

@@ -3,6 +3,8 @@ const ImportHub = lazy(() => import('./settings/ImportHub'))
 import { Navigate } from 'react-router-dom'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useAuth } from '../context/AuthContext'
+import { TemplateLibrary } from '../print/designer/TemplateLibrary'
+import { FunctionAssignmentPanel } from '../print/designer/FunctionAssignmentPanel'
 import { useTheme, type Theme } from '../hooks/useTheme'
 import { useAltRows } from '../hooks/useAltRows'
 import { SkeletonTable, FetchingBar } from '../components/Skeleton'
@@ -24,6 +26,7 @@ import {
 const TABS = [
   'Locations', 'Shifts', 'Registers', 'Payment Modes',
   'UOMs', 'Categories', 'Employees & Users', 'Roles', 'Appearance', 'Inventory Policy', 'Import',
+  'Print Templates',
 ] as const
 type TabName = typeof TABS[number]
 
@@ -38,6 +41,7 @@ const TAB_ACTION_MAP: Partial<Record<TabName, string>> = {
   'Roles':             'manage_roles',
   'Appearance':        'manage_appearance',
   'Inventory Policy':  'manage_inventory_policy',
+  'Print Templates':   'manage_print_templates',
   // 'Import' is intentionally absent — visibility is derived from data-type actions below
 }
 
@@ -1394,6 +1398,52 @@ function InventoryPolicyTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TAB 12 — PRINT TEMPLATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function decodeTenantId(token: string): string {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(b64)) as { tenant_id?: number }
+    return payload.tenant_id != null ? String(payload.tenant_id) : 'unknown-tenant'
+  } catch {
+    return 'unknown-tenant'
+  }
+}
+
+function PrintTemplatesTab() {
+  const { token } = useAuth()
+  const tenantId = token ? decodeTenantId(token) : 'unknown-tenant'
+  const [view, setView] = useState<'library' | 'assignments'>('library')
+
+  return (
+    <div>
+      <div className="flex gap-0.5 mb-4 border-b t-border">
+        <button
+          onClick={() => setView('library')}
+          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+            view === 'library' ? 't-text-1 border-[var(--accent)]' : 't-text-3 border-transparent hover:t-text-2'
+          }`}
+        >
+          Library
+        </button>
+        <button
+          onClick={() => setView('assignments')}
+          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+            view === 'assignments' ? 't-text-1 border-[var(--accent)]' : 't-text-3 border-transparent hover:t-text-2'
+          }`}
+        >
+          Assignments
+        </button>
+      </div>
+      {view === 'library'
+        ? <TemplateLibrary tenantId={tenantId} />
+        : <FunctionAssignmentPanel tenantId={tenantId} />}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ROOT — SETTINGS PAGE
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1423,6 +1473,7 @@ export default function Settings() {
     'Appearance':        <AppearanceTab />,
     'Inventory Policy':  <InventoryPolicyTab />,
     'Import':            <Suspense fallback={<div className="p-4 text-xs t-text-4 animate-pulse">Loading…</div>}><ImportHub /></Suspense>,
+    'Print Templates':   <PrintTemplatesTab />,
   }
 
   if (visibleTabs.length === 0) {

@@ -1,9 +1,12 @@
 # ap/models.py
 from sqlalchemy import (Column, Integer, BigInteger, String, Text, Numeric,
-                         DateTime, Date, Boolean, ForeignKey, Enum as SAEnum)
+                         DateTime, Date, Boolean, ForeignKey, Index, Enum as SAEnum)
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 from core.database import Base
+
+# tenant_id columns below use server_default=current_setting('app.tenant_id')::int
+# so INSERTs that omit tenant_id auto-fill from the per-request GUC (Phase 2).
 
 
 # ==========================================
@@ -14,6 +17,8 @@ class SupplierInvoice(Base):
     __table_args__ = {"schema": "ap"}
 
     invoice_id     = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     supplier_id    = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
     shipment_id    = Column(Integer, ForeignKey("procurement.inventory_shipments.shipment_id"))
     invoice_number = Column(String(100))
@@ -55,6 +60,8 @@ class SupplierInvoiceItem(Base):
     __table_args__ = {"schema": "ap"}
 
     id               = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id        = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                              server_default=text("current_setting('app.tenant_id', true)::integer"))
     invoice_id       = Column(Integer,
                               ForeignKey("ap.supplier_invoices.invoice_id"),
                               nullable=False)
@@ -94,6 +101,8 @@ class SupplierPayment(Base):
     __table_args__ = {"schema": "ap"}
 
     payment_id       = Column(Integer, primary_key=True)
+    tenant_id        = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                              server_default=text("current_setting('app.tenant_id', true)::integer"))
     supplier_id      = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
     amount           = Column(Numeric(15, 2), nullable=False)
     payment_date     = Column(DateTime(timezone=True))
@@ -111,6 +120,8 @@ class InvoicePayment(Base):
     __tablename__ = "invoice_payments"
     __table_args__ = {"schema": "ap"}
 
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                             server_default=text("current_setting('app.tenant_id', true)::integer"))
     invoice_id     = Column(Integer, ForeignKey("ap.supplier_invoices.invoice_id"),
                              primary_key=True)
     payment_id     = Column(Integer, ForeignKey("ap.supplier_payments.payment_id"),
@@ -126,9 +137,15 @@ class InvoicePayment(Base):
 # ==========================================
 class ApLedger(Base):
     __tablename__ = "ap_ledger"
-    __table_args__ = {"schema": "ap"}
+    __table_args__ = (
+        Index("ix_ap_ledger_tenant_supplier", "tenant_id", "supplier_id"),
+        Index("ix_ap_ledger_tenant_occurred", "tenant_id", "occurred_at"),
+        {"schema": "ap"},
+    )
 
     ap_ledger_id   = Column(BigInteger, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False,
+                            server_default=text("current_setting('app.tenant_id', true)::integer"))
     supplier_id    = Column(Integer, ForeignKey("inventory.suppliers.supplier_id"))
     amount_change  = Column(Numeric(15, 2), nullable=False)
     reason         = Column(

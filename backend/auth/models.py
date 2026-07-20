@@ -1,6 +1,7 @@
 # auth/models.py
 from sqlalchemy import (Column, Integer, BigInteger, String, Boolean,
-                         DateTime, ForeignKey, Table, Enum as SAEnum)
+                         DateTime, ForeignKey, Table, UniqueConstraint, Index,
+                         Enum as SAEnum, text)
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
@@ -36,7 +37,7 @@ class Program(Base):
     program_key  = Column(String, unique=True, nullable=False)
     display_name = Column(String, nullable=False)
     module       = Column(String, nullable=False)
-    sort_order   = Column(Integer, nullable=False, default=0)
+    sort_order   = Column(Integer, nullable=False, default=0, server_default="0")
 
     actions = relationship("Action", back_populates="program", order_by="Action.action_id")
     roles   = relationship("Role", secondary="auth.role_programs", back_populates="programs")
@@ -63,11 +64,13 @@ class Employee(Base):
     __table_args__ = {"schema": "auth"}
 
     employee_id = Column(Integer, primary_key=True)
+    tenant_id   = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False)
     first_name  = Column(String, nullable=False)
     last_name   = Column(String, nullable=False)
     is_active   = Column(Boolean, default=True, nullable=False)
 
-    user = relationship("User", back_populates="employee", uselist=False)
+    tenant = relationship("Tenant")
+    user   = relationship("User", back_populates="employee", uselist=False)
 
 
 # ==========================================
@@ -75,16 +78,21 @@ class Employee(Base):
 # ==========================================
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "username", name="uq_users_tenant_username"),
+        {"schema": "auth"},
+    )
 
     user_id       = Column(Integer, primary_key=True)
+    tenant_id     = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False)
     employee_id   = Column(Integer, ForeignKey("auth.employees.employee_id"), nullable=False)
-    username      = Column(String(100), unique=True, nullable=False)
+    username      = Column(String(100), nullable=False)
     password_hash = Column(String(255), nullable=False)
     is_active     = Column(Boolean, default=True)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
 
+    tenant   = relationship("Tenant")
     employee = relationship("Employee", back_populates="user")
     roles    = relationship("Role", secondary="auth.user_roles", back_populates="users")
 
@@ -99,12 +107,17 @@ class User(Base):
 # ==========================================
 class Role(Base):
     __tablename__ = "roles"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "role_name", name="uq_roles_tenant_role_name"),
+        {"schema": "auth"},
+    )
 
     role_id            = Column(Integer, primary_key=True)
-    role_name          = Column(String, unique=True, nullable=False)
-    is_cashiering_mode = Column(Boolean, nullable=False, default=False)
+    tenant_id          = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=False)
+    role_name          = Column(String, nullable=False)
+    is_cashiering_mode = Column(Boolean, nullable=False, default=False, server_default="false")
 
+    tenant   = relationship("Tenant")
     users    = relationship("User",    secondary="auth.user_roles",    back_populates="roles")
     programs = relationship("Program", secondary="auth.role_programs", back_populates="roles")
     actions  = relationship("Action",  secondary="auth.role_actions",  back_populates="roles")
@@ -127,6 +140,9 @@ class LoginAttempt(Base):
     __table_args__ = {"schema": "auth"}
 
     attempt_id  = Column(BigInteger, primary_key=True)
+    # Nullable by design: a login attempt against a bogus org_slug has no tenant
+    # to attribute to, and recording that (as NULL) is a required case.
+    tenant_id   = Column(Integer, ForeignKey("platform.tenants.tenant_id"), nullable=True)
     user_id     = Column(Integer, ForeignKey("auth.users.user_id"), nullable=True)
     username    = Column(String, nullable=False)
     success     = Column(Boolean, nullable=False)
@@ -140,9 +156,21 @@ class LoginAttempt(Base):
 # ==========================================
 class AuditLog(Base):
     __tablename__ = "audit_log"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        Index("ix_audit_log_tenant", "tenant_id", "occurred_at"),
+        {"schema": "auth"},
+    )
 
     audit_id         = Column(BigInteger, primary_key=True)
+    # tenant_id is NULLABLE by design: audit_log is NOT RLS'd (unlike auth.users/
+    # employees/roles, which are RLS'd as of migration cc33dd44ee55), because
+    # genuine system/boot writes (no request, no GUC) have no tenant. Request-path
+    # writes auto-fill via the GUC server_default below — write_audit() leaves it
+    # unset and the DB evaluates current_setting('app.tenant_id') from the caller's
+    # SET LOCAL.
+    tenant_id        = Column(Integer, ForeignKey("platform.tenants.tenant_id"),
+                              nullable=True,
+                              server_default=text("current_setting('app.tenant_id', true)::integer"))
     table_name       = Column(String, nullable=False)
     record_pk        = Column(String, nullable=False)
     action           = Column(

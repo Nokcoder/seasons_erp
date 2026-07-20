@@ -180,13 +180,13 @@ def _resolve_categories(names: List[str], db: Session) -> List[models.ProductCat
 # UOMs
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/uoms", response_model=List[schemas.UOMOut])
+@router.get("/uoms", response_model=List[schemas.UOMOut], dependencies=[Depends(require_permission("view_inventory"))])
 def list_uoms(db: Session = Depends(get_db)):
     return db.query(models.UOM).filter(models.UOM.is_deleted == False).all()
 
 
 @router.post("/uoms", response_model=schemas.UOMOut, status_code=201)
-def create_uom(payload: schemas.UOMCreate, db: Session = Depends(get_db)):
+def create_uom(payload: schemas.UOMCreate, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_uoms"))):
     if db.query(models.UOM).filter(
         models.UOM.uom_code == payload.uom_code.upper()
     ).first():
@@ -199,7 +199,7 @@ def create_uom(payload: schemas.UOMCreate, db: Session = Depends(get_db)):
 
 
 @router.patch("/uoms/{uom_id}", response_model=schemas.UOMOut)
-def update_uom(uom_id: int, payload: schemas.UOMUpdate, db: Session = Depends(get_db)):
+def update_uom(uom_id: int, payload: schemas.UOMUpdate, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_uoms"))):
     uom = db.query(models.UOM).filter(
         models.UOM.uom_id == uom_id, models.UOM.is_deleted == False
     ).first()
@@ -213,7 +213,7 @@ def update_uom(uom_id: int, payload: schemas.UOMUpdate, db: Session = Depends(ge
 
 
 @router.delete("/uoms/{uom_id}", status_code=204)
-def delete_uom(uom_id: int, db: Session = Depends(get_db)):
+def delete_uom(uom_id: int, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_uoms"))):
     """Hard-delete a UOM. Blocked if any product, barcode, or conversion references it."""
     uom = db.query(models.UOM).filter(models.UOM.uom_id == uom_id).first()
     if not uom:
@@ -250,7 +250,7 @@ def delete_uom(uom_id: int, db: Session = Depends(get_db)):
 # CATEGORIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/categories", response_model=List[schemas.CategoryOut])
+@router.get("/categories", response_model=List[schemas.CategoryOut], dependencies=[Depends(require_permission("view_inventory"))])
 def list_categories(db: Session = Depends(get_db)):
     return (
         db.query(models.ProductCategory)
@@ -260,7 +260,7 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.post("/categories", response_model=schemas.CategoryOut, status_code=201)
-def create_category(payload: schemas.CategoryCreate, db: Session = Depends(get_db)):
+def create_category(payload: schemas.CategoryCreate, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_categories"))):
     if db.query(models.ProductCategory).filter(
         models.ProductCategory.category_name == payload.category_name
     ).first():
@@ -283,8 +283,7 @@ def create_category(payload: schemas.CategoryCreate, db: Session = Depends(get_d
 
 @router.patch("/categories/{category_id}", response_model=schemas.CategoryOut)
 def update_category(
-    category_id: int, payload: schemas.CategoryUpdate, db: Session = Depends(get_db)
-):
+    category_id: int, payload: schemas.CategoryUpdate, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_categories"))):
     cat = db.query(models.ProductCategory).filter(
         models.ProductCategory.category_id == category_id,
         models.ProductCategory.is_deleted == False,
@@ -299,7 +298,7 @@ def update_category(
 
 
 @router.delete("/categories/{category_id}", status_code=204)
-def delete_category(category_id: int, db: Session = Depends(get_db)):
+def delete_category(category_id: int, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_categories"))):
     """Hard-delete a category. Blocked if any products are linked or child categories exist."""
     cat = db.query(models.ProductCategory).filter(
         models.ProductCategory.category_id == category_id,
@@ -337,7 +336,7 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
 # PRODUCTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/", response_model=List[schemas.ProductOut])
+@router.get("/", response_model=List[schemas.ProductOut], dependencies=[Depends(require_permission("view_inventory"))])
 def list_products(
     db: Session = Depends(get_db),
     negative_stock: bool = Query(default=False),
@@ -516,7 +515,7 @@ def get_pos_catalog(db: Session = Depends(get_db)):
 
 
 # ── MUST be registered before /{product_id} to avoid route shadowing ──────────
-@router.get("/ledger", response_model=List[schemas.LedgerEntryContextOut])
+@router.get("/ledger", response_model=List[schemas.LedgerEntryContextOut], dependencies=[Depends(require_permission("view_stock_ledger"))])
 def list_ledger(
     reason:      Optional[str] = None,
     location_id: Optional[int] = None,
@@ -647,7 +646,7 @@ def resolve_scanned_code(code: str, db: Session = Depends(get_db)):
     raise HTTPException(status_code=404, detail="item not found")
 
 
-@router.get("/{product_id}", response_model=schemas.ProductOut)
+@router.get("/{product_id}", response_model=schemas.ProductOut, dependencies=[Depends(require_permission("view_inventory"))])
 def get_product(product_id: int, db: Session = Depends(get_db)):
     return _load_product(product_id, db)
 
@@ -775,7 +774,7 @@ def delete_product(
 # VARIANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/variants/{variant_id}", response_model=schemas.VariantOut)
+@router.get("/variants/{variant_id}", response_model=schemas.VariantOut, dependencies=[Depends(require_permission("view_inventory"))])
 def get_variant(variant_id: int, db: Session = Depends(get_db)):
     """Return a single variant. If price is NULL, falls back to the default
     sibling's price (Requirements §6.2)."""
@@ -819,7 +818,7 @@ def get_variant(variant_id: int, db: Session = Depends(get_db)):
     return out
 
 
-@router.get("/variants/{variant_id}/stock", response_model=List[schemas.CurrentStockOut])
+@router.get("/variants/{variant_id}/stock", response_model=List[schemas.CurrentStockOut], dependencies=[Depends(require_permission("view_inventory"))])
 def get_variant_stock(variant_id: int, db: Session = Depends(get_db)):
     """Return stock levels for a variant across all non-virtual locations
     (Requirements §9.7)."""
@@ -996,8 +995,7 @@ def delete_variant(
 def import_preview(
     payload: List[schemas.ImportProductRow],
     db: Session = Depends(get_db),
-    _actor: User = Depends(get_current_user),
-):
+    _actor: User = Depends(require_permission("import_products"))):
     """Dry-run: compute diff between incoming rows and current DB state.
     Returns create/update mode per variant row plus changed fields."""
     rows = []
@@ -1162,7 +1160,7 @@ def import_confirm(
 # INVENTORY LEDGER — per variant
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/variants/{variant_id}/ledger", response_model=List[schemas.LedgerEntryOut])
+@router.get("/variants/{variant_id}/ledger", response_model=List[schemas.LedgerEntryOut], dependencies=[Depends(require_permission("view_stock_ledger"))])
 def get_variant_ledger(
     variant_id: int,
     location_id: Optional[int] = None,
@@ -1191,7 +1189,8 @@ def get_variant_ledger(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/variants/{variant_id}/price-history",
-            response_model=List[schemas.VariantPriceHistoryOut])
+            response_model=List[schemas.VariantPriceHistoryOut],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def get_price_history(
     variant_id: int,
     limit: int = 10,
@@ -1222,7 +1221,8 @@ def get_price_history(
 
 
 @router.get("/variants/{variant_id}/cost-history",
-            response_model=List[schemas.VariantCostHistoryOut])
+            response_model=List[schemas.VariantCostHistoryOut],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def get_cost_history(
     variant_id: int,
     limit: int = 10,
@@ -1257,7 +1257,8 @@ def get_cost_history(
 
 
 @router.get("/variants/{variant_id}/sales-history",
-            response_model=List[schemas.SalesHistoryItem])
+            response_model=List[schemas.SalesHistoryItem],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def get_sales_history(
     variant_id: int,
     limit: int = 10,
@@ -1314,7 +1315,8 @@ def get_sales_history(
 
 
 @router.get("/variants/{variant_id}/purchase-history",
-            response_model=List[schemas.PurchaseHistoryItem])
+            response_model=List[schemas.PurchaseHistoryItem],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def get_purchase_history(
     variant_id: int,
     limit: int = 10,
@@ -1374,7 +1376,7 @@ def get_purchase_history(
 # SUPPLIERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/suppliers/all", response_model=List[schemas.SupplierOut])
+@router.get("/suppliers/all", response_model=List[schemas.SupplierOut], dependencies=[Depends(require_permission("view_suppliers"))])
 def list_suppliers(
     include_deleted: bool = False,
     db: Session = Depends(get_db),
@@ -1385,7 +1387,7 @@ def list_suppliers(
     return q.order_by(models.Supplier.supplier_code).all()
 
 
-@router.get("/suppliers/{supplier_id}", response_model=schemas.SupplierOut)
+@router.get("/suppliers/{supplier_id}", response_model=schemas.SupplierOut, dependencies=[Depends(require_permission("view_suppliers"))])
 def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
     supplier = (
         db.query(models.Supplier)
@@ -1506,7 +1508,7 @@ def _get_variant_or_404(variant_id: int, db: Session) -> models.Variant:
     return v
 
 
-@router.get("/variants/{variant_id}/barcodes", response_model=List[schemas.VariantBarcodeOut])
+@router.get("/variants/{variant_id}/barcodes", response_model=List[schemas.VariantBarcodeOut], dependencies=[Depends(require_permission("view_inventory"))])
 def list_barcodes(variant_id: int, db: Session = Depends(get_db)):
     _get_variant_or_404(variant_id, db)
     return (
@@ -1521,8 +1523,7 @@ def list_barcodes(variant_id: int, db: Session = Depends(get_db)):
 def add_barcode(
     variant_id: int,
     payload: schemas.VariantBarcodeCreate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
 
     if db.query(models.VariantBarcode).filter(
@@ -1565,8 +1566,7 @@ def update_barcode(
     variant_id: int,
     barcode_id: int,
     payload: schemas.VariantBarcodeUpdate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     bc = db.query(models.VariantBarcode).filter(
         models.VariantBarcode.barcode_id == barcode_id,
@@ -1592,7 +1592,7 @@ def update_barcode(
 
 
 @router.delete("/variants/{variant_id}/barcodes/{barcode_id}", status_code=204)
-def delete_barcode(variant_id: int, barcode_id: int, db: Session = Depends(get_db)):
+def delete_barcode(variant_id: int, barcode_id: int, db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     bc = db.query(models.VariantBarcode).filter(
         models.VariantBarcode.barcode_id == barcode_id,
@@ -1609,7 +1609,8 @@ def delete_barcode(variant_id: int, barcode_id: int, db: Session = Depends(get_d
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/variants/{variant_id}/uom-conversions",
-            response_model=List[schemas.VariantUomConversionOut])
+            response_model=List[schemas.VariantUomConversionOut],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def list_uom_conversions(variant_id: int, db: Session = Depends(get_db)):
     _get_variant_or_404(variant_id, db)
     return (
@@ -1624,8 +1625,7 @@ def list_uom_conversions(variant_id: int, db: Session = Depends(get_db)):
 def add_uom_conversion(
     variant_id: int,
     payload: schemas.VariantUomConversionCreate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
 
     exists = db.query(models.VariantUomConversion).filter(
@@ -1661,8 +1661,7 @@ def update_uom_conversion(
     from_uom_id: int,
     to_uom_id: int,
     payload: schemas.VariantUomConversionUpdate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     conv = db.query(models.VariantUomConversion).filter(
         models.VariantUomConversion.variant_id == variant_id,
@@ -1686,8 +1685,7 @@ def delete_uom_conversion(
     variant_id: int,
     from_uom_id: int,
     to_uom_id: int,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     conv = db.query(models.VariantUomConversion).filter(
         models.VariantUomConversion.variant_id == variant_id,
@@ -1705,7 +1703,8 @@ def delete_uom_conversion(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/variants/{variant_id}/suppliers",
-            response_model=List[schemas.VariantSupplierOut])
+            response_model=List[schemas.VariantSupplierOut],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def list_variant_suppliers(variant_id: int, db: Session = Depends(get_db)):
     _get_variant_or_404(variant_id, db)
     return (
@@ -1721,8 +1720,7 @@ def list_variant_suppliers(variant_id: int, db: Session = Depends(get_db)):
 def add_variant_supplier(
     variant_id: int,
     payload: schemas.VariantSupplierCreate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
 
     if not db.query(models.Supplier).filter(
@@ -1771,8 +1769,7 @@ def update_variant_supplier(
     vs_id: int,
     payload: schemas.VariantSupplierUpdate,
     db: Session = Depends(get_db),
-    _actor: User = Depends(get_current_user),
-):
+    _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     vs = db.query(models.VariantSupplier).filter(
         models.VariantSupplier.id == vs_id,
@@ -1822,8 +1819,7 @@ def update_variant_supplier(
 def delete_variant_supplier(
     variant_id: int,
     vs_id: int,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     vs = db.query(models.VariantSupplier).filter(
         models.VariantSupplier.id == vs_id,
@@ -1840,7 +1836,8 @@ def delete_variant_supplier(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/variants/{variant_id}/bundle-components",
-            response_model=List[schemas.BundleComponentOut])
+            response_model=List[schemas.BundleComponentOut],
+            dependencies=[Depends(require_permission("view_inventory"))])
 def list_bundle_components(variant_id: int, db: Session = Depends(get_db)):
     _get_variant_or_404(variant_id, db)
     return (
@@ -1855,8 +1852,7 @@ def list_bundle_components(variant_id: int, db: Session = Depends(get_db)):
 def add_bundle_component(
     variant_id: int,
     payload: schemas.BundleComponentCreate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
 
     if payload.component_variant_id == variant_id:
@@ -1896,8 +1892,7 @@ def update_bundle_component(
     variant_id: int,
     component_variant_id: int,
     payload: schemas.BundleComponentUpdate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     bc = db.query(models.BundleComponent).filter(
         models.BundleComponent.bundle_variant_id == variant_id,
@@ -1917,8 +1912,7 @@ def update_bundle_component(
 def delete_bundle_component(
     variant_id: int,
     component_variant_id: int,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_products"))):
     _get_variant_or_404(variant_id, db)
     bc = db.query(models.BundleComponent).filter(
         models.BundleComponent.bundle_variant_id == variant_id,

@@ -1,3 +1,5 @@
+import { getToken } from '../lib/authStore'
+
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api'
 
 // ── core fetch wrapper ────────────────────────────────────────────────────────
@@ -11,7 +13,7 @@ async function request<T>(
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (auth) {
-    const token = localStorage.getItem('erp_token')
+    const token = await getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
   }
 
@@ -124,8 +126,8 @@ export interface UserProfileOut {
 }
 
 export const authApi = {
-  login: (username: string, password: string) =>
-    request<LoginResponse>('POST', '/auth/login', { username, password }, false),
+  login: (org_slug: string, username: string, password: string) =>
+    request<LoginResponse>('POST', '/auth/login', { org_slug, username, password }, false),
   me: {
     programs: () => get<UserProgramsOut>('/auth/me/programs'),
     profile:  () => get<UserProfileOut>('/auth/me'),
@@ -1149,14 +1151,14 @@ export interface CreditMemoCreate {
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? '/api'
 
-function authHeader(): Record<string, string> {
-  const token = localStorage.getItem('erp_token')
+async function authHeader(): Promise<Record<string, string>> {
+  const token = await getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 export const importApi = {
   downloadTemplate: async (entity: string): Promise<void> => {
-    const resp = await fetch(`${BASE_URL}/import/${entity}/template`, { headers: authHeader() })
+    const resp = await fetch(`${BASE_URL}/import/${entity}/template`, { headers: await authHeader() })
     if (!resp.ok) throw new Error('Template download failed')
     const blob = await resp.blob()
     const url  = URL.createObjectURL(blob)
@@ -1425,7 +1427,7 @@ export const stockApi = {
       patch<Shipment>(`/procurement/shipments/${id}/discrepancy`, p),
     // Confirmed shipments only — downloads the two-sheet invoice workbook
     exportInvoice: async (id: number, filenameFallback?: string): Promise<void> => {
-      const resp = await fetch(`${BASE_URL}/procurement/shipments/${id}/export`, { headers: authHeader() })
+      const resp = await fetch(`${BASE_URL}/procurement/shipments/${id}/export`, { headers: await authHeader() })
       if (!resp.ok) throw new Error('Export failed')
       const blob = await resp.blob()
       const cd = resp.headers.get('Content-Disposition') || ''

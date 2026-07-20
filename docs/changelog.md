@@ -1,5 +1,153 @@
 # Changelog
 
+## 2026-07-20 — Multitenancy Track A: house-wide RLS predicate hardening (all remaining clusters)
+
+Migration `ff66aa77bb88` extends the auth hardening to every other
+`tenant_isolation` policy via `ALTER POLICY`. Scope was taken from a live
+`pg_policies` enumeration (not the migrations' original TABLES lists) to be
+exhaustive: 47 policies referenced `app.tenant_id`, 3 already hardened (auth),
+**44 re-pointed here** — ap (5), inventory (18), platform.document_sequences (1),
+procurement (4), sales (15), settings (1). All now use
+`tenant_id = nullif(current_setting('app.tenant_id', true), '')::integer`, so the
+predicate fails closed (zero rows) for NULL, RESET-induced '', and explicit ''
+alike instead of throwing on the `::integer` cast.
+
+Column-default fragility in `c9d0e1f2a3b4` (leaf tables) and `bb22cc33dd44`
+(audit_log) is a separate INSERT-time vector and was deliberately left untouched
+pending a separate decision.
+
+## 2026-07-20 — Multitenancy Track A: harden auth-cluster RLS predicate against empty-string GUC
+
+Follow-up migration `ee55ff66aa77` (auth RLS `cc33dd44ee55` was already applied,
+so it is not rewritten). The tenant_isolation policy predicate on
+`auth.users`/`employees`/`roles` was fail-closed for a NULL `app.tenant_id` but
+would *throw* (`invalid input syntax for type integer: ""`) if the GUC were the
+empty string — which is what a custom GUC becomes after `RESET app.tenant_id`
+(as opposed to never being set). Re-pointed the policy (via `ALTER POLICY`,
+USING + WITH CHECK) to:
+`tenant_id = nullif(current_setting('app.tenant_id', true), '')::integer`
+so NULL and '' are both treated as "no context → zero rows", never reaching the
+`::integer` cast when unset. Verified by a no-context probe triggered via `RESET`
+(previously errored, now returns 0 rows).
+
+**Flagged, NOT fixed:** the same fragile predicate exists in five other RLS
+migrations (`d0e1f2a3b4c5` leaf pilot, `e1f2a3b4c5d6` inventory, `p1a2b3c4d5e6`
+procurement/ap, `q2b3c4d5e6f7` sales/settings, `r3c4d5e6f7a8` document_sequences),
+left unchanged pending a decision on a house-wide hardening pass.
+
+## 2026-07-19 — Multitenancy Track A (auth subset): RLS on the auth cluster, login bootstrap, platform-owner identity
+
+Progressed the auth-layer subset of Track A from the multitenancy roadmap. The
+`erp_admin` connection-role question (roadmap item 1) was already resolved in an
+earlier step — the app connects as the non-superuser `erp_app` and `erp_admin`
+is confined to migrations/boot/signup — so this change delivers items 2 and 3.
+
+**RLS on `auth.users` / `auth.employees` / `auth.roles`** (migration
+`cc33dd44ee55`). ENABLE + FORCE ROW LEVEL SECURITY + a `tenant_isolation` policy
+on each, using the house-standard predicate
+`tenant_id = current_setting('app.tenant_id', true)::integer` (fail-closed: unset
+context → zero rows). No column/constraint/default changes — the cluster already
+carried `tenant_id` NOT NULL with composite uniques since Phase 1. `login_attempts`
+and `audit_log` are deliberately excluded (both legitimately hold NULL-tenant rows).
+
+**Login bootstrap** (`auth/router.py`). Login runs on `erp_app` with no JWT yet,
+so it had no tenant context when reading `auth.users` — which RLS would now
+reduce to zero rows. Reworked so login resolves `org_slug → tenant_id` against the
+(intentionally un-RLS'd) `platform.tenants`, then `SET LOCAL app.tenant_id` and
+stashes it on `db.info` (so the `after_begin` listener re-asserts context for the
+post-commit `db.refresh(user)`), and only then reads the RLS'd `auth.users`.
+Signup is unaffected: it runs as `erp_admin` (superuser → bypasses RLS) and sets
+`tenant_id` explicitly.
+
+**Platform-owner identity** (migration `dd44ee55ff66`, model
+`tenancy.models.PlatformOwner`). Decision: a platform owner is a *separate*
+identity, not a flag on `auth.users`. New `platform.platform_owners` table (no
+`tenant_id`, no RLS, `erp_app` explicitly revoked from it) sits above the tenant
+boundary. Schema/identity only — the platform-owner login endpoint and tenant-admin
+API are Track B and not built here. Also corrected the stale "auth is NOT RLS'd"
+comment on `auth.AuditLog`.
+
+Migration chain is linear (`…→ bb22cc33dd44 → cc33dd44ee55 → dd44ee55ff66`, single
+head). NOT YET APPLIED to the running DB and cross-tenant probe verification is
+still pending — the instance is live behind the Cloudflare tunnel, so applying the
+RLS migration and running probes is left as a gated next step rather than run
+against live traffic automatically.
+
+## 2026-07-19 — Print designer: fixed toolbar layout (wrapping, label breaks, action-button overflow)
+
+Follow-up to the grid work below: the extra toolbar controls (Grid / Offset X / Offset Y) pushed
+the toolbar past its width, and because `.designer-toolbar` was a single-line flex row
+(`flex-wrap` unset → `nowrap`) with no `white-space` guards, the "← Back to templates" button wrapped
+to 3 lines, the offset labels wrapped inconsistently (jagged row alignment), and the "Preview & Test
+Print" button overflowed past the toolbar's white background onto the dark page.
+
+CSS (`designer.css`): added `flex-wrap: wrap` to `.designer-toolbar` so it wraps to a second row
+instead of overflowing; added `white-space: nowrap` to `.designer-toolbar__field` (keeps labels
+like "Offset X (mm)" intact) and `white-space: nowrap` + `flex-shrink: 0` to
+`.designer-toolbar__back`, `.designer-toolbar__preview-print`, and `.designer-toolbar__delete`.
+Removed the competing `margin-left: auto` from both `.designer-toolbar__preview-print` and
+`.designer-toolbar__delete` and introduced a new `.designer-toolbar__actions` wrapper
+(`display: flex; gap: 12px; margin-left: auto`) that right-aligns both action buttons as one group.
+JSX (`TemplateDesigner.jsx`): wrapped the Delete + Preview buttons in that `.designer-toolbar__actions`
+div, replacing the two independent auto-margins with a single one on the wrapper.
+
+Frontend built clean and deployed to the tunnel via `docker compose up --build -d frontend`; fresh
+chunk hashes verified served, no stale bundle. Visual result across window widths not yet
+eyeballed on-device.
+
+## 2026-07-19 — Print designer: configurable grid (spacing + offset) and numeric Position & Size inputs
+
+Added calibration controls to the print template designer so a template can be aligned to a
+specific pre-printed form, where the blank fields to fill in rarely start exactly at the paper's
+edge. Previously the grid was a hardcoded 5mm anchored at the paper's corner.
+
+**`DesignerCanvas.jsx`.** Now takes `gridSpacingMm` / `gridOffsetXMm` / `gridOffsetYMm` props
+(defaulting to 5 / 0 / 0). The visible grid is drawn via `backgroundSize` + `backgroundPosition`
+so the offset shifts the grid origin. react-rnd's `dragGrid`/`resizeGrid` have no native offset
+concept, so live drag/resize still snaps to spacing-from-0 for a smooth feel, and `onDragStop` /
+`onResizeStop` re-snap the committed value against the true offset grid via a `snapToOffsetGrid`
+helper. Added `minWidth`/`minHeight` of one grid cell plus a `Math.max(spacing, …)` clamp so an
+element can't collapse to zero size.
+
+**`TemplateDesigner.jsx`.** Toolbar gains Grid (mm) / Offset X / Offset Y inputs (read from the
+template with `?? 5` / `?? 0` fallbacks, so pre-existing saved templates are unaffected). The
+inspector, previously shown only for text boxes, now shows a "Position & size (mm)" section for
+**any** selected element — numeric X / Y / Width / Height fields for precise placement — with the
+existing font-size/alignment controls nested underneath for text boxes. The three grid values
+persist on the template object through the normal `onChange` path.
+
+Frontend built clean and deployed to the tunnel via `docker compose up --build -d frontend`;
+fresh chunk hashes verified served, no stale bundle. Physical print output confirmed against a
+real printer.
+
+## 2026-07-14 — RBAC: closed settings-mutation gaps, retired phantom actions, tenant-scoped audit_log
+
+Two closing items of the multi-tenancy Phase 2 work (full detail in `docs/Multitenancy.md`).
+
+**Settings-mutation gaps + `receive_transfer`.** The shifts/registers/payment-modes mutation
+endpoints were guarded by the coarse `manage_sales_settings`, while the frontend Settings screen
+already gated those tabs by the granular `manage_shifts` / `manage_registers` /
+`manage_payment_modes` — a front/back mismatch that let the API and UI disagree on who could act.
+Narrowed the 6 endpoints to the granular keys; narrowed PDC deposit/bounce from `manage_customers`
+→ `manage_pdc`. Two seeded actions that guarded **no distinct endpoint** were **retired** (migration
+`aa11bb22cc33`, catalog 58→56): `receive_transfer` (transfers are single-step — `create_transfer`
+records a completed transfer with `quantity_received` inline; there is no separate receive op) and
+`manage_sales_settings` (superseded by the granular keys). No role lost real capability — every
+holder already had the covering key. Verified real CASHIER → 403, ADMIN → works on all 8 re-keyed
+endpoints. Enforcement now **44 of 56 actions**; the remaining 12 are decorative *by design*
+(8 `export_*` and `manage_appearance` have no backend endpoint; 3 aging/credit-memo view keys are
+enforced under adjacent `manage_*` keys). `auth/permissions.py` confirmed dead pre-RBAC code.
+
+**`auth.audit_log` tenant_id — last piece of tenant scoping (migration `bb22cc33dd44`).** Added
+`tenant_id` via a GUC `server_default` (`current_setting('app.tenant_id', true)::integer`), so all
+40 `write_audit()` call sites auto-fill from the caller's `SET LOCAL` with zero code change and no
+risk of a missed site (chosen over threading through `write_audit`). Nullable by design (`auth`
+isn't RLS'd; system/boot writes have no tenant). Backfilled all 382 existing rows — actor rows via
+`users.tenant_id`, the 18 null-actor rows attributed by the record they touched — **0 left NULL**.
+FK to `platform.tenants` + `(tenant_id, occurred_at)` index; model mapped and drift-checked. Live
+audited writes from both tenants land with the correct tenant (acme→5, default→1). **Tenant scoping
+is now COMPLETE.**
+
 ## 2026-07-12 — Ops: rebuilt frontend — prior image predated the entire tooltip pass
 
 Investigated a report that no tooltips were visible after "a stack rebuild." Root cause: no

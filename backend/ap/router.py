@@ -85,7 +85,7 @@ def _recalculate_invoice_status(invoice: models.SupplierInvoice, db: Session) ->
 # INVOICES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/invoices", response_model=List[schemas.InvoiceOut])
+@router.get("/invoices", response_model=List[schemas.InvoiceOut], dependencies=[Depends(require_permission("view_invoices"))])
 def list_invoices(
     supplier_id: Optional[int] = None,
     status: Optional[str] = None,
@@ -107,7 +107,7 @@ def list_invoices(
     return q.all()
 
 
-@router.get("/invoices/{invoice_id}", response_model=schemas.InvoiceOut)
+@router.get("/invoices/{invoice_id}", response_model=schemas.InvoiceOut, dependencies=[Depends(require_permission("view_invoices"))])
 def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
     return _load_invoice(invoice_id, db)
 
@@ -464,7 +464,7 @@ def get_invoice_match(
 # PAYMENTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/payments", response_model=List[schemas.PaymentOut])
+@router.get("/payments", response_model=List[schemas.PaymentOut], dependencies=[Depends(require_permission("view_ap_payments"))])
 def list_payments(
     supplier_id: Optional[int] = None,
     db: Session = Depends(get_db),
@@ -482,7 +482,7 @@ def list_payments(
     return q.all()
 
 
-@router.get("/payments/{payment_id}", response_model=schemas.PaymentOut)
+@router.get("/payments/{payment_id}", response_model=schemas.PaymentOut, dependencies=[Depends(require_permission("view_ap_payments"))])
 def get_payment(payment_id: int, db: Session = Depends(get_db)):
     return _load_payment(payment_id, db)
 
@@ -643,7 +643,7 @@ def create_payment(
 # AP LEDGER  (read-only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/ledger", response_model=List[schemas.ApLedgerOut])
+@router.get("/ledger", response_model=List[schemas.ApLedgerOut], dependencies=[Depends(require_permission("view_ap_ledger"))])
 def list_ap_ledger(
     supplier_id: Optional[int] = None,
     db: Session = Depends(get_db),

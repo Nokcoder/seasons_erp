@@ -4,6 +4,7 @@ from typing import List
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 from passlib.context import CryptContext
 import jwt
@@ -12,6 +13,7 @@ from core.database import get_db
 from core.audit import write_audit, _serialize
 from auth import models, schemas
 from auth.dependencies import SECRET_KEY, ALGORITHM, get_current_user, require_permission
+from tenancy.models import Tenant
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -22,33 +24,36 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _load_user(db: Session, username: str) -> models.User | None:
+def _load_user(db: Session, tenant_id: int, username: str) -> models.User | None:
     return (
         db.query(models.User)
         .options(
             joinedload(models.User.employee),
             joinedload(models.User.roles),
         )
-        .filter(models.User.username == username)
+        .filter(models.User.tenant_id == tenant_id, models.User.username == username)
         .first()
     )
 
 
 def _make_token(user: models.User) -> str:
     payload = {
-        "sub":   user.username,
-        "id":    user.user_id,
-        "roles": [r.role_name for r in user.roles],
-        "exp":   datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS),
+        "sub":       user.username,
+        "id":        user.user_id,
+        "tenant_id": user.tenant_id,
+        "roles":     [r.role_name for r in user.roles],
+        "exp":       datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def _log_attempt(db: Session, username: str, success: bool,
+                 tenant_id: int | None = None,
                  user_id: int | None = None, request: Request | None = None):
     ip = request.client.host if request and request.client else None
     ua = request.headers.get("user-agent") if request else None
     db.add(models.LoginAttempt(
+        tenant_id=tenant_id,
         user_id=user_id,
         username=username,
         success=success,
@@ -60,18 +65,33 @@ def _log_attempt(db: Session, username: str, success: bool,
 # ── POST /auth/register ───────────────────────────────────────────────────────
 
 @router.post("/register", response_model=schemas.UserResponse, status_code=201)
-def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
-    if db.query(models.User).filter(models.User.username == payload.username).first():
+def register(
+    payload: schemas.UserCreate,
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(require_permission("manage_users")),
+):
+    # Tenant is always the calling admin's own — never taken from the request
+    # body (UserCreate has no tenant_id field to begin with).
+    tenant_id = _actor.tenant_id
+
+    if db.query(models.User).filter(
+        models.User.tenant_id == tenant_id,
+        models.User.username == payload.username,
+    ).first():
         raise HTTPException(status_code=400, detail="Username already registered")
 
-    # 1. resolve or create employee
+    # 1. resolve or create employee (must belong to the same tenant)
     if payload.employee_id is not None:
         employee = db.query(models.Employee).filter(
-            models.Employee.employee_id == payload.employee_id
+            models.Employee.employee_id == payload.employee_id,
+            models.Employee.tenant_id == tenant_id,
         ).first()
         if not employee:
             raise HTTPException(status_code=404, detail="Employee not found")
-        if db.query(models.User).filter(models.User.employee_id == payload.employee_id).first():
+        if db.query(models.User).filter(
+            models.User.employee_id == payload.employee_id,
+            models.User.tenant_id == tenant_id,
+        ).first():
             raise HTTPException(status_code=400, detail="This employee already has a user account")
     else:
         if not payload.first_name or not payload.last_name:
@@ -80,6 +100,7 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
                 detail="first_name and last_name are required when employee_id is not provided",
             )
         employee = models.Employee(
+            tenant_id=tenant_id,
             first_name=payload.first_name,
             last_name=payload.last_name,
         )
@@ -88,6 +109,7 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
 
     # 2. create user
     user = models.User(
+        tenant_id=tenant_id,
         employee_id=employee.employee_id,
         username=payload.username,
         password_hash=pwd_context.hash(payload.password),
@@ -95,19 +117,26 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     db.add(user)
     db.flush()
 
-    # 3. assign roles (create Role rows on the fly if they don't exist)
+    # 3. assign roles — must already exist for this tenant. No longer
+    # auto-created on the fly: role_name is only unique per tenant now, so
+    # silently creating one here could never be verified against what the
+    # calling admin actually intended, and typos would spawn stray roles.
     for role_name in payload.role_names:
-        role = db.query(models.Role).filter(models.Role.role_name == role_name).first()
+        role = db.query(models.Role).filter(
+            models.Role.tenant_id == tenant_id,
+            models.Role.role_name == role_name,
+        ).first()
         if not role:
-            role = models.Role(role_name=role_name)
-            db.add(role)
-            db.flush()
+            raise HTTPException(
+                status_code=422,
+                detail=f"Role '{role_name}' does not exist for this tenant",
+            )
         user.roles.append(role)
 
     db.commit()
     db.refresh(user)
     write_audit(db, "auth.users", str(user.user_id), "INSERT",
-                new_values=_serialize(user))
+                actor_user_id=_actor.user_id, new_values=_serialize(user))
     db.commit()
     return user
 
@@ -116,25 +145,49 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=schemas.LoginResponse)
 def login(payload: schemas.UserLogin, request: Request, db: Session = Depends(get_db)):
-    user = _load_user(db, payload.username)
+    tenant = (
+        db.query(Tenant)
+        .filter(Tenant.slug == payload.org_slug, Tenant.is_active == True)
+        .first()
+    )
+    # Falls through to the same generic "invalid credentials" branch below
+    # whether org_slug doesn't resolve or username doesn't exist within it —
+    # the response must not reveal which one it was.
+    tenant_id = tenant.tenant_id if tenant else None
+
+    # Establish tenant context BEFORE any auth.users/auth.roles read. Those tables
+    # are RLS'd (migration cc33dd44ee55) and login runs on erp_app with no JWT yet,
+    # so without this the scoped lookup returns zero rows (fail-closed). The slug
+    # lookup above needed no context because platform.tenants is intentionally NOT
+    # RLS'd. Mirror get_db's plumbing: stash tenant_id on db.info so the after_begin
+    # listener re-asserts SET LOCAL on every later transaction (notably the
+    # db.refresh(user) that runs after the post-login commit clears this one), and
+    # set it explicitly now for the transaction the tenant query already opened.
+    # int() guarantees no injection, matching core.database's listener.
+    if tenant is not None:
+        db.info["tenant_id"] = tenant.tenant_id
+        db.execute(text(f"SET LOCAL app.tenant_id = {int(tenant.tenant_id)}"))
+
+    user = _load_user(db, tenant.tenant_id, payload.username) if tenant else None
 
     if not user or not pwd_context.verify(payload.password, user.password_hash):
-        # log the failed attempt (user_id may be None if username not found)
-        _log_attempt(db, payload.username, success=False,
+        # log the failed attempt. tenant_id is the resolved tenant, or NULL when
+        # the org_slug itself was bogus; user_id may be None if username not found.
+        _log_attempt(db, payload.username, success=False, tenant_id=tenant_id,
                      user_id=user.user_id if user else None,
                      request=request)
         db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not user.is_active:
-        _log_attempt(db, payload.username, success=False,
+        _log_attempt(db, payload.username, success=False, tenant_id=tenant_id,
                      user_id=user.user_id, request=request)
         db.commit()
         raise HTTPException(status_code=403, detail="Account is deactivated")
 
     # update last login timestamp
     user.last_login_at = datetime.now(timezone.utc)
-    _log_attempt(db, payload.username, success=True,
+    _log_attempt(db, payload.username, success=True, tenant_id=tenant_id,
                  user_id=user.user_id, request=request)
     db.commit()
     db.refresh(user)
@@ -149,25 +202,36 @@ def login(payload: schemas.UserLogin, request: Request, db: Session = Depends(ge
 # ── GET /auth/users/all ───────────────────────────────────────────────────────
 
 @router.get("/users/all", response_model=List[schemas.UserResponse])
-def get_all_active_users(db: Session = Depends(get_db)):
+def get_all_active_users(
+    db: Session = Depends(get_db),
+    _actor: models.User = Depends(get_current_user),
+):
+    # Previously unauthenticated AND unscoped — now requires a valid token and
+    # returns only the caller's tenant's active users (for dropdowns).
     return (
         db.query(models.User)
         .options(
             joinedload(models.User.employee),
             joinedload(models.User.roles),
         )
-        .filter(models.User.is_active == True)
+        .filter(
+            models.User.tenant_id == _actor.tenant_id,
+            models.User.is_active == True,
+        )
         .all()
     )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _load_user_by_id(user_id: int, db: Session) -> models.User:
+def _load_user_by_id(user_id: int, tenant_id: int, db: Session) -> models.User:
+    # Scoped to the caller's tenant so an admin can never read or mutate a user
+    # in another tenant by guessing a user_id — a user in a different tenant
+    # returns the same 404 as one that doesn't exist.
     user = (
         db.query(models.User)
         .options(joinedload(models.User.employee), joinedload(models.User.roles))
-        .filter(models.User.user_id == user_id)
+        .filter(models.User.user_id == user_id, models.User.tenant_id == tenant_id)
         .first()
     )
     if not user:
@@ -185,7 +249,7 @@ def set_user_active(
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
     """Activate or deactivate a user account (Requirements §4.1)."""
-    user = _load_user_by_id(user_id, db)
+    user = _load_user_by_id(user_id, _actor.tenant_id, db)
     old = _serialize(user)
     user.is_active = payload.is_active
     # Cascade to the linked employee so dropdowns respect the flag
@@ -209,16 +273,25 @@ def update_user_roles(
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
     """Replace a user's role assignments entirely (Requirements §4.2)."""
-    user = _load_user_by_id(user_id, db)
+    tenant_id = _actor.tenant_id
+    user = _load_user_by_id(user_id, tenant_id, db)
     old = _serialize(user)
 
+    # Assign only roles that already exist for this tenant. Roles are no longer
+    # auto-created here: role_name is unique per tenant now, and silently
+    # minting a role on assignment was the same crash/cross-tenant hole that
+    # register() had. Unknown name → 422, matching register()'s behaviour.
     roles = []
     for role_name in payload.role_names:
-        role = db.query(models.Role).filter(models.Role.role_name == role_name).first()
+        role = db.query(models.Role).filter(
+            models.Role.tenant_id == tenant_id,
+            models.Role.role_name == role_name,
+        ).first()
         if not role:
-            role = models.Role(role_name=role_name)
-            db.add(role)
-            db.flush()
+            raise HTTPException(
+                status_code=422,
+                detail=f"Role '{role_name}' does not exist for this tenant",
+            )
         roles.append(role)
 
     user.roles = roles
@@ -241,7 +314,7 @@ def change_password(
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
     """Change a user's password (Requirements §4.1)."""
-    user = _load_user_by_id(user_id, db)
+    user = _load_user_by_id(user_id, _actor.tenant_id, db)
     user.password_hash = pwd_context.hash(payload.new_password)
     db.commit()
     write_audit(db, "auth.users", str(user_id), "UPDATE",
@@ -261,6 +334,7 @@ def get_all_users(
     return (
         db.query(models.User)
         .options(joinedload(models.User.employee), joinedload(models.User.roles))
+        .filter(models.User.tenant_id == _actor.tenant_id)
         .order_by(models.User.user_id)
         .all()
     )
@@ -268,7 +342,7 @@ def get_all_users(
 
 # ── GET /auth/roles ───────────────────────────────────────────────────────────
 
-@router.get("/roles", response_model=List[schemas.RoleDetailOut])
+@router.get("/roles", response_model=List[schemas.RoleDetailOut], dependencies=[Depends(require_permission("manage_roles"))])
 def list_roles(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(get_current_user),
@@ -276,6 +350,7 @@ def list_roles(
     roles = (
         db.query(models.Role)
         .options(joinedload(models.Role.users))
+        .filter(models.Role.tenant_id == _actor.tenant_id)
         .order_by(models.Role.role_name)
         .all()
     )
@@ -298,10 +373,16 @@ def create_role(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_roles")),
 ):
+    tenant_id = _actor.tenant_id
     name = payload.role_name.strip().upper()
-    if db.query(models.Role).filter(models.Role.role_name == name).first():
+    # Duplicate check scoped to this tenant — role_name is unique per tenant now,
+    # so another tenant owning a role of the same name must not block creation.
+    if db.query(models.Role).filter(
+        models.Role.tenant_id == tenant_id,
+        models.Role.role_name == name,
+    ).first():
         raise HTTPException(status_code=400, detail=f"Role '{name}' already exists")
-    role = models.Role(role_name=name)
+    role = models.Role(tenant_id=tenant_id, role_name=name)
     db.add(role)
     db.commit()
     db.refresh(role)
@@ -320,7 +401,10 @@ def update_role(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_roles")),
 ):
-    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    role = db.query(models.Role).filter(
+        models.Role.role_id == role_id,
+        models.Role.tenant_id == _actor.tenant_id,
+    ).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     role.role_name = payload.role_name.strip().upper()
@@ -341,7 +425,10 @@ def set_role_cashiering_mode(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_roles")),
 ):
-    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    role = db.query(models.Role).filter(
+        models.Role.role_id == role_id,
+        models.Role.tenant_id == _actor.tenant_id,
+    ).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     role.is_cashiering_mode = payload.is_cashiering_mode
@@ -358,7 +445,10 @@ def delete_role(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_roles")),
 ):
-    role = db.query(models.Role).filter(models.Role.role_id == role_id).first()
+    role = db.query(models.Role).filter(
+        models.Role.role_id == role_id,
+        models.Role.tenant_id == _actor.tenant_id,
+    ).first()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     count = len(role.users)
@@ -375,9 +465,13 @@ def delete_role(
 # EMPLOYEE CRUD
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _load_employee(employee_id: int, db: Session) -> models.Employee:
+def _load_employee(employee_id: int, tenant_id: int, db: Session) -> models.Employee:
+    # Scoped to the caller's tenant: an employee in another tenant returns the
+    # same 404 as a non-existent one, so an admin can't read or mutate another
+    # tenant's employee by guessing an employee_id.
     emp = db.query(models.Employee).filter(
-        models.Employee.employee_id == employee_id
+        models.Employee.employee_id == employee_id,
+        models.Employee.tenant_id == tenant_id,
     ).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -391,12 +485,14 @@ def list_employees(
 ):
     employees = (
         db.query(models.Employee)
+        .filter(models.Employee.tenant_id == _actor.tenant_id)
         .order_by(models.Employee.last_name, models.Employee.first_name)
         .all()
     )
-    # employee_ids that have at least one user (active or inactive)
+    # employee_ids (within this tenant) that have at least one user
     emp_ids_with_user = {
-        row[0] for row in db.query(models.User.employee_id).all()
+        row[0] for row in db.query(models.User.employee_id)
+        .filter(models.User.tenant_id == _actor.tenant_id).all()
     }
     return [
         schemas.EmployeeOut(
@@ -417,11 +513,15 @@ def list_employees_without_user(
 ):
     """Active employees that have no linked user account — used to populate the Create Login dropdown."""
     emp_ids_with_user = {
-        row[0] for row in db.query(models.User.employee_id).all()
+        row[0] for row in db.query(models.User.employee_id)
+        .filter(models.User.tenant_id == _actor.tenant_id).all()
     }
     employees = (
         db.query(models.Employee)
-        .filter(models.Employee.is_active == True)
+        .filter(
+            models.Employee.tenant_id == _actor.tenant_id,
+            models.Employee.is_active == True,
+        )
         .order_by(models.Employee.last_name, models.Employee.first_name)
         .all()
     )
@@ -445,6 +545,7 @@ def create_employee(
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
     emp = models.Employee(
+        tenant_id=_actor.tenant_id,
         first_name=payload.first_name,
         last_name=payload.last_name,
         is_active=True,
@@ -465,7 +566,7 @@ def update_employee(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(require_permission("manage_users")),
 ):
-    emp = _load_employee(employee_id, db)
+    emp = _load_employee(employee_id, _actor.tenant_id, db)
     old = _serialize(emp)
     if payload.first_name is not None:
         emp.first_name = payload.first_name
@@ -486,25 +587,22 @@ def update_employee(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/me", response_model=schemas.UserProfileOut)
-def get_me(request: Request, db: Session = Depends(get_db)):
+def get_me(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Return the calling user's profile with their linked employee record.
 
-    Decodes the JWT directly so it works correctly even while get_current_user
-    is a stub that always returns the first DB user.
+    Uses get_current_user, which resolves the user filtered by (user_id,
+    tenant_id, is_active) from the token — so this is inherently self-scoped.
     """
-    auth_header = request.headers.get("authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = int(payload["id"])
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
     user = (
         db.query(models.User)
         .options(joinedload(models.User.employee))
-        .filter(models.User.user_id == user_id)
+        .filter(
+            models.User.user_id == current_user.user_id,
+            models.User.tenant_id == current_user.tenant_id,
+        )
         .first()
     )
     if not user:
@@ -565,7 +663,7 @@ def get_my_programs(
     )
 
 
-@router.get("/programs", response_model=List[schemas.ModuleGroup])
+@router.get("/programs", response_model=List[schemas.ModuleGroup], dependencies=[Depends(require_permission("manage_roles"))])
 def list_programs(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(get_current_user),
@@ -620,7 +718,7 @@ def list_programs(
     ]
 
 
-@router.get("/actions", response_model=List[schemas.ActionWithProgramOut])
+@router.get("/actions", response_model=List[schemas.ActionWithProgramOut], dependencies=[Depends(require_permission("manage_roles"))])
 def list_actions(
     db: Session = Depends(get_db),
     _actor: models.User = Depends(get_current_user),
@@ -650,14 +748,17 @@ def list_actions(
 # RBAC — ROLE PERMISSION MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _load_role(role_id: int, db: Session) -> models.Role:
+def _load_role(role_id: int, tenant_id: int, db: Session) -> models.Role:
+    # Scoped to the caller's tenant: a role in another tenant returns the same
+    # 404 as a non-existent one, so an admin can neither read nor rewrite the
+    # permissions of a role they don't own by guessing a role_id.
     role = (
         db.query(models.Role)
         .options(
             joinedload(models.Role.programs),
             joinedload(models.Role.actions),
         )
-        .filter(models.Role.role_id == role_id)
+        .filter(models.Role.role_id == role_id, models.Role.tenant_id == tenant_id)
         .first()
     )
     if not role:
@@ -672,7 +773,7 @@ def get_role_permissions(
     _actor: models.User = Depends(require_permission("manage_roles")),
 ):
     """Return the full set of program and action keys assigned to this role."""
-    role = _load_role(role_id, db)
+    role = _load_role(role_id, _actor.tenant_id, db)
     return schemas.RolePermissionsOut(
         program_keys=[p.program_key for p in role.programs],
         action_keys=[a.action_key for a in role.actions],
@@ -691,8 +792,13 @@ def set_role_permissions(
     Validation: every supplied action_key must belong to a program whose
     program_key is also in the supplied program_keys list. Actions whose
     program is not in program_keys are rejected with HTTP 422.
+
+    Programs and actions are a GLOBAL catalog (not tenant-scoped), so their
+    keys are resolved without a tenant filter — that's correct. The only
+    tenant boundary that matters here is the role itself, enforced by
+    _load_role scoping the role to the caller's tenant.
     """
-    role = _load_role(role_id, db)
+    role = _load_role(role_id, _actor.tenant_id, db)
 
     # Resolve supplied program_keys → Program rows
     programs = (

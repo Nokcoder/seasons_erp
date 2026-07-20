@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from core.database import engine, Base
+from core.database import engine, admin_engine, Base
 
 load_dotenv()
 
@@ -18,11 +18,13 @@ from ap.router import router as ap_router
 from sales.router import router as sales_router
 from settings.router import router as settings_router
 from import_hub.router import router as import_router
+from tenancy.router import router as platform_router
 
 # --- IMPORT ALL MODELS ---
 # CRITICAL: Every model module must be imported before create_all() so
 # SQLAlchemy knows about every table. Import order matters for FK resolution:
-#   auth → inventory → procurement → ap → sales → settings
+#   platform → auth → inventory → procurement → ap → sales → settings
+from tenancy import models as tenancy_models
 from auth import models as auth_models
 from inventory import models as inventory_models
 from procurement import models as procurement_models
@@ -31,7 +33,10 @@ from sales import models as sales_models  # noqa: F401
 from settings import models as settings_models  # noqa: F401
 
 # --- CREATE SCHEMAS ---
-with engine.connect() as conn:
+# Boot-time DDL runs as the owner (admin_engine / erp_admin) — the app role
+# (erp_app) has no CREATE privilege by design.
+with admin_engine.connect() as conn:
+    conn.execute(text("CREATE SCHEMA IF NOT EXISTS platform"))
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS inventory"))
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS procurement"))
@@ -41,101 +46,32 @@ with engine.connect() as conn:
     conn.commit()
 
 # --- CREATE TABLES ---
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=admin_engine)
 
 
-# --- SEED SYSTEM LOCATIONS ---
-def _seed_system_locations():
-    """Idempotently create the Quarantine and Adjustment virtual locations."""
-    from core.database import SessionLocal
-    from inventory.models import Location
+# --- SEED PER-TENANT DEFAULTS ---
+def _seed_tenant_defaults():
+    """Ensure every existing tenant has its own default system rows (Quarantine/
+    Adjustment locations, Store Credit payment mode, payment-mode flags).
 
-    SYSTEM_LOCATIONS = [
-        {"location_name": "Quarantine",  "location_type": "Virtual"},
-        {"location_name": "Adjustment",  "location_type": "Virtual"},
-    ]
-    db = SessionLocal()
-    try:
-        for spec in SYSTEM_LOCATIONS:
-            exists = db.query(Location).filter(
-                Location.location_name == spec["location_name"]
-            ).first()
-            if not exists:
-                db.add(Location(
-                    location_name=spec["location_name"],
-                    location_type=spec["location_type"],
-                    status="Active",
-                    is_system=True,
-                ))
-        db.commit()
-    finally:
-        db.close()
-
-_seed_system_locations()
-
-
-def _seed_system_settings():
-    """Idempotently insert default system_settings rows."""
-    from core.database import SessionLocal
-    from settings.models import SystemSetting
-
-    DEFAULTS = [
-        ("allow_negative_stock", "false"),
-    ]
-    db = SessionLocal()
-    try:
-        for key, value in DEFAULTS:
-            if not db.query(SystemSetting).filter_by(key=key).first():
-                db.add(SystemSetting(key=key, value=value))
-        db.commit()
-    finally:
-        db.close()
-
-_seed_system_settings()
-
-
-def _seed_store_credit():
-    """Idempotently create the Store Credit payment mode."""
-    from core.database import SessionLocal
-    from sales.models import PaymentMode
-    db = SessionLocal()
-    try:
-        if not db.query(PaymentMode).filter_by(name="Store Credit").first():
-            db.add(PaymentMode(name="Store Credit", is_physical=False, is_active=True))
-            db.commit()
-    finally:
-        db.close()
-
-_seed_store_credit()
-
-
-def _seed_payment_mode_flags():
-    """Idempotently set is_pdc and is_cash flags on known payment modes.
-
-    Identifies modes by name match.  If a name is not found, silently skips
-    (the mode may not exist in all environments).  Safe to run on every startup.
+    Replaces the old global singleton-by-name seeds. Idempotent and self-healing:
+    it backfills any tenant missing its defaults (e.g. tenants created before this
+    seeding existed) and is a no-op for tenants already set up. New tenants get
+    theirs at signup via seed_defaults_for_tenant().
     """
-    from core.database import SessionLocal
-    from sales.models import PaymentMode
+    from core.database import AdminSessionLocal as SessionLocal
+    from tenancy.rbac_seed import seed_defaults_for_tenant
+    from tenancy.models import Tenant
 
-    UPDATES = [
-        ("Post Dated Check", {"is_pdc": True,  "is_physical": True}),
-        ("Cash",             {"is_cash": True, "is_physical": True}),
-        ("On Date Check",    {"is_pdc": False, "is_physical": True}),
-    ]
     db = SessionLocal()
     try:
-        for name, flags in UPDATES:
-            mode = db.query(PaymentMode).filter_by(name=name).first()
-            if not mode:
-                continue
-            for attr, val in flags.items():
-                setattr(mode, attr, val)
+        for (tenant_id,) in db.query(Tenant.tenant_id).all():
+            seed_defaults_for_tenant(tenant_id, db)
         db.commit()
     finally:
         db.close()
 
-_seed_payment_mode_flags()
+_seed_tenant_defaults()
 
 
 def _backfill_pdc_deposit_collection():
@@ -151,7 +87,7 @@ def _backfill_pdc_deposit_collection():
     permanently excludes it from matching again.
     """
     from decimal import Decimal
-    from core.database import SessionLocal
+    from core.database import AdminSessionLocal as SessionLocal
     from core.audit import write_audit, _serialize
     from sales.models import (
         CustomerPayment, PaymentMode, CustomerPaymentApplied, Sale, Customer, ArLedger,
@@ -228,55 +164,18 @@ def _backfill_pdc_deposit_collection():
 _backfill_pdc_deposit_collection()
 
 
-def _seed_admin_user():
-    """Idempotently create the initial ADMIN user from INIT_ADMIN_* env vars."""
-    username = os.getenv("INIT_ADMIN_USERNAME")
-    password = os.getenv("INIT_ADMIN_PASSWORD")
-    if not username or not password:
-        return
+def _seed_programs_and_actions():
+    """Idempotently seed the global programs/actions feature catalog.
 
-    from core.database import SessionLocal
-    from auth.models import Employee, User, Role
-    from passlib.context import CryptContext
-
-    db = SessionLocal()
-    try:
-        if db.query(User).filter(User.username == username).first():
-            return
-        employee = Employee(first_name="Admin", last_name="User")
-        db.add(employee)
-        db.flush()
-        user = User(
-            employee_id=employee.employee_id,
-            username=username,
-            password_hash=CryptContext(schemes=["bcrypt"], deprecated="auto").hash(password),
-        )
-        db.add(user)
-        db.flush()
-        role = db.query(Role).filter(Role.role_name == "ADMIN").first()
-        if not role:
-            role = Role(role_name="ADMIN")
-            db.add(role)
-            db.flush()
-        user.roles.append(role)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-_seed_admin_user()
-
-
-def _seed_rbac():
-    """Idempotently seed programs, actions, and default role-permission assignments.
+    Unlike roles (per-tenant as of migration y5z6a7b8c9d0), programs and
+    actions are shared across all tenants, so this runs unconditionally on
+    every startup. Per-tenant role + grant seeding lives in
+    tenancy/rbac_seed.py's seed_roles_for_tenant(), called at tenant-creation
+    time instead of here.
 
     All inserts use ON CONFLICT DO NOTHING so this is safe to run on every startup.
-    Role rows are created if absent (covers environments where the default roles
-    were never manually created).
     """
-    from core.database import SessionLocal
+    from core.database import AdminSessionLocal as SessionLocal
     from sqlalchemy import text
     db = SessionLocal()
     try:
@@ -334,7 +233,6 @@ def _seed_rbac():
             ("view_transfers",         "View Transfers",           "stock_transfers"),
             ("create_transfer",        "Create Transfer",          "stock_transfers"),
             ("edit_transfer_header",   "Edit Transfer Header",     "stock_transfers"),
-            ("receive_transfer",       "Receive Transfer",         "stock_transfers"),
             ("view_receiving",         "View Receiving",           "stock_receiving"),
             ("create_shipment",        "Create Shipment",          "stock_receiving"),
             ("confirm_shipment",       "Confirm Shipment",         "stock_receiving"),
@@ -379,7 +277,7 @@ def _seed_rbac():
             ("manage_inventory_policy","Inventory Policy",         "settings"),
             ("manage_import",          "Manage Import",            "settings"),
             ("manage_appearance",      "Manage Appearance",        "settings"),
-            ("manage_sales_settings",  "Manage Sales Settings",    "settings"),
+            ("manage_print_templates", "Manage Print Templates",   "settings"),
         ]
         for ak, dn, pk in ACTIONS:
             db.execute(text("""
@@ -390,124 +288,6 @@ def _seed_rbac():
                 ON CONFLICT (action_key) DO NOTHING
             """), {"ak": ak, "dn": dn, "pk": pk})
 
-        db.flush()
-
-        # ── Default roles (create if absent) ─────────────────────────────────────
-        DEFAULT_ROLES = [
-            "ADMIN", "WAREHOUSE_MANAGER", "WAREHOUSE_STAFF",
-            "ACCOUNTANT", "STORE_MANAGER", "CASHIER",
-        ]
-        for rn in DEFAULT_ROLES:
-            db.execute(text("""
-                INSERT INTO auth.roles (role_name)
-                VALUES (:rn)
-                ON CONFLICT (role_name) DO NOTHING
-            """), {"rn": rn})
-
-        db.flush()
-
-        # ── Helper: grant programs/actions by role_name ───────────────────────────
-        def _grant_programs(role_name: str, program_keys: list[str]):
-            for pk in program_keys:
-                db.execute(text("""
-                    INSERT INTO auth.role_programs (role_id, program_id)
-                    SELECT r.role_id, p.program_id
-                    FROM auth.roles r, auth.programs p
-                    WHERE r.role_name = :rn AND p.program_key = :pk
-                    ON CONFLICT DO NOTHING
-                """), {"rn": role_name, "pk": pk})
-
-        def _grant_actions(role_name: str, action_keys: list[str]):
-            for ak in action_keys:
-                db.execute(text("""
-                    INSERT INTO auth.role_actions (role_id, action_id)
-                    SELECT r.role_id, a.action_id
-                    FROM auth.roles r, auth.actions a
-                    WHERE r.role_name = :rn AND a.action_key = :ak
-                    ON CONFLICT DO NOTHING
-                """), {"rn": role_name, "ak": ak})
-
-        # ── ADMIN: all programs, all actions ──────────────────────────────────────
-        db.execute(text("""
-            INSERT INTO auth.role_programs (role_id, program_id)
-            SELECT r.role_id, p.program_id
-            FROM auth.roles r, auth.programs p
-            WHERE r.role_name = 'ADMIN'
-            ON CONFLICT DO NOTHING
-        """))
-        db.execute(text("""
-            INSERT INTO auth.role_actions (role_id, action_id)
-            SELECT r.role_id, a.action_id
-            FROM auth.roles r, auth.actions a
-            WHERE r.role_name = 'ADMIN'
-            ON CONFLICT DO NOTHING
-        """))
-
-        # ── WAREHOUSE_MANAGER ─────────────────────────────────────────────────────
-        _grant_programs("WAREHOUSE_MANAGER", [
-            "inventory_catalogue", "stock_transfers", "stock_receiving",
-            "stock_ledger", "procurement_suppliers",
-            "procurement_purchase_orders", "settings",
-        ])
-        _grant_actions("WAREHOUSE_MANAGER", [
-            "view_inventory", "manage_products", "export_products", "import_products",
-            "view_transfers", "create_transfer", "edit_transfer_header", "receive_transfer",
-            "view_receiving", "create_shipment", "confirm_shipment",
-            "view_stock_ledger", "export_stock_ledger",
-            "view_suppliers", "manage_suppliers",
-            "view_purchase_orders", "manage_purchase_orders",
-            "manage_locations", "manage_inventory_policy",
-        ])
-
-        # ── WAREHOUSE_STAFF ───────────────────────────────────────────────────────
-        _grant_programs("WAREHOUSE_STAFF", [
-            "stock_transfers", "stock_receiving", "stock_ledger",
-        ])
-        _grant_actions("WAREHOUSE_STAFF", [
-            "view_transfers", "create_transfer", "receive_transfer",
-            "view_receiving", "view_stock_ledger",
-        ])
-
-        # ── ACCOUNTANT ────────────────────────────────────────────────────────────
-        _grant_programs("ACCOUNTANT", [
-            "inventory_catalogue", "ap_invoices", "ap_payments",
-            "ap_ledger", "ap_aging",
-        ])
-        _grant_actions("ACCOUNTANT", [
-            "view_inventory",
-            "view_invoices", "manage_invoices",
-            "view_ap_payments", "manage_payments",
-            "view_ap_ledger", "export_ap_ledger",
-            "view_ap_aging", "export_ap_aging",
-        ])
-
-        # ── STORE_MANAGER ─────────────────────────────────────────────────────────
-        _grant_programs("STORE_MANAGER", [
-            "sales_workstation", "sales_ledger", "sales_returns",
-            "inventory_catalogue", "stock_ledger", "customers_list",
-            "customers_aging", "customers_ar_ledger",
-            "customers_credit_memo", "customers_pdc_vault", "settings",
-        ])
-        _grant_actions("STORE_MANAGER", [
-            "process_sale", "process_returns", "process_blind_returns", "apply_discount",
-            "view_sales_ledger", "export_sales",
-            "view_returns", "export_returns",
-            "view_inventory",
-            "view_stock_ledger",
-            "view_customers", "manage_customers", "reverse_customer_payment", "reverse_return",
-            "view_customer_aging", "export_customer_aging",
-            "view_ar_ledger", "export_ar_ledger",
-            "view_credit_memos", "issue_credit_memo", "cancel_credit_memo",
-            "view_pdc_vault", "manage_pdc",
-            "manage_users", "manage_roles", "manage_shifts",
-            "manage_registers", "manage_payment_modes",
-            "manage_sales_settings", "manage_inventory_policy",
-        ])
-
-        # ── CASHIER ───────────────────────────────────────────────────────────────
-        _grant_programs("CASHIER", ["sales_workstation"])
-        _grant_actions("CASHIER", ["process_sale", "process_returns"])
-
         db.commit()
     except Exception:
         db.rollback()
@@ -515,7 +295,7 @@ def _seed_rbac():
     finally:
         db.close()
 
-_seed_rbac()
+_seed_programs_and_actions()
 
 
 app = FastAPI(title="Season ERP")
@@ -541,6 +321,7 @@ app.include_router(ap_router)
 app.include_router(sales_router)
 app.include_router(settings_router)
 app.include_router(import_router)
+app.include_router(platform_router)
 
 
 @app.get("/")

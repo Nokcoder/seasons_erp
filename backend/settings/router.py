@@ -28,7 +28,7 @@ def _read_policy(db: Session) -> schemas.InventoryPolicyOut:
     )
 
 
-@router.get("/inventory-policy", response_model=schemas.InventoryPolicyOut)
+@router.get("/inventory-policy", response_model=schemas.InventoryPolicyOut, dependencies=[Depends(require_permission("manage_inventory_policy"))])
 def get_inventory_policy(db: Session = Depends(get_db)):
     return _read_policy(db)
 

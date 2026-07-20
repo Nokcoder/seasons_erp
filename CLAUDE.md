@@ -118,6 +118,12 @@ All financial data and stock levels belong to **ProductVariant**, not Product. P
 
 **Known inconsistency**: `sales/models.py` `SalesItem` still uses `product_id` (not `variant_id`), and `sales/router.py` `create_sale` deducts stock from `CurrentStock.product_id`. This is a migration gap; the rest of the codebase uses `variant_id`.
 
+### ⚠️ Multi-tenancy landmine: PID/barcode triggers under erp_admin
+
+The app runs as the non-superuser role **`erp_app`**, under which Row-Level Security scopes every query to the caller's tenant (context set per request via `SET LOCAL app.tenant_id` in `get_db`). The two PID/barcode collision triggers (`inventory.check_variant_pid_no_barcode_collision`, `inventory.check_barcode_no_pid_collision`) are `SECURITY INVOKER`, so their global `EXISTS` scans are RLS-scoped too — enforcing **per-tenant** PID/barcode uniqueness under `erp_app`.
+
+**But `erp_admin` (the superuser used for migrations, boot seeds, and signup via `get_admin_db`) BYPASSES RLS.** Any inventory write to `variants`/`variant_barcodes` performed as `erp_admin` makes those triggers scan **all** tenants and **false-positive** — wrongly rejecting a valid per-tenant PID that merely collides with another tenant's barcode. Nothing hits this today (no admin path writes variants/barcodes; imports run on the `erp_app` request path). **Any future admin-side or bulk inventory write path must run as `erp_app`, or `SET app.tenant_id` before writing** — otherwise it will spuriously reject valid PIDs. (Warning is also attached to both functions via `COMMENT ON FUNCTION`.)
+
 ### Authentication Flow
 
 1. `POST /auth/login` validates credentials with bcrypt, returns a JWT containing `sub` (username), `id` (user_id), `role`, and `exp`
@@ -167,3 +173,49 @@ Nginx routes `/api/*` → FastAPI root, so `/api/products/` maps to FastAPI's `/
 
 
 Do not run any git commands. Never stage, commit, or push. All version control is handled manually.
+
+## Deployment
+
+- Frontend changes only reach the Cloudflare tunnel via:
+  `docker compose up --build -d frontend`
+- A plain `docker compose up -d frontend` only recreates the container
+  from whatever image already exists — it does NOT recompile source. This
+  caused a real bug once (stale pre-fix bundle served for hours) — always
+  use `--build` after any frontend source change intended for the tunnel.
+- Vite dev server (`npm run dev`) runs on port 8080 (`vite.config.ts` pins
+  `server.port: 8080`, `strictPort: true`).
+
+## Storage architecture
+
+- All persistent client-side storage (auth tokens, print templates, print
+  settings) goes through `frontend/src/lib/platformStore.ts`'s `getStore()`
+  function — NEVER import `@tauri-apps/plugin-store` directly anywhere.
+  Direct imports crash with "Cannot read properties of undefined (reading
+  'invoke')" in a plain browser tab, since that package requires Tauri's
+  IPC bridge which doesn't exist outside the Tauri webview.
+- `platformStore.ts` detects environment via `isTauri()` from
+  `@tauri-apps/api/core` and picks a real Tauri store or a localStorage
+  fallback automatically — callers never need environment-specific code.
+
+## RBAC / permissions
+
+- `backend/main.py`'s `_seed_programs_and_actions()` (seeds the
+  Program/Action catalog) runs on EVERY backend startup and is idempotent
+  (`ON CONFLICT DO NOTHING`) — safe to restart freely for this.
+- `tenancy/rbac_seed.py`'s ADMIN wildcard grant (attaching every action to
+  the ADMIN role) only runs ONCE, at tenant creation (`POST /tenants`) — it
+  does NOT re-run on backend restart. A newly added `action_key` will NOT
+  automatically appear on existing ADMIN roles. Must be manually granted
+  via Settings → Roles → ADMIN → Permissions after adding any new action.
+
+## Print module architecture
+
+- Templates are named, saved designs in a library
+  (`frontend/src/print/designer/useTemplateLibrary.js`) — NOT tied directly
+  to a document type in code.
+- "Functions" (`frontend/src/print/designer/useFunctionAssignments.js`) are
+  named trigger points (currently only `'salesReceipt'`) mapped to whichever
+  template is currently assigned. Adding a new function (e.g. a kitchen
+  ticket) means adding an entry to `KNOWN_FUNCTIONS`, not a redesign.
+- Access gated behind the `'manage_print_templates'` permission, under
+  Settings → Print Templates.

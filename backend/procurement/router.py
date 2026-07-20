@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.database import get_db
+from core.doc_sequence import next_document_pid
 from core.audit import write_audit, _serialize
 from auth.dependencies import get_current_user, require_permission
 from auth.models import User as AuthUser
@@ -158,7 +159,7 @@ def _recalculate_po_status(
 # PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/variant-supplier-cost", response_model=schemas.VariantSupplierCostOut)
+@router.get("/variant-supplier-cost", response_model=schemas.VariantSupplierCostOut, dependencies=[Depends(require_permission("view_purchase_orders"))])
 def get_variant_supplier_cost(
     variant_id: int,
     supplier_id: int,
@@ -179,7 +180,7 @@ def get_variant_supplier_cost(
     )
 
 
-@router.get("/orders", response_model=List[schemas.POOut])
+@router.get("/orders", response_model=List[schemas.POOut], dependencies=[Depends(require_permission("view_purchase_orders"))])
 def list_purchase_orders(db: Session = Depends(get_db)):
     return (
         db.query(proc_models.PurchaseOrder)
@@ -194,7 +195,7 @@ def list_purchase_orders(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/orders/{po_id}", response_model=schemas.POOut)
+@router.get("/orders/{po_id}", response_model=schemas.POOut, dependencies=[Depends(require_permission("view_purchase_orders"))])
 def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
     return _load_po(po_id, db)
 
@@ -223,7 +224,7 @@ def create_purchase_order(
     db.flush()  # get po_id
 
     if not payload.po_pid:
-        po.po_pid = f"PO-{po.po_id:06d}"
+        po.po_pid = next_document_pid(db, "PO")
 
     grand_total = Decimal('0')
     for item in payload.items:
@@ -261,8 +262,7 @@ def update_po_item(
     po_id: int,
     po_item_id: int,
     payload: schemas.POItemUpdate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: AuthUser = Depends(require_permission("manage_purchase_orders"))):
     """Update ordered_quantity or unit_cost on a PO line item.
 
     Only allowed when the PO is in Draft or Open status.
@@ -335,7 +335,7 @@ def update_po_status(
 # SHIPMENTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/shipments", response_model=List[schemas.ShipmentOut])
+@router.get("/shipments", response_model=List[schemas.ShipmentOut], dependencies=[Depends(require_permission("view_receiving"))])
 def list_shipments(db: Session = Depends(get_db)):
     return (
         db.query(proc_models.InventoryShipment)
@@ -353,13 +353,13 @@ def list_shipments(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/shipments/{shipment_id}", response_model=schemas.ShipmentOut)
+@router.get("/shipments/{shipment_id}", response_model=schemas.ShipmentOut, dependencies=[Depends(require_permission("view_receiving"))])
 def get_shipment(shipment_id: int, db: Session = Depends(get_db)):
     return _load_shipment(shipment_id, db)
 
 
 @router.post("/shipments", response_model=schemas.ShipmentOut, status_code=201)
-def create_shipment(payload: schemas.ShipmentCreate, db: Session = Depends(get_db)):
+def create_shipment(payload: schemas.ShipmentCreate, db: Session = Depends(get_db), _actor: AuthUser = Depends(require_permission("create_shipment"))):
     shipment = proc_models.InventoryShipment(
         supplier_id=payload.supplier_id,
         po_id=payload.po_id,
@@ -374,7 +374,7 @@ def create_shipment(payload: schemas.ShipmentCreate, db: Session = Depends(get_d
     db.add(shipment)
     db.flush()
 
-    shipment.shipment_pid = payload.shipment_pid or f"SHP-{shipment.shipment_id:06d}"
+    shipment.shipment_pid = payload.shipment_pid or next_document_pid(db, "SHP")
 
     # auto-advance PO to Open if it is still in Draft
     if payload.po_id:
@@ -396,8 +396,7 @@ def create_shipment(payload: schemas.ShipmentCreate, db: Session = Depends(get_d
 def add_receiving_details(
     shipment_id: int,
     details: List[schemas.ReceivingDetailCreate],
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: AuthUser = Depends(require_permission("create_shipment"))):
     """Attach one or more receiving-detail rows to a shipment (QC data entry)."""
     _load_shipment(shipment_id, db)  # 404 guard
 
@@ -447,7 +446,7 @@ def add_receiving_details(
 #   Stage 2: POST /shipments/{id}/confirm-costs (cost layers + invoice)
 
 @router.post("/shipments/{shipment_id}/confirm")
-def confirm_shipment_deprecated(shipment_id: int):
+def confirm_shipment_deprecated(shipment_id: int, _actor: AuthUser = Depends(require_permission("confirm_shipment"))):
     """Deprecated — use the two-stage workflow instead."""
     raise HTTPException(
         status_code=410,
@@ -503,8 +502,7 @@ def update_shipment_discrepancy(
 @router.post("/shipments/{shipment_id}/receive", response_model=schemas.ReceiveResult)
 def receive_shipment(
     shipment_id: int,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: AuthUser = Depends(require_permission("confirm_shipment"))):
     """Stage 1 receive: write RECEIVE ledger entries and update current_stocks for all
     non-deleted details. No cost layers created. Shipment is left as is_confirmed=False."""
     shipment = _load_shipment(shipment_id, db)
@@ -564,7 +562,7 @@ def receive_shipment(
 
 # ── Stage 2 autofill — pre-fills gross_cost / discount_pct per line ───────────
 
-@router.get("/shipment-cost-autofill", response_model=List[schemas.CostAutofillItem])
+@router.get("/shipment-cost-autofill", response_model=List[schemas.CostAutofillItem], dependencies=[Depends(require_permission("view_receiving"))])
 def shipment_cost_autofill(shipment_id: int, db: Session = Depends(get_db)):
     """For each receiving_detail on the shipment, resolve a starting gross_cost +
     discount_pct so the Confirm Costs page can pre-fill the line items.
@@ -636,8 +634,7 @@ def shipment_cost_autofill(shipment_id: int, db: Session = Depends(get_db)):
 def confirm_costs(
     shipment_id: int,
     payload: schemas.ConfirmCostsRequest,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: AuthUser = Depends(require_permission("confirm_shipment"))):
     """Stage 2 cost confirmation: create FIFO cost layers at the provided gross
     cost + discount per line, update variant_suppliers (gross_cost + discount),
     record the supplier invoice (invoice_number/invoice_date/due_date) and AP
@@ -809,7 +806,7 @@ def confirm_costs(
 
 # ── Export confirmed shipment as an invoice XLSX ───────────────────────────────
 
-@router.get("/shipments/{shipment_id}/export")
+@router.get("/shipments/{shipment_id}/export", dependencies=[Depends(require_permission("view_receiving"))])
 def export_shipment_invoice(shipment_id: int, db: Session = Depends(get_db)):
     """Export a confirmed shipment as a two-sheet invoice workbook
     (Invoice Summary, Line Items). 404 if the shipment isn't confirmed yet."""
@@ -998,7 +995,7 @@ def create_supplier_return(
     )
     db.add(ret)
     db.flush()   # materialise return_id for PID and item FKs
-    ret.return_pid = f"SRET-{ret.return_id:05d}"
+    ret.return_pid = next_document_pid(db, "SRET")
 
     for item in payload.items:
         db.add(sales_models.SupplierReturnItem(
@@ -1084,7 +1081,7 @@ def update_supplier_return_status(
     return _load_supplier_return(return_id, db)
 
 
-@router.get("/supplier-returns", response_model=List[schemas.SupplierReturnOut])
+@router.get("/supplier-returns", response_model=List[schemas.SupplierReturnOut], dependencies=[Depends(require_permission("view_receiving"))])
 def list_supplier_returns(
     supplier_id: Optional[int] = None,
     db: Session = Depends(get_db),
@@ -1105,7 +1102,8 @@ def list_supplier_returns(
 
 
 @router.get("/supplier-returns/{return_id}",
-            response_model=schemas.SupplierReturnOut)
+            response_model=schemas.SupplierReturnOut,
+            dependencies=[Depends(require_permission("view_receiving"))])
 def get_supplier_return(return_id: int, db: Session = Depends(get_db)):
     """Get a supplier return with its line items."""
     return _load_supplier_return(return_id, db)

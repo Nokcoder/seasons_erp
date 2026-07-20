@@ -16,6 +16,7 @@ from sqlalchemy.sql import func, or_, and_
 
 from core.audit import write_audit, _serialize
 from core.database import get_db
+from core.doc_sequence import next_document_pid, peek_next_document_pid
 from auth.dependencies import get_current_user, require_permission, has_action
 from auth.models import User as AuthUser
 from sales import models, schemas
@@ -95,7 +96,7 @@ def list_shifts(db: Session = Depends(get_db)):
 def create_shift(
     payload: schemas.ShiftCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_shifts")),
 ):
     shift = models.Shift(
         shift_name=payload.shift_name,
@@ -112,7 +113,7 @@ def update_shift(
     shift_id: int,
     payload: schemas.ShiftPatch,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_shifts")),
 ):
     shift = (
         db.query(models.Shift)
@@ -150,7 +151,7 @@ def list_payment_modes(db: Session = Depends(get_db)):
 def create_payment_mode(
     payload: schemas.PaymentModeCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_payment_modes")),
 ):
     mode = models.PaymentMode(
         name=payload.name,
@@ -173,7 +174,7 @@ def update_payment_mode(
     payment_mode_id: int,
     payload: schemas.PaymentModePatch,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_payment_modes")),
 ):
     mode = (
         db.query(models.PaymentMode)
@@ -236,7 +237,7 @@ def list_registers(db: Session = Depends(get_db)):
 def create_register(
     payload: schemas.CashRegisterCreate,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_registers")),
 ):
     location = (
         db.query(Location)
@@ -269,7 +270,7 @@ def update_register(
     register_id: int,
     payload: schemas.CashRegisterPatch,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_sales_settings")),
+    _actor: AuthUser = Depends(require_permission("manage_registers")),
 ):
     register = _load_register(register_id, db)
 
@@ -1326,7 +1327,7 @@ def deposit_pdc_check(
     payment_id: int,
     payload: schemas.PDCDepositIn,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_customers")),
+    _actor: AuthUser = Depends(require_permission("manage_pdc")),
 ):
     """Mark a PDC cheque as deposited — the collection event for a postdated check.
 
@@ -1406,7 +1407,7 @@ def bounce_pdc_check(
     payment_id: int,
     payload: schemas.PDCBounceIn,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("manage_customers")),
+    _actor: AuthUser = Depends(require_permission("manage_pdc")),
 ):
     """Mark a PDC cheque as bounced and reverse all applied payments against their sales.
 
@@ -2424,7 +2425,7 @@ def post_draft(
 
     # ── 13. Finalise sale header ───────────────────────────────────────────────
     now = datetime.now(timezone.utc)
-    sale.sale_pid        = sale.sale_pid or f"SALE-{sale.sale_id:05d}"
+    sale.sale_pid        = sale.sale_pid or next_document_pid(db, "SALE")
     sale.posted_at       = now
     sale.transaction_date = payload.transaction_date
     sale.status          = "Posted"
@@ -3446,7 +3447,7 @@ def _do_return(
     )
     db.add(sales_return)
     db.flush()
-    sales_return.return_pid = f"RET-{sales_return.return_id:05d}"
+    sales_return.return_pid = next_document_pid(db, "RET")
     ref_id = str(sales_return.return_id)
 
     for v in validated:
@@ -4129,15 +4130,10 @@ def get_sales_summary(
 
 @router.get("/next-pid")
 def get_next_pid(db: Session = Depends(get_db)):
-    """Return the next sale PID based on the highest existing SALE-NNNNN value."""
-    from sqlalchemy import text
-    row = db.execute(text("""
-        SELECT MAX(CAST(SUBSTRING(sale_pid FROM 6) AS INTEGER))
-        FROM sales.sales
-        WHERE sale_pid ~ '^SALE-[0-9]+$'
-    """)).scalar()
-    n = (row or 0) + 1
-    return {"next_pid": f"SALE-{n:05d}"}
+    """Preview the next sale PID for the caller's tenant. Reads the per-tenant
+    document counter (not a MAX scan) so the preview matches what the actual
+    post will assign."""
+    return {"next_pid": peek_next_document_pid(db, "SALE")}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

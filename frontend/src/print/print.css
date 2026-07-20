@@ -1,0 +1,138 @@
+/* print.css
+ * Handles the purely visual/layout concerns (margins, font size, paper size).
+ * Boolean toggles (show logo / header / footer, column visibility) are handled
+ * by conditional rendering in the template component instead of CSS — that's
+ * more reliable in React than trying to drive display:none per-field via vars.
+ */
+
+:root {
+  --print-margin-top: 15mm;
+  --print-margin-right: 12mm;
+  --print-margin-bottom: 15mm;
+  --print-margin-left: 12mm;
+  --print-font-size: 11pt;
+  --print-paper-size: A4;
+}
+
+/* ---------- On-screen preview ("looks like paper") ---------- */
+
+.print-preview-canvas {
+  background: #f1f5f9;
+  padding: 40px 0;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.print-preview-canvas .print-root {
+  background: #ffffff;
+  width: 210mm; /* visual approximation of A4; not load-bearing for actual print */
+  min-height: 297mm;
+  border-radius: 3px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 8px 24px rgba(15, 23, 42, 0.12);
+  padding: var(--print-margin-top) var(--print-margin-right) var(--print-margin-bottom)
+    var(--print-margin-left);
+  font-size: var(--print-font-size);
+  color: #111827;
+}
+
+/* ---------- Actual print output ---------- */
+
+@media print {
+  body > *:not(.print-portal) {
+    display: none !important;
+  }
+
+  .print-portal,
+  .print-portal .print-root {
+    display: block !important;
+  }
+
+  .print-portal .print-root {
+    width: auto;
+    min-height: 0;
+    box-shadow: none;
+    padding: var(--print-margin-top) var(--print-margin-right) var(--print-margin-bottom)
+      var(--print-margin-left);
+    font-size: var(--print-font-size);
+    color: #111827;
+  }
+
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .print-table th,
+  .print-table td {
+    padding: 4pt 6pt;
+    border-bottom: 0.5pt solid #d1d5db;
+    text-align: left;
+  }
+
+  .print-footer {
+    position: fixed;
+    bottom: 6mm;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 9pt;
+    color: #6b7280;
+  }
+
+  @page {
+    size: var(--print-paper-size, A4);
+    margin: 0;
+  }
+}
+
+/* ---------- Toolbar (screen only, hidden when printing) ---------- */
+
+.print-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media print {
+  .print-preview-toolbar {
+    display: none;
+  }
+}
+
+.print-preview-toolbar__print-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.05s ease;
+}
+
+.print-preview-toolbar__print-btn:hover {
+  background: #4338ca;
+}
+
+.print-preview-toolbar__print-btn:active {
+  transform: translateY(1px);
+}
+
+.print-preview-toolbar__print-btn:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}

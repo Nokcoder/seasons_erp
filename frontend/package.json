@@ -7,20 +7,28 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/react-query": "^5.100.14",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-store": "^2.4.3",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@tauri-apps/plugin-window-state": "^2.4.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-rnd": "^10.5.3",
     "react-router-dom": "^7.14.1",
+    "react-to-print": "^3.3.0",
     "uuid": "^14.0.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.1/xlsx-0.20.1.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@tailwindcss/postcss": "^4.2.4",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

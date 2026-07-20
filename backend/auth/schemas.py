@@ -74,6 +74,7 @@ class UserCreate(BaseModel):
 
 
 class UserLogin(BaseModel):
+    org_slug: str
     username: str
     password: str
 

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.database import get_db
+from core.doc_sequence import next_document_pid
 from core.audit import write_audit, _serialize
 from auth.dependencies import get_current_user, require_permission
 from auth.models import User
@@ -248,7 +249,7 @@ def list_locations(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/locations/{location_id}", response_model=schemas.LocationOut)
+@router.get("/locations/{location_id}", response_model=schemas.LocationOut, dependencies=[Depends(require_permission("view_transfers"))])
 def get_location(location_id: int, db: Session = Depends(get_db)):
     loc = db.query(models.Location).filter(
         models.Location.location_id == location_id,
@@ -284,8 +285,7 @@ def create_location(
 def update_location(
     location_id: int,
     payload: schemas.LocationUpdate,
-    db: Session = Depends(get_db),
-):
+    db: Session = Depends(get_db), _actor: User = Depends(require_permission("manage_locations"))):
     loc = (
         db.query(models.Location)
         .filter(models.Location.location_id == location_id, models.Location.is_deleted == False)
@@ -311,7 +311,7 @@ def update_location(
 # TRANSFERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/", response_model=List[schemas.TransferOut])
+@router.get("/", response_model=List[schemas.TransferOut], dependencies=[Depends(require_permission("view_transfers"))])
 def list_transfers(db: Session = Depends(get_db)):
     return (
         db.query(models.InventoryTransfer)
@@ -332,7 +332,7 @@ def list_transfers(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/{transfer_id}", response_model=schemas.TransferOut)
+@router.get("/{transfer_id}", response_model=schemas.TransferOut, dependencies=[Depends(require_permission("view_transfers"))])
 def get_transfer(transfer_id: int, db: Session = Depends(get_db)):
     return _load_transfer(transfer_id, db)
 
@@ -405,7 +405,7 @@ def create_transfer(
 
     # auto-generate PID if not supplied
     if not transfer.transfer_pid:
-        transfer.transfer_pid = f"TRF-{transfer.transfer_id:06d}"
+        transfer.transfer_pid = next_document_pid(db, "TRF")
 
     ref_id = str(transfer.transfer_id)
 

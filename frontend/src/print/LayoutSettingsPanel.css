@@ -1,0 +1,196 @@
+/* LayoutSettingsPanel.css
+ * Internal tool aesthetic: quiet, confident, a single accent color used
+ * consistently. Native system font stack so it reads as part of the desktop
+ * app rather than a web page dropped into a webview.
+ */
+
+.layout-settings-panel {
+  --lsp-accent: #4f46e5;
+  --lsp-border: #e2e8f0;
+  --lsp-surface: #ffffff;
+  --lsp-surface-muted: #f8fafc;
+  --lsp-text: #0f172a;
+  --lsp-text-muted: #64748b;
+  --lsp-radius: 10px;
+
+  width: 280px;
+  border-left: 1px solid var(--lsp-border);
+  background: var(--lsp-surface-muted);
+  padding: 20px;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--lsp-text);
+}
+
+.layout-settings-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.layout-settings-panel__header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.layout-settings-panel__reset {
+  background: none;
+  border: none;
+  color: var(--lsp-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.layout-settings-panel__reset:hover {
+  background: var(--lsp-border);
+  color: var(--lsp-text);
+}
+
+.layout-settings-panel__section {
+  background: var(--lsp-surface);
+  border: 1px solid var(--lsp-border);
+  border-radius: var(--lsp-radius);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.layout-settings-panel__section h4 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lsp-text-muted);
+  margin: 0 0 10px 0;
+}
+
+.layout-settings-panel__margin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.layout-settings-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.layout-settings-panel__field:last-child {
+  margin-bottom: 0;
+}
+
+.layout-settings-panel__field span {
+  color: var(--lsp-text-muted);
+  text-transform: capitalize;
+  font-size: 12px;
+}
+
+.layout-settings-panel__field input,
+.layout-settings-panel__field select {
+  border: 1px solid var(--lsp-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--lsp-text);
+  background: var(--lsp-surface);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.layout-settings-panel__field input:focus,
+.layout-settings-panel__field select:focus {
+  outline: none;
+  border-color: var(--lsp-accent);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+
+/* ---------- Toggle rows (replaces plain checkboxes) ---------- */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.toggle-row__label {
+  color: var(--lsp-text);
+}
+
+.toggle {
+  position: relative;
+  display: inline-flex;
+  width: 34px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: #cbd5e1;
+  border-radius: 999px;
+  transition: background 0.15s ease;
+  pointer-events: none;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.toggle input:checked ~ .toggle-track {
+  background: var(--lsp-accent);
+}
+
+.toggle input:checked ~ .toggle-track .toggle-thumb {
+  transform: translateX(14px);
+}
+
+.toggle input:focus-visible ~ .toggle-track {
+  outline: 2px solid var(--lsp-accent);
+  outline-offset: 2px;
+}
+
+.layout-settings-panel__text-input {
+  width: 100%;
+  border: 1px solid var(--lsp-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  margin-top: -2px;
+  margin-bottom: 4px;
+  background: var(--lsp-surface);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.layout-settings-panel__text-input:focus {
+  outline: none;
+  border-color: var(--lsp-accent);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}

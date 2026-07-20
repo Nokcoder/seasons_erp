@@ -35,13 +35,18 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or malformed token")
 
     user_id: int | None = payload.get("id")
-    if not user_id:
+    tenant_id: int | None = payload.get("tenant_id")
+    if not user_id or not tenant_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
     user = (
         db.query(models.User)
         .options(joinedload(models.User.roles))
-        .filter(models.User.user_id == user_id, models.User.is_active == True)
+        .filter(
+            models.User.user_id == user_id,
+            models.User.tenant_id == tenant_id,
+            models.User.is_active == True,
+        )
         .first()
     )
     if not user:

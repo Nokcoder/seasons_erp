@@ -16,6 +16,8 @@ const Customers   = lazy(() => import('./pages/Customers'))
 const Settings    = lazy(() => import('./pages/Settings'))
 const Admin       = lazy(() => import('./pages/Admin'))
 const NoAccess    = lazy(() => import('./pages/NoAccess'))
+// Temporary — print layout designer test route, see pages/dev/PrintDesignerDev.tsx
+const PrintDesignerDev = lazy(() => import('./pages/dev/PrintDesignerDev'))
 
 function PageFallback() {
   return (
@@ -53,6 +55,9 @@ export default function App() {
 
           {/* Protected — all pages require a valid token */}
           <Route element={<ProtectedRoute />}>
+            {/* Temporary — print designer test route, standalone (no AppShell chrome) */}
+            <Route path="/dev/print-designer" element={<PrintDesignerDev />} />
+
             <Route element={<AppShell />}>
               {/* Root → redirect to the first module the user has access to */}
               <Route index element={<DefaultRoute />} />
