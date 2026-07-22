@@ -1,5 +1,332 @@
 # Changelog
 
+## 2026-07-22 — Print templates moved to the database (server-side, shared across terminals)
+
+Templates and function assignments moved off device-local `platformStore` into the
+DB so a template designed on one terminal exists on every terminal (and survives a
+browser-data clear). Built in phases:
+
+**Phase 1 — schema (`aa77bb88cc99`).** `settings.print_templates` (UUID PK,
+`tenant_id`, `name`, `doc_type` plain VARCHAR, `template` JSONB, audit fields,
+`is_deleted`) and `settings.print_function_assignments` (`tenant_id`,
+`function_key`, `template_id` FK, `UNIQUE(tenant_id, function_key)`). Both follow
+the tenant/RLS recipe with the **hardened** `nullif(current_setting('app.tenant_id',
+true), '')::integer` predicate — used for the `tenant_id` column default too. RLS
+verified: three-way no-context probe (pristine/empty/RESET → 0 rows), cross-tenant
+isolation, and WITH CHECK write rejection.
+
+**Phase 2 — API (`/print`).** Reads auth-only (cashiers resolve at checkout):
+`GET /print/templates`, `/templates/{id}`, `/functions`, `/functions/{key}/template`
+(resolve — a soft-deleted assigned template returns `assigned:false`, HTTP 200, so
+the client falls back to the built-in default; never 404/500). Writes gated on
+`manage_print_templates`: `POST`/`PATCH`/`DELETE` (soft) templates, `PUT` assign.
+`audit_log` written on every write (`_serialize` extended for UUID PKs). Permission
+gates, cross-tenant isolation, and soft-delete-resolve all verified live. `POST`
+returns a clean **409 Conflict** (not a raw 500) when the supplied `template_id`
+already exists — RLS-scoped pre-check for a friendly message, plus an
+`IntegrityError` safety net for a race / cross-tenant id collision.
+
+**Phase 3 — frontend swap + offline cache.** `useTemplateLibrary` /
+`useFunctionAssignments` now call `/print` (optimistic local state + async sync;
+`useAssignedTemplate` resolves from the server). Checkout fallback chain:
+**server → local read-through cache → built-in default** — every successful resolve
+caches the template in `print-settings.json` per tenant+function; on a network
+failure the cache serves it, and if the cache is empty too, the built-in default. A
+failed save surfaces a red banner to the admin (never a silent success). Device-local
+settings untouched (`receiptPrintingOverride`, `receiptAutoPrintOverride`, device
+`printCalibration`); the per-template `calibrationOffsetXMm/YMm` rides along in the
+template JSON to the server.
+
+**Phase 4 — import action.** Admin "Import N local templates to the server" button
+in Settings → Print Templates (only shown when device-local templates exist). Shows
+a preview of exactly what will upload, **preserves existing UUIDs** (POST with
+`template_id`), and is **idempotent + non-clobbering**: templates already on the
+server (matched by id) are skipped, and assignments are **fill-only** (applied only
+where the server has no assignment for that function), so a re-run changes nothing.
+On a fully clean import the local keys are cleared. Verified: UUID preservation and
+assignment idempotency live; 5/5 preview-logic checks (first run, idempotent re-run,
+partial, dangling-target drop, non-clobber of a differing server assignment).
+
+Build + lint clean; adapter round-trip + all Phase 1/2/4 checks pass.
+
+## 2026-07-22 — Print designer: separate doc-id/date fields + positioning freedom + print calibration
+
+**Part A — Document ID and Date as separate cells.** `receiptNo`/`salePid`/`date`
+were already separate header sources and individually placeable via the new field
+cells, but the default template still shipped a combined `documentMeta` block. The
+default now uses **two separate field cells** (Receipt no. + Date) at independent
+positions, so out-of-box they align to a pre-printed form's separate blanks. The
+`documentMeta` composite block remains available in the palette.
+
+**Part B — Positioning freedom + print calibration.**
+- **Relaxed clamps.** Element X/Y was floored at 0 (drag/band clamps + `bounds="parent"`),
+  so negative/off-paper positions were impossible via drag. Now elements and the row
+  band can be positioned into a **bleed margin** (±20mm beyond the paper) for aligning
+  to pre-printed stock; any element sitting off the paper is **outlined in red** in the
+  designer (it will clip at print). The canvas gained bleed padding so off-paper
+  elements stay visible/reachable. (Cells stay bounded to their band — the band moves
+  for alignment.) The print page still clips at the paper edge (`.print-page`
+  overflow:hidden) — nothing can print beyond the physical sheet.
+- **Print calibration offset (the real alignment fix).** A per-template `calibration
+  Offset X/Y (mm)` (designer toolbar) **plus** a per-terminal device offset (adjustable
+  from the receipt preview bar, stored device-local in `platformStore` per tenant) —
+  **added together** and applied to ALL elements at print time via one `translate` on
+  the page content. Feed alignment varies by printer, so a device can correct globally
+  (print a test, nudge X/Y, reprint) without touching the template or per-cell coords.
+  Distinct from `gridOffsetX/Y` (designer snap grid only).
+- **Physical limit (documented, not overridable):** printers enforce a hardware
+  unprintable margin (~3–5mm, larger on the feed edge). `@page margin:0`, negative
+  coords, and calibration cannot reclaim it — alignment works within the printable
+  area only.
+
+Build + lint clean. 3/3 checks (default split into separate field cells + no
+documentMeta; calibration translate = template + terminal offset, additive, default
+0; bleed clamp allows bounded negative/beyond + outside-paper detection). Deployed.
+
+## 2026-07-22 — Print designer: header field cells + multi-page pagination
+
+Two features. (A) **Header field cells** and (B) **pagination**.
+
+**A — Header field cells.** Previously header data (date, customer, receipt no,
+business name, totals) could only be placed via the four fixed composite blocks —
+you couldn't drop just "Date" as a positioned, format-controllable cell. Added a
+new `kind: 'field'` element: a positioned, drag/resize header-value cell using the
+same binding editor as line-item cells (single or composed), now fed either
+`RECEIPT_LINE_ITEM_SOURCES` (row cells) or `RECEIPT_HEADER_SOURCES` (fields) via a
+shared `BindingEditor` component. Date-bound fields get a **date format** option
+(As stored / MM/DD/YYYY / DD/MM/YYYY / Month D, YYYY / Mon D, YYYY) so the raw ISO
+value fits a pre-printed "Date: ____" line. Palette gains "+ Field"; the adapter
+and sample data expose the header keyed by source id for resolution.
+
+**B — Pagination (replaces the interim maxRows cap-and-drop).** `TemplateRenderer`
+now emits N paper-sized `.print-page` containers driven by CSS page breaks
+(`break-after: page`, `break-inside: avoid`, `@page margin: 0`) — no react-to-print
+change needed. Model (`pagination.js`, pure/tested):
+- Same pre-printed stock every page: `bandTop`, band height, and
+  `rowsPerPage = maxRows ?? floor((paperHeight − bandTop) / pitch)` are uniform.
+  `maxRows` now means **rows per page** (overflow **spills** to the next page
+  instead of vanishing); the inspector field is relabelled "Rows / page".
+- `numPages = max(1, ceil(items / rowsPerPage))`; items chunk uniformly; each page
+  restarts the row counter at `bandTop + n·pitch`.
+- Per-element `pageScope` ('all' | 'first' | 'last') with smart defaults: header
+  fields/blocks `all`, totals block and totals-valued fields `last`. Header values
+  print on every page (each sheet self-identifies); totals only on the final page.
+  Software draws no ruling/labels — only positioned value cells fill.
+- On-screen preview shows N stacked sheets.
+- Overlap guard: a designer **warning** when a last-page element (totals) sits
+  inside the line-item band region (would misprint on a full last page).
+- Edge cases handled: zero items → one page (totals shown); exact-multiple last
+  page → no spurious trailing page; long composed Description clips in its cell.
+
+Build + lint clean. 7/7 pure logic checks (rowsPerPage/pageCount, uniform chunking
+with identical per-page row positions and nothing dropped, pageScope defaults +
+filtering, band-overlap guard, date formats, header field resolution) and 4/4
+server-render checks (`renderToStaticMarkup`: 4 items→1 page, 20→2, 25→3, 0→1 —
+totals last-only, header/date on every page, first row at bandTop on each page, all
+rows spilled). Deployed to the tunnel.
+
+## 2026-07-21 — Print designer: line-item row band width, row-count indicator, ghost preview
+
+Three follow-up fixes on the line-item row band (temporary `[LIR-*]` drag
+diagnostics removed):
+
+- **Band width is now an explicit, resizable property.** Previously the band was
+  hardcoded to `paperWidth − x` (~200mm to the paper's right edge) with resizing
+  disabled, so it claimed space it didn't own. Now the row stores an explicit
+  `width` and the band resizes left/right like a text box (height stays tied to
+  `repeatIntervalMm`). New rows default to the **cells' extent** (190mm for the
+  default 4-cell row), not the full paper. The band's `minWidth` clamps to the
+  cells' current extent, so it can never be shrunk narrower than its cells — the
+  band always visually contains them; older rows with no stored width fall back to
+  that extent. Added a **Width** field to the row inspector. (Band width is
+  designer-only; print positions cells by their own `x`/`width` regardless.)
+- **Row-count indicator now reflects `maxRows`.** The ghost slots were fixed at
+  `min(pageFit − 1, 11)` and ignored `maxRows` entirely — setting it did nothing.
+  Now the slot count = `maxRows` when set (declared − 1 ghosts), and when uncapped
+  shows how many rows actually fit on the remaining page (real capacity against a
+  pre-printed form). Hard-capped at 200 nodes.
+- **Ghost rows now preview real content.** They were empty dashed outlines; they
+  now render faded representative sample content (reusing `getSampleData`) resolved
+  through each cell's binding, so the repeat preview is truthful — the editable row
+  still shows binding labels, the ghosts show what the data will look like.
+
+Build + lint clean; 4/4 logic checks (default width, band-width clamp, ghost-count
+vs maxRows, ghost sample resolution). Deployed to the tunnel.
+
+## 2026-07-21 — Print designer: line-item row usability fixes (selectable/draggable row, cell freedom, add-cell, keyboard delete)
+
+Follow-up to the row-template pivot, fixing a live bug report that the Line Items
+Row tool was unwieldy. Six issues addressed:
+
+- **Row selectability + drag (root cause).** The band's cells occluded nearly the
+  whole background, leaving only a ~10mm strip clickable, and the band was a plain
+  `<div>` (not draggable). The band is now a react-rnd element with a dedicated
+  **header grab-handle** ("⠿ Line item row") floating above it — the handle is
+  both the click-to-select target and the drag handle (`dragHandleClassName`), so
+  the whole row repositions like a text box while cells still drag independently.
+  Inspector X/Y remain as precise entry. (`DesignerCanvas.jsx`, `designer.css`.)
+- **Cell vertical freedom + snap.** Cells stay bounded to one row slot (height =
+  `repeatIntervalMm`) — the max that keeps printed rows non-overlapping; raise the
+  pitch for more room and the band grows live. Added a toolbar **"Snap to grid"**
+  toggle (default on) governing *all* draggable elements (text, blocks, row, cells)
+  uniformly — off = free ~0.1mm positioning for aligning to pre-printed forms.
+- **Add cell.** New per-row **"+ Add cell"** button in the row inspector (deletion
+  was previously the only cell op). New cells get a sensible default position (just
+  right of existing cells, clamped to the band), size, and single-source binding.
+- **Selection clarity.** The inspector now leads with a color-coded banner naming
+  the selection — "Line item row" (teal), "Cell: <binding>" (indigo, via
+  `describeBinding`), "Text box", or "Block: <name>" — so row-vs-cell (and which
+  cell) is unmistakable, not just a subtle border color.
+- **Keyboard delete (app-wide).** Delete/Backspace now removes any selected element
+  (text box, data block, row, or cell), guarded so it never fires while typing in
+  an input/textarea/select or editing a text box. Was previously toolbar-only.
+
+Build + lint clean; shared resolution modules unchanged (10/10 logic checks still
+pass). Deployed to the tunnel for live verification.
+
+## 2026-07-21 — Print designer: row-template pivot (positioned repeating cells replace the table column editor)
+
+Replaced the line-items **table** (a positioned block with a side-panel column
+editor) with a positioned, repeating **row template** — cells you drag/resize
+like text boxes, repeated at a fixed pitch per line item. Hard replacement, no
+legacy path (safe: no real templates exist on any device yet). Pagination is
+explicitly the NEXT phase — this only lays the row template + interim overflow.
+
+- **Data model**: new element `{ kind: 'lineItemRow', x, y, repeatIntervalMm,
+  maxRows, cells: [{ id, x, y, width, height, binding, align?, fontFamily?,
+  fontSize?, color? }] }`. Cell `x/y` are relative to the row origin; `binding`
+  is `{source}` or `{composed:{sources[],separator}}` (same shape the old columns
+  used). `receiptSources.js` is unchanged — still the single source of truth for
+  which line-item fields exist.
+- **Resolution** (`columnResolution.js`): `resolveColumnValue` → `resolveBindingValue`
+  (logic identical; it now resolves a cell binding, not a table column). Added
+  `describeBinding` (designer labels) and `DEFAULT_LINE_ITEM_CELLS` /
+  `DEFAULT_LINE_ITEM_ROW`. Removed `resolveTableColumns` and
+  `DEFAULT_LINE_ITEM_COLUMNS`.
+- **Removed entirely**: the TemplateDesigner column editor (add/remove/reorder/
+  width UI), the `lineItemsTable` block (dropped from `blockTypes.js`), the
+  table-rendering path + `<colgroup>` in TemplateRenderer, and the fake-table
+  placeholder in DesignerCanvas.
+- **Designer UX**: cells are react-rnd boxes reusing the exact text-box drag/
+  resize interaction, bounded to their row band; selecting a cell (or the row)
+  shows its editor in the inspector. Row band + faint ghost bands visualise the
+  repeat pitch. Palette gains a "+ Line item row" action (one per template).
+  Inspector: cell binding editor (single/composed + separator, reusing the old
+  composed-source UI) and per-cell text style; row controls for
+  `repeatIntervalMm` and `maxRows`.
+- **Default receipt template** (`receiptResolution.js`): the Qty | Description
+  (brand+description+sku+pid) | U/P | Amount table is now the equivalent 4-cell
+  row at the BIR-style positions/widths, same bindings as before.
+- **Adapter** (`receiptAdapter.js`): passes line items through raw (no column
+  pre-resolution); TemplateRenderer resolves each cell per row. `sampleData.js`
+  now supplies raw line-item rows so the designer's Preview resolves bindings.
+- **Interim overflow (temporary, pre-pagination)**: a row renders `maxRows` items
+  if set, else all items uncapped (can overflow the page). Flagged in code as a
+  placeholder for the pagination phase.
+- **Inspector overflow fix**: `.designer-inspector` gained `overflow-y:auto` +
+  `min-height:0` so a tall inspector scroll-contains within its column instead of
+  spilling `.designer-body` past the designer's fixed 100% height.
+
+Tested: 28/28 pure+render (esbuild-bundled `renderToStaticMarkup`) — binding
+resolution incl. the composed brand+description+sku+pid case against a real sale
+row, default-template shape (lineItemRow present, no legacy table, 4 cells,
+unique ids), adapter passes raw rows, repeat pitch renders each item at exactly
+`y + i×repeatIntervalMm` (5 items → 60/66/72/78/84 mm), and the interim `maxRows`
+cap. Overflow bug re-measured in real headless-Chrome at 3 viewports
+(1200×800/1000×620/900×520): no horizontal page overflow in any state; selecting
+the row/cell does **not** increase page vertical overflow (constant across
+no-selection/row/cell), and at the 900px viewport the cell inspector
+(scroll 430 > client 324) scroll-contains without spilling the page. Build + lint
+clean. Not deployed to the tunnel yet.
+
+## 2026-07-21 — Receipt printing Phase 4: Workstation/SaleDetail wiring + auto-print setting
+
+Wired receipt printing into the app and added the opt-in auto-print axis.
+
+- **Auto-print setting** (separate axis from receipts_enabled): tenant-wide KV
+  `receipts_auto_print` (default false; GET auth-only / PATCH manage_print_templates,
+  mirroring receipts_enabled) + per-terminal `receiptAutoPrintOverride` in
+  platformStore (inherit/force-on/force-off, mirroring receiptPrintingOverride).
+- **Pure logic**: `resolveShouldAutoPrint` (mirrors resolveShouldPrintReceipt) and
+  `decideReceiptAction(shouldPrint, shouldAutoPrint)` → none | auto | button.
+- **Shared `useTenantId`** (`lib/tenant.ts`): derives the tenant id from the JWT
+  the same way Settings does, so a terminal resolves the template/settings it was
+  configured with. `PrintPreview` gains `autoPrint`/`onAfterPrint`.
+- **Workstation**: after a successful post, `decideReceiptAction` drives the UI —
+  none → nothing; auto → `ReceiptPreviewModal` opens in auto-print mode (skips
+  confirm); button → a Print Receipt button on the action row opens the modal for
+  confirm-then-print.
+- **SaleDetail**: an always-available "Reprint receipt" action (opens the modal,
+  manual only) — independent of receipts_enabled and never auto-printed.
+
+Tested: 8/8 unit (auto-print resolution + decision matrix), 5/5 backend
+(auto-print GET/PATCH, independent of receipts_enabled), 5/5 browser harness
+(terminal-override read both axes/directions; autoPrint fires; manual shows the
+button). SaleDetail reprint verified unconditional by inspection. Not deployed to
+the tunnel yet.
+
+## 2026-07-20 — Receipt printing Phase 3: preview/print UI + general column-composition system
+
+Built the receipt preview/print component and the generalized line-item column
+system it renders through (no Workstation/SaleDetail wiring yet — Phase 4).
+
+- **Data-source registry** (`receiptSources.js`): single source of truth for the
+  header + lineItem scopes (only fields already in the Phase-1 receipt-data
+  contract; VAT/buyer-TIN/business-style deferred).
+- **Pure column resolution** (`columnResolution.js`): a lineItemsTable column is
+  `{label, width, source}` or `{label, width, composed:{sources[],separator}}`;
+  `resolveTableColumns` produces `{columns,rows}` for TemplateRenderer.
+  `DEFAULT_LINE_ITEM_COLUMNS` = Qty | Description(composed brand+description+sku+pid) | U/P | Amount, per the BIR-style reference.
+- **Adapter** (`receiptAdapter.js`): receipt-data + template → TemplateRenderer
+  data, resolving columns generically via the registry (not hardcoded).
+- **Inspector column editor** (`TemplateDesigner.jsx`): add/remove/reorder columns,
+  width, single-vs-composed with an ordered source list + separator — reuses the
+  existing `.designer-toolbar__field` styling.
+- **TemplateRenderer**: `<colgroup>` mm widths so columns are resizable.
+- **ReceiptPreviewModal.jsx**: fetches receipt-data, resolves template (or built-in
+  default), adapts, renders in `PrintPreview` (react-to-print) for a cashier
+  confirm-then-print. `salesApi.receiptData` added.
+
+Tested in isolation: 23/23 pure (registry single+composed both scopes; adapter +
+resolveTableColumns against a real sale's receipt-data; default template column
+order/config) and 5/5 render (TemplateRenderer DOM: Qty/Description/U-P/Amount
+header order, colgroup widths, composed Description cell).
+
+## 2026-07-20 — Print designer: sidebar-overlap fix, draggable text boxes, whole-box text formatting
+
+Three fixes to the print template editor, verified in a real browser (headless
+Chromium layout measurement + Playwright on the deployed site).
+
+**Sidebar overlap (`designer.css`).** `.designer-canvas-scroll` was `flex:1`
+without `min-width:0`, and centered its oversized child with
+`justify-content:center` — so a canvas wider than the middle column (narrow
+window, or inspector open) overflowed left into the palette and made the canvas's
+left edge unreachable. Added `min-width:0`; replaced `justify-content:center`
+with `margin:0 auto` on `.designer-canvas` (centers when it fits, start-aligned +
+scrollable when it doesn't).
+
+**Text-box drag — edit-on-double-click (`DesignerCanvas.jsx`).** Text boxes used
+the same react-rnd wrapper as data blocks but couldn't be dragged: the inner
+`<textarea>` swallowed mousedown. Now the textarea is `readOnly` +
+`pointer-events:none` by default (mousedown reaches react-rnd → drags like a data
+block); a wrapper carries `onDoubleClick` (react-rnd doesn't forward it) to enter
+edit mode (focus, re-enable pointer events, `disableDragging`); blur / empty-canvas
+click exits.
+
+**Whole-box text formatting.** Added `fontFamily` + `color` alongside the existing
+`fontSize`/`align` (uniform per box). New `TEXT_DEFAULTS` + `FONT_FAMILY_OPTIONS`
+(Arial, Times New Roman, Georgia, Courier New, Verdana) in `blockTypes.js` back
+the `?? ` fallbacks so pre-existing templates render unchanged. Inspector "Text
+box" section gains Font family + Color controls; both render sites
+(`DesignerCanvas` preview and `TemplateRenderer` print output) apply all four
+props identically. Also fixed a pre-existing unit mismatch: the designer preview
+now renders `fontSize` in `pt` (was a bare px number) to match the print output —
+existing text boxes appear ~33% larger in the editor, which is the preview finally
+matching what prints.
+
+Deployed to the tunnel; live E2E on test.lukosledger.com passed 11/11 (drag,
+double-click edit, all four formatting controls, pt-accurate size, no errors).
+
 ## 2026-07-20 — Multitenancy Track A: house-wide RLS predicate hardening (all remaining clusters)
 
 Migration `ff66aa77bb88` extends the auth hardening to every other

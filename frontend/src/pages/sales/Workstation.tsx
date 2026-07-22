@@ -5,9 +5,13 @@ import KeywordSearch from '../../components/KeywordSearch'
 import { qk } from '../../lib/queryKeys'
 import { stale } from '../../lib/queryClient'
 import { useAuth } from '../../context/AuthContext'
+import { useTenantId } from '../../lib/tenant'
+import { useShouldPrintReceipt, useShouldAutoPrintReceipt } from '../../print/designer/useReceiptSettings'
+import { decideReceiptAction } from '../../print/designer/receiptResolution'
+import { ReceiptPreviewModal } from '../../print/designer/ReceiptPreviewModal'
 import {
   salesApi, inventoryApi, authApi,
-  type Shift, type PaymentMode, type CashRegister, type Location, type EmployeeOut,
+  type EmployeeOut,
   type POSCatalogItem, type POSVariant, type POSUomOption, type SaleOut, type CustomerOut,
 } from '../../services/api'
 import { normalize } from '../../lib/normalize'
@@ -144,6 +148,11 @@ const hdrInput = hdrSelect
 export default function Workstation() {
   const qc = useQueryClient()
   const { user } = useAuth()
+  // Receipt-printing resolution (Phase 4). tenantId is derived the same way as
+  // Settings so a terminal resolves the template/settings it was configured with.
+  const tenantId = useTenantId()
+  const { shouldPrint } = useShouldPrintReceipt(tenantId)
+  const { shouldAutoPrint } = useShouldAutoPrintReceipt(tenantId)
 
   // ── current-user profile (employee name for cashiering mode display) ──
   const { data: myProfile, isError: myProfileError, error: myProfileErrorObj } = useQuery({
@@ -318,6 +327,10 @@ export default function Workstation() {
   const [loading,       setLoading]       = useState(false)
   const [error,         setError]         = useState('')
   const [successMsg,    setSuccessMsg]    = useState('')
+  // Receipt print UI state, driven off the last successful post.
+  const [receiptSaleId,    setReceiptSaleId]    = useState<number | null>(null)
+  const [receiptModalOpen, setReceiptModalOpen] = useState(false)
+  const [receiptModalAuto, setReceiptModalAuto] = useState(false)
   const [txnKey,        setTxnKey]        = useState<string>(() => uid())
 
   // ── drag fill ─────────────────────────────────────────────────────────────
@@ -810,6 +823,24 @@ export default function Workstation() {
       clearOriginSale()
       await refreshDrafts()
       flash(`Posted ${posted.sale_pid ?? 'sale'} successfully.`)
+
+      // Receipt printing (Phase 4): decide based on receipts_enabled + auto-print.
+      //   'none'   -> no print UI
+      //   'auto'   -> open the preview modal in auto-print mode (skips confirm)
+      //   'button' -> a Print Receipt button appears on the action row
+      const receiptAction = decideReceiptAction(shouldPrint, shouldAutoPrint)
+      if (receiptAction !== 'none') {
+        setReceiptSaleId(posted.sale_id)
+        if (receiptAction === 'auto') {
+          setReceiptModalAuto(true)
+          setReceiptModalOpen(true)
+        } else {
+          setReceiptModalAuto(false)
+        }
+      } else {
+        setReceiptSaleId(null)
+        setReceiptModalOpen(false)
+      }
     } catch (e: unknown) {
       flash(e instanceof Error ? e.message : 'Post failed', true)
     } finally {
@@ -1515,6 +1546,21 @@ export default function Workstation() {
               style={{ backgroundColor: 'var(--accent)' }}>
               Post
             </button>
+            {receiptSaleId != null && shouldPrint && !shouldAutoPrint && (
+              <button onClick={() => { setReceiptModalAuto(false); setReceiptModalOpen(true) }}
+                className="px-4 py-1.5 text-xs font-medium uppercase tracking-wide rounded border t-border
+                           t-bg-elevated hover:opacity-80 t-text-1 transition-colors">
+                Print Receipt
+              </button>
+            )}
+            {receiptModalOpen && receiptSaleId != null && (
+              <ReceiptPreviewModal
+                saleId={receiptSaleId}
+                tenantId={tenantId}
+                autoPrint={receiptModalAuto}
+                onClose={() => setReceiptModalOpen(false)}
+              />
+            )}
             {activeDraftId && (
               <button onClick={handleVoidDraft} disabled={loading}
                 className="px-4 py-1.5 text-xs font-medium uppercase tracking-wide rounded border border-red-900

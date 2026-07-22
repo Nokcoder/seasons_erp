@@ -8,17 +8,29 @@
 //
 // Requires: npm install react-to-print
 
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import { useReactToPrint } from 'react-to-print';
 import './print.css';
 
-export function PrintPreview({ settings, documentTitle = 'document', children }) {
+export function PrintPreview({ settings, documentTitle = 'document', autoPrint = false, onAfterPrint, children }) {
   const printRef = useRef(null);
+  const autoFiredRef = useRef(false);
 
   const handlePrint = useReactToPrint({
     contentRef: printRef,
     documentTitle,
+    onAfterPrint,
   });
+
+  // Auto-print path: fire the native print dialog once, as soon as the content
+  // is mounted, without waiting for a manual click. Guarded so it fires exactly
+  // once even across re-renders.
+  useEffect(() => {
+    if (autoPrint && !autoFiredRef.current && printRef.current) {
+      autoFiredRef.current = true;
+      handlePrint();
+    }
+  }, [autoPrint, handlePrint]);
 
   const cssVars = {
     '--print-margin-top': `${settings.margin.top}mm`,

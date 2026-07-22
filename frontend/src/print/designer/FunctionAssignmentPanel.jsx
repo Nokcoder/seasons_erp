@@ -10,13 +10,19 @@ import './designer.css';
 
 export function FunctionAssignmentPanel({ tenantId }) {
   const { templates, loaded: templatesLoaded } = useTemplateLibrary(tenantId);
-  const { assignments, loaded: assignmentsLoaded, assignTemplate } = useFunctionAssignments(tenantId);
+  const { assignments, loaded: assignmentsLoaded, assignTemplate, error, clearError } = useFunctionAssignments(tenantId);
 
   if (!templatesLoaded || !assignmentsLoaded) return <div className="designer-loading">Loading…</div>;
 
   return (
     <div className="function-assignment-panel">
       <h3>Where templates are used</h3>
+      {error && (
+        <div className="print-save-error" role="alert">
+          <span>⚠ {error}</span>
+          <button type="button" onClick={clearError} aria-label="Dismiss">×</button>
+        </div>
+      )}
       {KNOWN_FUNCTIONS.map((fn) => {
         const matching = templates.filter((t) => t.docType === fn.docType);
         return (

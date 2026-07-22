@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime, date
 from typing import Optional
+from uuid import UUID
 from sqlalchemy.orm import Session
 
 
@@ -17,6 +18,8 @@ def _serialize(obj) -> Optional[dict]:
             val = str(val)
         elif isinstance(val, (datetime, date)):
             val = val.isoformat()
+        elif isinstance(val, UUID):        # UUID PKs (e.g. print_templates)
+            val = str(val)
         elif hasattr(val, "value"):   # SQLAlchemy Enum
             val = val.value
         result[col.name] = val

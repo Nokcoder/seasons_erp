@@ -17,6 +17,7 @@ from procurement.router import router as procurement_router
 from ap.router import router as ap_router
 from sales.router import router as sales_router
 from settings.router import router as settings_router
+from settings.print_router import router as print_router
 from import_hub.router import router as import_router
 from tenancy.router import router as platform_router
 
@@ -320,6 +321,7 @@ app.include_router(procurement_router)
 app.include_router(ap_router)
 app.include_router(sales_router)
 app.include_router(settings_router)
+app.include_router(print_router)
 app.include_router(import_router)
 app.include_router(platform_router)
 

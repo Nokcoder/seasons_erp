@@ -23,6 +23,12 @@ from sales import models, schemas
 from inventory import models as inv_models
 from inventory.models import Location
 from settings.models import SystemSetting
+from tenancy.models import Tenant
+
+# Header label when a sale has no linked customer (Sale.customer_id is nullable —
+# walk-in / cash sales). Defined once here so the receipt pipeline and any future
+# caller share a single source of truth.
+WALKIN_CUSTOMER_NAME = "Walk-in Customer"
 
 
 def _normalize_search(q: str) -> str:
@@ -2678,6 +2684,79 @@ def get_sale_items(
     """
     loaded = _load_sale(sale_id, db)
     return loaded.items
+
+
+def _d(x) -> Decimal:
+    """Coerce a possibly-None Numeric column to Decimal('0') for the receipt payload."""
+    return x if x is not None else Decimal("0")
+
+
+@router.get("/{sale_id}/receipt-data", response_model=schemas.ReceiptData)
+def get_receipt_data(
+    sale_id: int,
+    db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_permission("view_sales_ledger")),
+):
+    """Normalized receipt payload (Phase 1 of the receipt-printing foundation):
+    a header summary plus collapsed line items, ready for the print pipeline.
+
+    Tenant-scoped implicitly: runs on get_db (RLS via SET LOCAL app.tenant_id) and
+    reuses _load_sale (which 404s on any sale outside the caller's tenant and
+    eager-loads items → variant → product). No manual tenant filtering.
+
+    Line items are grouped by (variant_id, unit_price, discount_pct, discount_flat)
+    — NOT variant_id alone. FIFO-layer splits of one line share that whole key and
+    collapse into one row; but the same variant sold on two cart lines at different
+    edited prices keeps distinct keys and stays two rows with exact, un-averaged
+    prices. (This is the bug in _collapse_items, which groups by variant_id and
+    takes first.unit_price.) brand/description/sku/pid are identical within a group
+    by construction — every row shares variant_id → the same Variant → the same
+    Product — so they are read from the first row of the group.
+    """
+    sale = _load_sale(sale_id, db)
+
+    # businessName: platform.tenants is not RLS'd; the sale is already tenant-scoped
+    # so sale.tenant_id is the caller's tenant.
+    tenant = db.query(Tenant).filter(Tenant.tenant_id == sale.tenant_id).first()
+
+    # customerName: walk-in / cash sales have no linked customer.
+    customer_name = sale.customer.customer_name if sale.customer else WALKIN_CUSTOMER_NAME
+
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for it in sale.items:
+        key = (it.variant_id, it.unit_price, it.discount_pct, it.discount_flat)
+        g = groups.get(key)
+        if g is None:
+            variant = it.variant
+            product = getattr(variant, "product", None) if variant else None
+            g = {
+                "qty": Decimal("0"),
+                "price": _d(it.unit_price),
+                "lineTotal": Decimal("0"),
+                "brand": product.brand if product else None,
+                "description": product.description if product else None,
+                "sku": variant.sku if variant else None,
+                "pid": variant.PID if variant else None,
+            }
+            groups[key] = g
+            order.append(key)
+        g["qty"] += _d(it.quantity)
+        g["lineTotal"] += _d(it.line_total)
+
+    line_items = [schemas.ReceiptLineItem(**groups[k]) for k in order]
+
+    header = schemas.ReceiptHeader(
+        date=sale.transaction_date,
+        customerName=customer_name,
+        grandTotal=_d(sale.grand_total),
+        subtotal=_d(sale.subtotal_amount),
+        tax=_d(sale.tax_amount),
+        receiptNo=sale.receipt_no,
+        salePid=sale.sale_pid,
+        businessName=tenant.name if tenant else None,
+    )
+    return schemas.ReceiptData(header=header, lineItems=line_items)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

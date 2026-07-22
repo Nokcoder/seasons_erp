@@ -736,3 +736,43 @@ class PaymentReversalRequest(BaseModel):
 class ReturnReversalRequest(BaseModel):
     """Payload for POST /sales/returns/{id}/reverse."""
     reversal_reason: str
+
+
+# ==========================================
+# RECEIPT DATA (print foundation — Phase 1)
+# ==========================================
+# Normalized contract consumed by the receipt-printing pipeline. Line items are
+# collapsed to one row per (variant_id, unit_price, discount_pct, discount_flat)
+# group, so FIFO-layer splits merge but genuinely different-priced lines of the
+# same variant stay distinct with exact per-row prices.
+
+# The header field is named `date`, which — with `from __future__ import
+# annotations` active — would shadow the imported `date` type during Pydantic's
+# forward-ref resolution (the `= None` default binds a class attribute `date`).
+# Reference the type via this alias so the annotation resolves correctly.
+_DateType = date
+
+class ReceiptLineItem(BaseModel):
+    qty: Decimal
+    price: Decimal
+    lineTotal: Decimal
+    brand: Optional[str] = None
+    description: Optional[str] = None
+    sku: Optional[str] = None
+    pid: Optional[str] = None
+
+
+class ReceiptHeader(BaseModel):
+    date: Optional[_DateType] = None
+    customerName: str
+    grandTotal: Decimal
+    subtotal: Decimal
+    tax: Decimal
+    receiptNo: Optional[str] = None
+    salePid: Optional[str] = None
+    businessName: Optional[str] = None
+
+
+class ReceiptData(BaseModel):
+    header: ReceiptHeader
+    lineItems: List[ReceiptLineItem]

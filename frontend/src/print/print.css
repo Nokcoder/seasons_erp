@@ -25,18 +25,30 @@
   font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
+/* Paginated model: TemplateRenderer emits N paper-sized .print-page sheets. The
+   root is just a transparent column that stacks them with a gap on screen. */
 .print-preview-canvas .print-root {
+  background: transparent;
+  width: auto;
+  min-height: 0;
+  box-shadow: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  font-size: var(--print-font-size);
+  color: #111827;
+}
+
+.print-page {
   background: #ffffff;
-  width: 210mm; /* visual approximation of A4; not load-bearing for actual print */
-  min-height: 297mm;
+  box-sizing: border-box;
   border-radius: 3px;
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.06),
     0 8px 24px rgba(15, 23, 42, 0.12);
-  padding: var(--print-margin-top) var(--print-margin-right) var(--print-margin-bottom)
-    var(--print-margin-left);
-  font-size: var(--print-font-size);
-  color: #111827;
+  flex-shrink: 0;
 }
 
 /* ---------- Actual print output ---------- */
@@ -55,10 +67,29 @@
     width: auto;
     min-height: 0;
     box-shadow: none;
-    padding: var(--print-margin-top) var(--print-margin-right) var(--print-margin-bottom)
-      var(--print-margin-left);
+    /* Paginated: positions are absolute mm on paper-sized pages, so the root has
+       no padding — @page margin is 0 and each .print-page is exactly paper-sized. */
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
     font-size: var(--print-font-size);
     color: #111827;
+  }
+
+  .print-page {
+    box-shadow: none;
+    border-radius: 0;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Force a page break after every sheet except the last (a trailing break would
+     emit a blank page). */
+  .print-page:not(:last-child) {
+    break-after: page;
+    page-break-after: always;
   }
 
   .print-table {

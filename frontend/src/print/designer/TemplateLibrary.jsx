@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import { useTemplateLibrary, PAPER_PRESETS_MM } from './useTemplateLibrary';
 import { TemplateDesigner } from './TemplateDesigner';
+import { ImportLocalTemplates } from './ImportLocalTemplates';
 import './designer.css';
 
 const DOC_TYPES = [
@@ -16,10 +17,19 @@ const DOC_TYPES = [
 ];
 
 export function TemplateLibrary({ tenantId }) {
-  const { templates, loaded, createTemplate, updateTemplate, duplicateTemplate, deleteTemplate } =
+  const { templates, loaded, error, clearError, reload, createTemplate, updateTemplate, duplicateTemplate, deleteTemplate } =
     useTemplateLibrary(tenantId);
   const [editingId, setEditingId] = useState(null);
   const [creatingDocType, setCreatingDocType] = useState('');
+
+  // A save/load failure must be visible to the admin — never a silent success.
+  // Rendered in both the library and the designer view (edits fail while editing).
+  const banner = error ? (
+    <div className="print-save-error" role="alert">
+      <span>⚠ {error}</span>
+      <button type="button" onClick={clearError} aria-label="Dismiss">×</button>
+    </div>
+  ) : null;
 
   if (!loaded) return <div className="designer-loading">Loading templates…</div>;
 
@@ -27,15 +37,20 @@ export function TemplateLibrary({ tenantId }) {
 
   if (editingTemplate) {
     return (
-      <TemplateDesigner
-        template={editingTemplate}
-        onChange={(patch) => updateTemplate(editingTemplate.id, patch)}
-        onClose={() => setEditingId(null)}
-      />
+      <>
+        {banner}
+        <TemplateDesigner
+          template={editingTemplate}
+          onChange={(patch) => updateTemplate(editingTemplate.id, patch)}
+          onClose={() => setEditingId(null)}
+        />
+      </>
     );
   }
 
   return (
+    <>
+    {banner}
     <div className="template-library">
       <div className="template-library__header">
         <h3>Print templates</h3>
@@ -70,6 +85,8 @@ export function TemplateLibrary({ tenantId }) {
           </button>
         </div>
       </div>
+
+      <ImportLocalTemplates tenantId={tenantId} onImported={reload} />
 
       {templates.length === 0 ? (
         <p className="template-library__empty">No templates yet — choose a type above and create one.</p>
@@ -108,5 +125,6 @@ export function TemplateLibrary({ tenantId }) {
         </table>
       )}
     </div>
+    </>
   );
 }

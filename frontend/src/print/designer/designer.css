@@ -58,6 +58,53 @@
   box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
 }
 
+.designer-toolbar__field--check {
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.designer-toolbar__field--check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.designer-warning {
+  padding: 8px 20px;
+  background: #fef3c7;
+  border-bottom: 1px solid #f59e0b;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Server save/load failure banner — makes a failed save impossible to miss. */
+.print-save-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 20px;
+  padding: 10px 14px;
+  background: #fee2e2;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  color: #991b1b;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+}
+
+.print-save-error button {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #991b1b;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
 .designer-toolbar__delete {
   background: none;
   border: 1px solid #f0997b;
@@ -145,10 +192,20 @@
 
 .designer-canvas-scroll {
   flex: 1;
+  /* Allow this flex item to shrink below the canvas's fixed content width
+     instead of forcing the row to overflow and collide with the palette /
+     inspector. Its own overflow:auto then handles the scrolling. */
+  min-width: 0;
   overflow: auto;
-  padding: 40px;
+  /* Generous padding doubles as the "bleed" area so elements dragged just off the
+     paper edge (for pre-printed-form alignment) stay visible and reachable. */
+  padding: 80px;
   display: flex;
-  justify-content: center;
+  /* NOTE: do NOT use justify-content:center here. With an oversized child that
+     would push the canvas's left edge outside the scroll origin, making it
+     unreachable. Auto-margins on .designer-canvas center it when it fits and
+     fall back to start-aligned + fully scrollable when it's wider than the
+     viewport. */
 }
 
 .designer-canvas {
@@ -160,6 +217,11 @@
     0 1px 2px rgba(15, 23, 42, 0.06),
     0 8px 24px rgba(15, 23, 42, 0.12);
   flex-shrink: 0;
+  /* Horizontal auto-margins center the canvas when it fits and collapse to 0
+     (start-aligned, fully scrollable) when it's wider than the scroll viewport.
+     Vertical margin stays 0 to preserve top alignment. Replaces the old
+     justify-content:center that clipped the left edge. */
+  margin: 0 auto;
 }
 
 .designer-element {
@@ -171,6 +233,14 @@
 .designer-element--selected {
   border: 1.5px solid var(--designer-accent);
   background: rgba(79, 70, 229, 0.06);
+}
+
+/* Element sits (partly) off the paper — it will clip at print. Outline, not
+   border, so it doesn't shift layout. */
+.designer-element--outside,
+.designer-row-band--outside {
+  outline: 2px solid #dc2626;
+  outline-offset: 1px;
 }
 
 .designer-block-placeholder {
@@ -186,22 +256,101 @@
   box-sizing: border-box;
 }
 
-.designer-block-placeholder--table {
-  flex-direction: column;
-  justify-content: flex-start;
-  align-items: stretch;
-  padding: 6px;
-  gap: 4px;
-}
+/* ---------- Line-item row band + cells ---------- */
 
-.designer-fake-row {
-  height: 8px;
+.designer-row-band {
+  position: absolute;
+  border: 1px dashed #94a3b8;
   border-radius: 2px;
-  background: #e2e8f0;
+  background: rgba(15, 118, 110, 0.04);
+  box-sizing: border-box;
 }
 
-.designer-fake-row--head {
-  background: #cbd5e1;
+.designer-row-band--selected {
+  border: 1.5px solid #0f766e;
+  background: rgba(15, 118, 110, 0.08);
+}
+
+/* The row's grab handle: a header tab floating just above the band. It is the
+   click-to-select target AND the drag handle (react-rnd dragHandleClassName),
+   so it's never occluded by cells the way the old bare-background click was. */
+.designer-row-band__handle {
+  position: absolute;
+  top: -17px;
+  left: -1px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 6px;
+  font-size: 10px;
+  line-height: 1;
+  color: #ffffff;
+  background: #0f766e;
+  border-radius: 4px 4px 0 0;
+  cursor: move;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.designer-row-band__handle--selected {
+  background: #0b5a54;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.35);
+}
+
+.designer-row-band__grip {
+  font-size: 11px;
+  letter-spacing: -1px;
+  opacity: 0.85;
+}
+
+/* Non-interactive outlines showing where repeated rows will land, now with faded
+   sample content so the repeat preview is truthful. */
+.designer-row-ghost {
+  position: absolute;
+  border: 1px dashed #cbd5e1;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.04);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.designer-row-ghost__cell {
+  position: absolute;
+  overflow: hidden;
+  white-space: nowrap;
+  box-sizing: border-box;
+  padding: 1px 2px;
+  line-height: 1.1;
+  opacity: 0.5;
+}
+
+.designer-cell {
+  border: 1px solid #cbd5e1;
+  border-radius: 2px;
+  background: rgba(15, 118, 110, 0.05);
+  box-sizing: border-box;
+}
+
+.designer-cell--selected {
+  border: 1.5px solid var(--designer-accent);
+  background: rgba(79, 70, 229, 0.08);
+}
+
+.designer-cell__label {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 1px 2px;
+  box-sizing: border-box;
+  color: var(--designer-text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.designer-text-wrap {
+  width: 100%;
+  height: 100%;
 }
 
 .designer-text-box {
@@ -220,6 +369,17 @@
   outline: none;
 }
 
+/* Header field cell: shows its resolved sample value; inert so the box drags. */
+.designer-field-content {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 2px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* ---------- Inspector ---------- */
 
 .designer-inspector {
@@ -228,6 +388,12 @@
   padding: 16px;
   border-left: 1px solid var(--designer-border);
   background: var(--designer-surface);
+  /* Scroll-contain the panel: a tall inspector (e.g. a cell's binding editor)
+     stays within its own column instead of overflowing .designer-body and
+     spilling the whole designer past its fixed 100% height. Mirrors the palette,
+     which is already overflow-y:auto. */
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .designer-inspector h4 {
@@ -237,6 +403,117 @@
   letter-spacing: 0.04em;
   color: var(--designer-text-muted);
   margin: 0 0 12px 0;
+}
+
+/* ---------- Cell binding editor (lineItemRow) ---------- */
+
+.designer-inspector__hint {
+  font-size: 11px;
+  color: var(--designer-text-muted);
+  margin: -6px 0 12px 0;
+  line-height: 1.4;
+}
+
+/* Selection-type banner at the top of the inspector — makes it unmistakable
+   whether you're editing the row, a specific cell, a text box, or a block. */
+.designer-inspector__kind {
+  display: block;
+  margin: 0 0 14px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.designer-inspector__kind--row {
+  background: #0f766e;
+}
+
+.designer-inspector__kind--cell {
+  background: var(--designer-accent);
+}
+
+.designer-inspector__kind--element {
+  background: #475569;
+}
+
+.designer-inspector__add-cell {
+  display: block;
+  width: 100%;
+  margin: 8px 0 4px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--designer-accent);
+  border-radius: 6px;
+  background: rgba(79, 70, 229, 0.06);
+  color: var(--designer-accent);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.designer-inspector__add-cell:hover {
+  background: rgba(79, 70, 229, 0.12);
+}
+
+.designer-binding-editor {
+  border-left: 2px solid var(--designer-border);
+  padding-left: 8px;
+  margin: 0 0 10px 0;
+}
+
+.designer-binding-editor__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.designer-binding-editor__row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--designer-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--designer-surface);
+  color: var(--designer-text);
+}
+
+.designer-binding-editor__row button {
+  flex-shrink: 0;
+  background: var(--designer-surface);
+  border: 1px solid var(--designer-border);
+  border-radius: 6px;
+  padding: 4px 7px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--designer-text-muted);
+}
+
+.designer-binding-editor__row button:hover {
+  border-color: var(--designer-accent);
+}
+
+.designer-binding-editor__add {
+  background: none;
+  border: 1px dashed var(--designer-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--designer-text-muted);
+  cursor: pointer;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.designer-binding-editor__add:hover {
+  border-color: var(--designer-accent);
+  color: var(--designer-accent);
 }
 
 .designer-toolbar__preview-print {
@@ -295,6 +572,29 @@
 
 .template-preview-modal__bar button:hover {
   border-color: #4f46e5;
+}
+
+/* Per-device print calibration controls in the receipt preview bar. */
+.receipt-cal {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.receipt-cal label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.receipt-cal input {
+  width: 52px;
+  padding: 3px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  font-size: 12px;
 }
 
 .template-preview-modal__body {
@@ -439,6 +739,88 @@
 .designer-toolbar__back:hover {
   background: #e2e8f0;
   color: #0f172a;
+}
+
+/* ---------- Import local templates (one-time migration) ---------- */
+
+.template-import {
+  margin: 0 0 16px 0;
+}
+
+.template-import__btn {
+  background: #ffffff;
+  border: 1px dashed #4f46e5;
+  color: #4f46e5;
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.template-import__btn:hover {
+  background: rgba(79, 70, 229, 0.06);
+}
+
+.template-import__panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: #f8fafc;
+}
+
+.template-import__panel h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.template-import__summary {
+  font-size: 13px;
+  color: #334155;
+  margin: 6px 0;
+}
+
+.template-import__list {
+  margin: 6px 0 10px 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.template-import__muted {
+  color: #64748b;
+}
+
+.template-import__errors {
+  color: #991b1b;
+}
+
+.template-import__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.template-import__actions button {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.template-import__confirm {
+  background: #4f46e5 !important;
+  border-color: #4f46e5 !important;
+  color: #ffffff !important;
+}
+
+.template-import__confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ---------- Function assignment panel ---------- */

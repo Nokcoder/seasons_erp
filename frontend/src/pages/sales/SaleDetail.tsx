@@ -10,6 +10,8 @@ import {
   type Shift, type CashRegister, type CustomerOut, type PaymentMode,
   type SaleOut, type SalesReturnOut,
 } from '../../services/api'
+import { useTenantId } from '../../lib/tenant'
+import { ReceiptPreviewModal } from '../../print/designer/ReceiptPreviewModal'
 import * as XLSX from 'xlsx'
 import { jsonToFormattedSheet, MONEY_FORMAT, PCT_FORMAT } from '../../lib/xlsxMoney'
 
@@ -109,6 +111,8 @@ export default function SaleDetail() {
   }, [sale?.items, returnedByItemId])
 
   // ── void action ───────────────────────────────────────────────────────────
+  const tenantId = useTenantId()
+  const [showReceipt, setShowReceipt] = useState(false)
   const [showVoid,  setShowVoid]  = useState(false)
   const [voidReason,setVoidReason]= useState('')
   const [voiding,   setVoiding]   = useState(false)
@@ -204,6 +208,12 @@ export default function SaleDetail() {
             className="px-3 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
             Export XLSX
           </button>
+          {/* Reprint is a deliberate retrieval of history: always available,
+              independent of receipts_enabled and never auto-printed. */}
+          <button onClick={() => setShowReceipt(true)}
+            className="px-3 py-1 text-xs border t-border rounded t-text-2 hover:t-border-strong">
+            Reprint receipt
+          </button>
           {sale.status === 'Posted' && (
             <>
               <button onClick={() => navigate(`/sales/returns/new?sale_id=${sid}`)}
@@ -227,6 +237,13 @@ export default function SaleDetail() {
             </>
           )}
         </div>
+        {showReceipt && (
+          <ReceiptPreviewModal
+            saleId={sid}
+            tenantId={tenantId}
+            onClose={() => setShowReceipt(false)}
+          />
+        )}
       </div>
 
       {/* header */}

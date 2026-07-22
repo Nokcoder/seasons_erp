@@ -42,6 +42,7 @@ const get  = <T>(path: string)                => request<T>('GET',    path)
 const post = <T>(path: string, body?: unknown) => request<T>('POST',   path, body)
 const patch= <T>(path: string, body?: unknown) => request<T>('PATCH',  path, body)
 const del  = <T>(path: string)                => request<T>('DELETE', path)
+const put  = <T>(path: string, body?: unknown) => request<T>('PUT',    path, body)
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 
@@ -570,7 +571,19 @@ export interface PaymentModePatch  { name?: string; is_physical?: boolean; is_ac
 
 // ── SALES API ─────────────────────────────────────────────────────────────────
 
+export interface ReceiptLineItem {
+  qty: string; price: string; lineTotal: string
+  brand: string | null; description: string | null; sku: string | null; pid: string | null
+}
+export interface ReceiptHeader {
+  date: string | null; customerName: string
+  grandTotal: string; subtotal: string; tax: string
+  receiptNo: string | null; salePid: string | null; businessName: string | null
+}
+export interface ReceiptData { header: ReceiptHeader; lineItems: ReceiptLineItem[] }
+
 export const salesApi = {
+  receiptData: (saleId: number) => get<ReceiptData>(`/sales/${saleId}/receipt-data`),
   shifts: {
     list:   ()                                  => get<Shift[]>('/sales/shifts'),
     create: (p: ShiftCreate)                    => post<Shift>('/sales/shifts', p),
@@ -1183,12 +1196,77 @@ export interface InventoryPolicy {
   updated_by_username:   string | null
 }
 
+export interface ReceiptsSetting {
+  receipts_enabled:    boolean
+  updated_at:          string | null
+  updated_by_user_id:  number | null
+  updated_by_username: string | null
+}
+
+export interface ReceiptsAutoPrintSetting {
+  receipts_auto_print: boolean
+  updated_at:          string | null
+  updated_by_user_id:  number | null
+  updated_by_username: string | null
+}
+
 export const settingsApi = {
   inventoryPolicy: {
     get:   ()                                        => get<InventoryPolicy>('/settings/inventory-policy'),
     patch: (p: { allow_negative_stock: boolean })    => patch<InventoryPolicy>('/settings/inventory-policy', p),
   },
+  receipts: {
+    get:   ()                                => get<ReceiptsSetting>('/settings/receipts'),
+    patch: (p: { receipts_enabled: boolean }) => patch<ReceiptsSetting>('/settings/receipts', p),
+  },
+  receiptsAutoPrint: {
+    get:   ()                                   => get<ReceiptsAutoPrintSetting>('/settings/receipts-auto-print'),
+    patch: (p: { receipts_auto_print: boolean }) => patch<ReceiptsAutoPrintSetting>('/settings/receipts-auto-print', p),
+  },
   storeName: () => get<{ key: string; value: string }>('/settings/system-settings/store_name'),
+}
+
+// ── PRINT TEMPLATES (server-side storage) ─────────────────────────────────────
+
+export interface PrintTemplateRow {
+  template_id: string
+  name: string
+  doc_type: string
+  template: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  created_by_user_id: number | null
+  updated_by_user_id: number | null
+  is_deleted: boolean
+}
+
+export interface FunctionAssignmentRow {
+  function_key: string
+  template_id: string | null
+  updated_at: string | null
+}
+
+export interface ResolvedTemplate {
+  assigned: boolean
+  template: PrintTemplateRow | null
+}
+
+export const printApi = {
+  templates: {
+    list:   ()          => get<PrintTemplateRow[]>('/print/templates'),
+    get:    (id: string) => get<PrintTemplateRow>(`/print/templates/${id}`),
+    create: (b: { name: string; doc_type: string; template: unknown; template_id?: string }) =>
+      post<PrintTemplateRow>('/print/templates', b),
+    patch:  (id: string, b: { name?: string; doc_type?: string; template?: unknown }) =>
+      patch<PrintTemplateRow>(`/print/templates/${id}`, b),
+    remove: (id: string) => del<void>(`/print/templates/${id}`),
+  },
+  functions: {
+    list:    ()          => get<FunctionAssignmentRow[]>('/print/functions'),
+    assign:  (key: string, template_id: string | null) =>
+      put<FunctionAssignmentRow>(`/print/functions/${key}`, { template_id }),
+    resolve: (key: string) => get<ResolvedTemplate>(`/print/functions/${key}/template`),
+  },
 }
 
 // ── STOCK MOVEMENT TYPES ──────────────────────────────────────────────────────
