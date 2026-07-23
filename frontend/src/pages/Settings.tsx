@@ -1411,10 +1411,155 @@ function decodeTenantId(token: string): string {
   }
 }
 
+function ReceiptPrintingSettingsPanel() {
+  const qc = useQueryClient()
+  const { data: receipts, isLoading: rLoading, isFetching: rFetching } = useQuery({
+    queryKey: qk.receiptsSetting(),
+    queryFn: settingsApi.receipts.get,
+    ...stale.reference,
+  })
+  const { data: autoPrint, isLoading: aLoading, isFetching: aFetching } = useQuery({
+    queryKey: qk.receiptsAutoPrint(),
+    queryFn: settingsApi.receiptsAutoPrint.get,
+    ...stale.reference,
+  })
+  const [savingReceipts, setSavingReceipts] = useState(false)
+  const [savingAuto, setSavingAuto] = useState(false)
+
+  async function toggleReceipts(value: boolean) {
+    setSavingReceipts(true)
+    try {
+      await settingsApi.receipts.patch({ receipts_enabled: value })
+      await qc.invalidateQueries({ queryKey: qk.receiptsSetting() })
+    } finally {
+      setSavingReceipts(false)
+    }
+  }
+
+  async function toggleAutoPrint(value: boolean) {
+    setSavingAuto(true)
+    try {
+      await settingsApi.receiptsAutoPrint.patch({ receipts_auto_print: value })
+      await qc.invalidateQueries({ queryKey: qk.receiptsAutoPrint() })
+    } finally {
+      setSavingAuto(false)
+    }
+  }
+
+  // Backend defaults when no row exists yet: receipts enabled, auto-print off.
+  const enabled = receipts?.receipts_enabled ?? true
+  const auto    = autoPrint?.receipts_auto_print ?? false
+  const isLoading  = rLoading || aLoading
+  const isFetching = rFetching || aFetching
+
+  return (
+    <div>
+      <FetchingBar show={isFetching && !isLoading} />
+      <p className="text-xs t-text-2 mb-6">
+        Tenant-wide receipt printing behavior at checkout. Per-terminal overrides
+        (set on each device) take precedence over these.
+      </p>
+
+      <SubHead title="Receipt Printing" />
+
+      {isLoading ? (
+        <div className="h-16 t-bg-elevated rounded animate-pulse" />
+      ) : (
+        <div className="space-y-4">
+          <div className="t-bg-elevated border t-border rounded-lg p-4 max-w-lg">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold t-text-1">
+                  <Tooltip
+                    underline={false}
+                    content="The tenant-wide master switch for receipt printing at checkout."
+                    note="Reprinting from a sale's detail page stays available regardless — it is a deliberate retrieval of history, not checkout printing.">
+                    Enable Receipt Printing
+                  </Tooltip>
+                </p>
+                <p className="text-[11px] t-text-3 mt-1 leading-relaxed max-w-sm">
+                  When off, no Print Receipt button or auto-print appears after posting a
+                  sale on any terminal (unless a terminal forces it on locally).
+                </p>
+              </div>
+              {/* Toggle switch */}
+              <button
+                onClick={() => toggleReceipts(!enabled)}
+                disabled={savingReceipts}
+                className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${enabled ? '' : 't-bg-input border t-border-strong'}`}
+                style={enabled ? { backgroundColor: 'var(--accent)' } : undefined}
+                aria-label="Toggle receipt printing"
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <span className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${enabled ? 'bg-emerald-950 text-emerald-500' : 't-bg-input border t-border t-text-3'}`}>
+                {enabled ? 'On' : 'Off'}
+              </span>
+              {receipts?.updated_at && (
+                <span className="text-[10px] t-text-4">
+                  Last updated {new Date(receipts.updated_at).toLocaleString()}
+                  {receipts.updated_by_username ? ` by ${receipts.updated_by_username}` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* De-emphasized (not disabled) while the master switch is off — the
+              setting can still be flipped, it just has no effect until then. */}
+          <div className={`t-bg-elevated border t-border rounded-lg p-4 max-w-lg transition-opacity ${enabled ? '' : 'opacity-50'}`}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold t-text-1">
+                  <Tooltip
+                    underline={false}
+                    content="Skips the confirm-preview step: the native print dialog opens as soon as the sale posts."
+                    note="Only takes effect while Enable Receipt Printing is on.">
+                    Auto-Print on Sale Completion
+                  </Tooltip>
+                </p>
+                <p className="text-[11px] t-text-3 mt-1 leading-relaxed max-w-sm">
+                  When on, a completed sale opens the print dialog immediately instead of
+                  showing a Print Receipt button.
+                  {!enabled && ' Has no effect while receipt printing is off.'}
+                </p>
+              </div>
+              {/* Toggle switch */}
+              <button
+                onClick={() => toggleAutoPrint(!auto)}
+                disabled={savingAuto}
+                className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${auto ? '' : 't-bg-input border t-border-strong'}`}
+                style={auto ? { backgroundColor: 'var(--accent)' } : undefined}
+                aria-label="Toggle auto-print on sale completion"
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${auto ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <span className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${auto ? 'bg-emerald-950 text-emerald-500' : 't-bg-input border t-border t-text-3'}`}>
+                {auto ? 'On' : 'Off'}
+              </span>
+              {autoPrint?.updated_at && (
+                <span className="text-[10px] t-text-4">
+                  Last updated {new Date(autoPrint.updated_at).toLocaleString()}
+                  {autoPrint.updated_by_username ? ` by ${autoPrint.updated_by_username}` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PrintTemplatesTab() {
   const { token } = useAuth()
   const tenantId = token ? decodeTenantId(token) : 'unknown-tenant'
-  const [view, setView] = useState<'library' | 'assignments'>('library')
+  const [view, setView] = useState<'library' | 'assignments' | 'printing'>('library')
 
   return (
     <div>
@@ -1435,10 +1580,20 @@ function PrintTemplatesTab() {
         >
           Assignments
         </button>
+        <button
+          onClick={() => setView('printing')}
+          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+            view === 'printing' ? 't-text-1 border-[var(--accent)]' : 't-text-3 border-transparent hover:t-text-2'
+          }`}
+        >
+          Printing
+        </button>
       </div>
       {view === 'library'
         ? <TemplateLibrary tenantId={tenantId} />
-        : <FunctionAssignmentPanel tenantId={tenantId} />}
+        : view === 'assignments'
+        ? <FunctionAssignmentPanel tenantId={tenantId} />
+        : <ReceiptPrintingSettingsPanel />}
     </div>
   )
 }
