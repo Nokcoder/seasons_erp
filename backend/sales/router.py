@@ -2695,7 +2695,7 @@ def _d(x) -> Decimal:
 def get_receipt_data(
     sale_id: int,
     db: Session = Depends(get_db),
-    _actor: AuthUser = Depends(require_permission("view_sales_ledger")),
+    _actor: AuthUser = Depends(require_permission("print_receipts")),
 ):
     """Normalized receipt payload (Phase 1 of the receipt-printing foundation):
     a header summary plus collapsed line items, ready for the print pipeline.

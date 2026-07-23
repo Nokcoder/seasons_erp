@@ -207,6 +207,10 @@ Do not run any git commands. Never stage, commit, or push. All version control i
   does NOT re-run on backend restart. A newly added `action_key` will NOT
   automatically appear on existing ADMIN roles. Must be manually granted
   via Settings → Roles → ADMIN → Permissions after adding any new action.
+- Concretely: `manage_print_templates` AND `print_receipts` both post-date
+  early tenants — on any tenant created before they existed, they must be
+  manually granted (to ADMIN, and `print_receipts` to CASHIER /
+  STORE_MANAGER or receipt printing 403s at checkout).
 
 ## Print module architecture
 
@@ -217,5 +221,11 @@ Do not run any git commands. Never stage, commit, or push. All version control i
   named trigger points (currently only `'salesReceipt'`) mapped to whichever
   template is currently assigned. Adding a new function (e.g. a kitchen
   ticket) means adding an entry to `KNOWN_FUNCTIONS`, not a redesign.
-- Access gated behind the `'manage_print_templates'` permission, under
-  Settings → Print Templates.
+- Template editing (library + assignments + receipt toggles) is gated behind
+  the `'manage_print_templates'` permission, under Settings → Print Templates.
+- Actually PRINTING a receipt is a separate permission: `'print_receipts'`
+  (under the POS Workstation program) gates `GET /sales/{id}/receipt-data` —
+  the sole data source for both the Workstation post-sale print flow and
+  SaleDetail's "Reprint receipt". It is deliberately NOT tied to
+  `view_sales_ledger` anymore; having ledger access no longer implies print
+  access, and cashiers can print without ledger access.

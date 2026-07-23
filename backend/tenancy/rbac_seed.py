@@ -118,6 +118,7 @@ def seed_roles_for_tenant(tenant_id: int, db: Session) -> None:
     ])
     _grant_actions(db, tenant_id, "STORE_MANAGER", [
         "process_sale", "process_returns", "process_blind_returns", "apply_discount",
+        "print_receipts",
         "view_sales_ledger", "export_sales",
         "view_returns", "export_returns",
         "view_inventory",
@@ -134,7 +135,7 @@ def seed_roles_for_tenant(tenant_id: int, db: Session) -> None:
 
     # ── CASHIER ──────────────────────────────────────────────────────────────
     _grant_programs(db, tenant_id, "CASHIER", ["sales_workstation"])
-    _grant_actions(db, tenant_id, "CASHIER", ["process_sale", "process_returns"])
+    _grant_actions(db, tenant_id, "CASHIER", ["process_sale", "process_returns", "print_receipts"])
 
 
 def seed_defaults_for_tenant(tenant_id: int, db: Session) -> None:

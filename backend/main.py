@@ -220,6 +220,7 @@ def _seed_programs_and_actions():
             ("process_returns",        "Process Returns",          "sales_workstation"),
             ("process_blind_returns",  "Process Blind Returns",    "sales_workstation"),
             ("apply_discount",         "Apply Discount",           "sales_workstation"),
+            ("print_receipts",         "Print Receipts",           "sales_workstation"),
             ("view_sales_ledger",      "View Sales Ledger",        "sales_ledger"),
             ("export_sales",           "Export Sales",             "sales_ledger"),
             ("view_returns",           "View Returns",             "sales_returns"),

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-23 — Receipt printing decoupled from `view_sales_ledger` (`print_receipts` permission)
+
+`GET /sales/{sale_id}/receipt-data` — the sole data source for both the Workstation
+post-sale print flow and SaleDetail's "Reprint receipt" — was gated on
+`view_sales_ledger`, so a CASHIER (process_sale/process_returns only) got a Print
+Receipt button that always 403'd, and STORE_MANAGER printed only as a side effect of
+ledger access. The endpoint now requires a dedicated **`print_receipts`** action
+(seeded under the **sales_workstation** program, so it renders as a toggleable
+checkbox under POS Workstation in the Permission Matrix — CASHIER already has that
+program). `tenancy/rbac_seed.py` grants it to **CASHIER** and **STORE_MANAGER** for
+new tenants; ADMIN keeps the tenant-creation wildcard.
+
+**Existing tenants (deploy note):** per the established seeding rules, a new
+`action_key` is never backfilled onto existing roles — `print_receipts` must be
+manually granted via Settings → Roles (ADMIN, CASHIER, STORE_MANAGER, and any custom
+role that should print) or receipt printing 403s at checkout after this deploys. No
+data migration; catalog row appears on next backend startup. `view_sales_ledger` no
+longer implies print capability anywhere; `manage_print_templates` (template editing
++ receipt toggles) is unchanged and remains a separate axis.
+
 ## 2026-07-22 — Print templates moved to the database (server-side, shared across terminals)
 
 Templates and function assignments moved off device-local `platformStore` into the
